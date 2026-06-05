@@ -50,6 +50,20 @@ The output is written beside the trip folder contents as:
 trips/YYYYMM_tripName/expense_review_YYYYMM_tripName.xlsx
 ```
 
+## Reviewing the workbook
+
+The generated workbook has three editable sheets:
+
+- `expense_list`: one row per receipt file.
+- `expense_line_items`: extracted receipt line items, including alcohol flags.
+- `card_statements`: normalized card statement rows where you can edit `expense_id` to match transactions to receipts.
+
+In `expense_list`, `number_of_person` defaults to `1` and should be reviewed. `corrected_amount_in_currency` is the receipt line-item total minus alcohol, divided by `number_of_person`. `corrected_CAD` is also per person: it applies the CAD statement rate to that corrected per-person amount.
+
+`CAD_amount_statement` is calculated from `card_statements` using the editable `expense_id` column. If it shows `0.00`, no matching statement value has been found yet, and the cell is highlighted red until a matching statement row is assigned.
+
+For alcohol, you can either mark existing line items as `is_alcohol = TRUE`, or edit the automatically created `Alcohol adjustment - manual` line for that receipt. The adjustment line starts at `0.00` and is there so you can enter an alcohol amount when OCR/LLM missed or grouped the drink lines.
+
 ## Optional OpenAI fallback
 
 The tool runs OCR and heuristics first. If you want low-confidence receipts to fall back to an OpenAI structured extraction pass, configure a local `.env`:

@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 from openpyxl import Workbook
+from openpyxl.formatting.rule import CellIsRule
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -119,6 +120,10 @@ def write_expense_sheet(ws, expenses: list[Expense]) -> None:
         validation.errorTitle = "Invalid number of persons"
         ws.add_data_validation(validation)
         validation.add(f"I2:I{len(expenses) + 1}")
+        ws.conditional_formatting.add(
+            f"K2:K{len(expenses) + 1}",
+            CellIsRule(operator="equal", formula=["0"], fill=REVIEW_FILL, font=REVIEW_FONT),
+        )
     for col in ["E", "F", "J", "K", "M"]:
         for cell in ws[col][1:]:
             if cell.value is not None:
