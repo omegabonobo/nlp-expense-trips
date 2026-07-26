@@ -56,15 +56,18 @@ from nlp_expenses.statement_normalizer import set_statement_date_convention
 from nlp_expenses.trip_metadata import (
     save_policy_exception,
     save_trip_metadata,
+    trip_metadata,
     validate_trip_metadata,
 )
 from nlp_expenses.trips import trip_mode
 from nlp_expenses.ui_services import (
+    change_trip_claim_program,
     change_trip_mode,
     create_trip,
     open_workbook,
     remove_source_file,
     resolve_trip,
+    resolve_manifest,
     resolve_workbook,
     reveal_in_finder,
     store_upload,
@@ -182,15 +185,17 @@ def create_app(root: Path, access_token: str | None = None, job_manager: JobMana
         metadata = data.get("metadata", {})
         if not isinstance(metadata, dict):
             raise ValueError("Trip metadata must be submitted as an object.")
+        claim_program = str(data.get("claim_program", "")).lower()
+        metadata["claim_program"] = claim_program
         validate_trip_metadata(metadata)
         trip = create_trip(
             root,
             str(data.get("month", "")),
             str(data.get("description", "")),
-            str(data.get("mode", "arvine")).lower(),
+            claim_program=claim_program,
         )
         if metadata:
-            save_trip_metadata(trip, metadata)
+            save_trip_metadata(trip, {**trip_metadata(trip), **metadata})
         return jsonify({"trip": trip_details(root, trip.name)}), 201
 
     @app.post("/api/trips/<trip_name>/mode")
@@ -198,6 +203,17 @@ def create_app(root: Path, access_token: str | None = None, job_manager: JobMana
         data = request.get_json(silent=True) or {}
         with jobs.mutation_guard(trip_name):
             change_trip_mode(root, trip_name, str(data.get("mode", "")).lower())
+        return jsonify({"trip": trip_details(root, trip_name)})
+
+    @app.post("/api/trips/<trip_name>/claim-program")
+    def update_claim_program(trip_name: str):
+        data = request.get_json(silent=True) or {}
+        with jobs.mutation_guard(trip_name):
+            change_trip_claim_program(
+                root,
+                trip_name,
+                str(data.get("claim_program", "")).lower(),
+            )
         return jsonify({"trip": trip_details(root, trip_name)})
 
     @app.post("/api/trips/<trip_name>/upload/<kind>")
@@ -256,6 +272,11 @@ def create_app(root: Path, access_token: str | None = None, job_manager: JobMana
         if not isinstance(metadata, dict):
             raise ValueError("Trip metadata must be submitted as an object.")
         with jobs.mutation_guard(trip_name):
+            claim_program = str(metadata.get("claim_program") or "")
+            if claim_program:
+                change_trip_claim_program(root, trip_name, claim_program)
+                if claim_program == "ivado_sponsored" and not metadata.get("sponsor"):
+                    metadata["sponsor"] = "IVADO Labs"
             save_trip_metadata(resolve_trip(root, trip_name), metadata)
         return jsonify(
             {
@@ -580,6 +601,11 @@ def create_app(root: Path, access_token: str | None = None, job_manager: JobMana
     @app.get("/api/trips/<trip_name>/download-workbook")
     def download_workbook(trip_name: str):
         path = resolve_workbook(root, trip_name, request.args.get("filename", ""))
+        return send_file(path, as_attachment=True, download_name=path.name)
+
+    @app.get("/api/trips/<trip_name>/download-manifest")
+    def download_manifest(trip_name: str):
+        path = resolve_manifest(root, trip_name, request.args.get("filename", ""))
         return send_file(path, as_attachment=True, download_name=path.name)
 
     @app.get("/api/trips/<trip_name>/download-package")

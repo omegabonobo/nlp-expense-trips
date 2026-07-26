@@ -13,9 +13,11 @@ from nlp_expenses.line_items import (
     line_item_review_view,
     reset_receipt_review,
     save_line_item_review,
+    set_expense_review,
     set_line_item_review,
 )
 from nlp_expenses.models import Expense, LineItem, NormalizedTransaction
+from nlp_expenses.trip_metadata import save_trip_metadata
 from nlp_expenses.trips import ensure_trip
 from nlp_expenses.workbook import build_arvine_workbook, build_workbook
 
@@ -52,6 +54,80 @@ def meal_expense(path: Path) -> Expense:
 
 
 class LineItemReviewTests(unittest.TestCase):
+    def test_default_payer_override_survives_rescan_and_reset_restores_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202607_payer", mode="arvine")
+            save_trip_metadata(
+                trip,
+                {
+                    "claim_program": "arvine_only",
+                    "default_paid_by": "arvine_corporate_bmo",
+                    "payer_confirmed": True,
+                },
+            )
+            receipt = trip / "expenses_receipts" / "meal.pdf"
+            receipt.write_bytes(b"meal")
+            expense = meal_expense(receipt)
+            save_line_item_review(trip, [expense])
+            self.assertEqual(
+                line_item_review_view(trip)["receipts"][0]["paid_by"],
+                "arvine_corporate_bmo",
+            )
+
+            set_expense_review(trip, receipt.name, {"paid_by": "employee_personal"})
+            save_line_item_review(trip, [meal_expense(receipt)])
+            rescanned = line_item_review_view(trip)["receipts"][0]
+            self.assertEqual(rescanned["paid_by"], "employee_personal")
+            self.assertTrue(rescanned["paid_by_overridden"])
+
+            reset = reset_receipt_review(trip, receipt.name)["receipts"][0]
+            self.assertEqual(reset["paid_by"], "arvine_corporate_bmo")
+            self.assertFalse(reset["paid_by_overridden"])
+
+            save_trip_metadata(
+                trip,
+                {
+                    "claim_program": "arvine_only",
+                    "default_paid_by": "employee_personal",
+                    "payer_confirmed": True,
+                },
+            )
+            updated_default = line_item_review_view(trip)["receipts"][0]
+            self.assertEqual(updated_default["paid_by"], "employee_personal")
+            self.assertEqual(updated_default["auto_paid_by"], "employee_personal")
+
+    def test_whole_receipt_ivado_exclusion_keeps_a_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202607_receipt_exclusion", mode="ivado")
+            receipt = trip / "expenses_receipts" / "meal.pdf"
+            receipt.write_bytes(b"meal")
+            save_line_item_review(trip, [meal_expense(receipt)])
+
+            excluded = set_expense_review(
+                trip,
+                receipt.name,
+                {
+                    "included_in_arvine": True,
+                    "included_in_ivado": False,
+                    "ivado_exclusion_reason": "non_business",
+                },
+            )["receipts"][0]
+            self.assertFalse(excluded["included_in_ivado"])
+            self.assertEqual(excluded["ivado_exclusion_reason"], "non_business")
+
+            restored = set_expense_review(
+                trip,
+                receipt.name,
+                {
+                    "included_in_ivado": True,
+                    "ivado_exclusion_reason": "non_business",
+                },
+            )["receipts"][0]
+            self.assertTrue(restored["included_in_ivado"])
+            self.assertIsNone(restored["ivado_exclusion_reason"])
+
     def test_summary_excludes_zero_value_manual_alcohol_placeholder(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

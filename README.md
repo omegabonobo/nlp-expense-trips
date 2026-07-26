@@ -1,13 +1,20 @@
 # NLP Expenses
 
 Local-first Mac app and compatible CLI for reviewing trip receipts, reconciling
-card statements, finalizing claims, and exporting editable CAD expense
-workbooks.
+card statements, finalizing claims, and exporting a synchronized reimbursement
+package.
 
-The tool has two independent modes:
+The app separates two decisions that must not be conflated:
 
-- `ivado` preserves the original customer-expense workflow, including receipt line items and alcohol removal.
-- `arvine` preserves the full receipt and statement evidence, then prepares Canadian bookkeeping fields, proportional reviewed exclusions, tax recovery, journal entries, and statement reconciliation.
+- **Claim program:** `arvine_only` or `ivado_sponsored`.
+- **Receipt payer:** `employee_personal` or `arvine_corporate_bmo`, with a
+  trip default and receipt-level exceptions.
+
+Arvine reimbursement eligibility and IVADO eligibility are also reviewed
+separately. For example, alcohol can remain in the employee's Arvine
+reimbursement while being explicitly excluded from the IVADO sponsor claim.
+The saved `arvine` / `ivado` processing mode remains as an internal compatibility
+adapter for extraction, statement handling, and the legacy CLI.
 
 ## Local Mac interface
 
@@ -24,7 +31,7 @@ From the interface you can:
 - upload receipt scans and bank/card exports directly;
 - automatically refresh when receipt or statement files are added, changed, or
   removed directly in Finder, with a manual **Refresh files** fallback;
-- edit receipt fields, whole-expense inclusion, person count, and extracted lines; add/remove manual lines; reactivate or deactivate any item; and correct its alcohol classification;
+- edit receipt fields, payer, Arvine/IVADO eligibility, person count, and extracted lines; add/remove manual lines; reactivate or deactivate any item; and correct its alcohol classification;
 - validate Arvine statement files before generation;
 - sync either mode against normalized statement transactions, review the calculated CAD exchange rate, and save manual mapping overrides;
 - correct extracted invoice fields, document manual CAD amounts, resolve duplicates, and split charges/refunds/personal portions;
@@ -32,9 +39,38 @@ From the interface you can:
 - configure trip metadata, policy controls, and versioned accounting/tax assumptions;
 - choose receipt extraction once—Best quality with a locally stored OpenAI API key or Basic/offline—and reuse that choice for reconciliation and Excel;
 - review a blocking issue queue, per-expense CAD/FX results, and the Arvine accounting preview, then explicitly finalize the current claim;
-- generate versioned Excel workbooks without overwriting earlier manual work;
+- generate a versioned Arvine report, the shared manifest, and an IVADO claim
+  adapter when the trip is sponsored, without overwriting earlier manual work;
 - open the result in Excel, reveal it in Finder, or download it from the local page;
 - approve a reviewed version, export a hashed consolidation ZIP, and archive or restore completed trips.
+
+### Reimbursement report bundle
+
+The UI compiles one canonical reviewed dataset and uses it for every output:
+
+- `expense_review_<trip>_arvine_<timestamp>.xlsx` is always the primary
+  reimbursement/accounting report. It contains `Report`, `Expense Lines`,
+  `Receipt Lines`, `Accounting Rows`, `Settlement`, and formula-driven
+  `Checks` sheets.
+- `trip-reimbursement-manifest.v2.ndjson` is the machine-readable shared
+  contract consumed by `arvine-accounting-expenses`.
+- `expense_review_<trip>_ivado_<timestamp>.xlsx` is added only for
+  `ivado_sponsored` trips. It is a contract-backed claim adapter and visibly
+  carries the configured template version and claimant instruction.
+
+The approval record hashes the entire generated bundle, not only one workbook.
+The approved ZIP includes source receipts/statements, review state, every
+generated artifact, and `approval-manifest.json`. The manifest enforces these
+controls within a CAD 0.02 tolerance:
+
+- reviewed trip total = employee reimbursement + corporate-paid;
+- for sponsored trips, reviewed trip total = IVADO claim + IVADO exclusions;
+- receipt detail totals = report totals;
+- accounting components = employee reimbursement.
+
+Until the current official IVADO template and claimant identity are confirmed,
+the app presents a warning and marks the adapter metadata as unconfirmed rather
+than silently claiming official-template compliance.
 
 Closing the launcher Terminal window stops the local interface. No files are uploaded anywhere except when Best quality sends receipt content to the OpenAI API.
 

@@ -23,6 +23,7 @@ from nlp_expenses.workbook import build_arvine_workbook
 class TripMetadataTests(unittest.TestCase):
     def complete_metadata(self) -> dict:
         return {
+            "claim_program": "arvine_only",
             "traveller": "Florent",
             "company": "Arvine Inc.",
             "start_date": "2026-07-01",
@@ -34,6 +35,8 @@ class TripMetadataTests(unittest.TestCase):
             "cost_centre": "CONSULTING",
             "approver": "Reviewer",
             "payment_method": "Corporate card",
+            "default_paid_by": "arvine_corporate_bmo",
+            "payer_confirmed": True,
             "policy_profile": "standard",
             "expected_accounts": ["AMEX 1234"],
             "policy": {

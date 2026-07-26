@@ -86,8 +86,9 @@ document.getElementById("new-trip-form")?.addEventListener("submit", async event
       body: JSON.stringify({
         month: form.get("month"),
         description: form.get("description"),
-        mode: form.get("mode"),
+        claim_program: form.get("claim_program"),
         metadata: {
+          claim_program: form.get("claim_program"),
           traveller: form.get("traveller"),
           start_date: form.get("start_date"),
           end_date: form.get("end_date"),
@@ -109,7 +110,13 @@ document.getElementById("trip-metadata-form")?.addEventListener("submit", async 
   };
   const metadata = {
     traveller: data.get("traveller"),
+    traveller_identifier: data.get("traveller_identifier"),
     company: data.get("company"),
+    company_identifier: data.get("company_identifier"),
+    sponsor: data.get("sponsor"),
+    sponsor_identifier: data.get("sponsor_identifier"),
+    claim_program: data.get("claim_program"),
+    report_date: data.get("report_date"),
     start_date: data.get("start_date"),
     end_date: data.get("end_date"),
     origins: splitList("origins"),
@@ -119,6 +126,23 @@ document.getElementById("trip-metadata-form")?.addEventListener("submit", async 
     cost_centre: data.get("cost_centre"),
     approver: data.get("approver"),
     payment_method: data.get("payment_method"),
+    default_paid_by: data.get("default_paid_by"),
+    payer_confirmed: data.has("payer_confirmed"),
+    ivado_template_version: data.get("ivado_template_version"),
+    ivado_claimant_instruction: data.get("ivado_claimant_instruction"),
+    ivado_claimant_confirmed: data.has("ivado_claimant_confirmed"),
+    settlement: {
+      employee_reimbursement: {
+        status: data.get("employee_settlement_status"),
+        payment_date: data.get("employee_payment_date"),
+        payment_reference: data.get("employee_payment_reference")
+      },
+      sponsor_reimbursement: {
+        status: data.get("sponsor_settlement_status"),
+        payment_date: data.get("sponsor_payment_date"),
+        payment_reference: data.get("sponsor_payment_reference")
+      }
+    },
     policy_profile: data.get("policy_profile"),
     expected_accounts: splitList("expected_accounts"),
     policy_exceptions: state.selected?.metadata?.policy_exceptions || {},
@@ -239,17 +263,17 @@ document.getElementById("accounting-form")?.addEventListener("submit", async eve
   } catch (failure) { error.textContent = failure.message; }
 });
 
-document.getElementById("mode-select")?.addEventListener("change", async event => {
-  if (!window.confirm("Switch this trip's workbook format? Existing files and workbooks will stay in place.")) {
-    event.target.value = state.selected.mode;
+document.getElementById("claim-program-select")?.addEventListener("change", async event => {
+  if (!window.confirm("Change this trip's claim program? Existing files stay in place, but receipt review and finalization may need to be refreshed.")) {
+    event.target.value = state.selected.claim_program;
     return;
   }
   try {
-    await api(`/api/trips/${encodeURIComponent(selectedTrip)}/mode`, {
-      method: "POST", body: JSON.stringify({ mode: event.target.value })
+    await api(`/api/trips/${encodeURIComponent(selectedTrip)}/claim-program`, {
+      method: "POST", body: JSON.stringify({ claim_program: event.target.value })
     });
     window.location.reload();
-  } catch (failure) { toast(failure.message, true); event.target.value = state.selected.mode; }
+  } catch (failure) { toast(failure.message, true); event.target.value = state.selected.claim_program; }
 });
 
 async function uploadFiles(kind, files) {
@@ -359,7 +383,7 @@ async function updateLineItem(input, field) {
         fields: { [field]: input.checked }
       })
     });
-    toast(field === "included" ? "Line inclusion saved." : "Alcohol classification saved.");
+    toast(field.startsWith("included") ? "Line inclusion saved." : "Alcohol classification saved.");
     window.location.reload();
   } catch (failure) {
     input.checked = !input.checked;
@@ -368,8 +392,11 @@ async function updateLineItem(input, field) {
   }
 }
 
-document.querySelectorAll(".line-item-included").forEach(input => {
-  input.addEventListener("change", () => updateLineItem(input, "included"));
+document.querySelectorAll(".line-item-arvine").forEach(input => {
+  input.addEventListener("change", () => updateLineItem(input, "included_in_arvine"));
+});
+document.querySelectorAll(".line-item-ivado").forEach(input => {
+  input.addEventListener("change", () => updateLineItem(input, "included_in_ivado"));
 });
 document.querySelectorAll(".line-item-alcohol").forEach(input => {
   input.addEventListener("change", () => updateLineItem(input, "is_alcohol"));
@@ -379,6 +406,7 @@ document.querySelectorAll(".save-line-item").forEach(button => button.addEventLi
   const selector = `[data-source-file="${CSS.escape(button.dataset.sourceFile)}"][data-line-id="${CSS.escape(button.dataset.lineId)}"]`;
   const description = document.querySelector(`.line-item-description${selector}`)?.value || "";
   const amount = document.querySelector(`.line-item-amount${selector}`)?.value || "";
+  const ivadoExclusionReason = document.querySelector(`.line-item-ivado-reason${selector}`)?.value || "";
   button.disabled = true;
   try {
     await api(`/api/trips/${encodeURIComponent(selectedTrip)}/line-items/item`, {
@@ -386,7 +414,7 @@ document.querySelectorAll(".save-line-item").forEach(button => button.addEventLi
       body: JSON.stringify({
         source_file: button.dataset.sourceFile,
         line_id: button.dataset.lineId,
-        fields: { description, amount }
+        fields: { description, amount, ivado_exclusion_reason: ivadoExclusionReason }
       })
     });
     toast("Receipt line saved.");
@@ -706,7 +734,7 @@ const expenseFields = [
   "date", "vendor", "description", "expense_type", "amount", "currency", "country", "province",
   "subtotal", "gst_hst", "qst", "gst_hst_number", "qst_number", "business_purpose",
   "attendees_client", "tax_documentation_status", "review_note", "number_of_people",
-  "manual_cad_override", "manual_cad_note"
+  "manual_cad_override", "manual_cad_note", "paid_by", "ivado_exclusion_reason"
 ];
 
 function clearExpenseErrors() {
@@ -733,7 +761,8 @@ document.querySelectorAll(".edit-expense").forEach(button => button.addEventList
   const form = document.getElementById("expense-review-form");
   clearExpenseErrors();
   form.elements.source_file.value = receipt.source_file;
-  form.elements.included.checked = receipt.included !== false;
+  form.elements.included_in_arvine.checked = receipt.included_in_arvine !== false;
+  form.elements.included_in_ivado.checked = receipt.included_in_ivado !== false;
   for (const field of expenseFields) form.elements[field].value = receipt[field] ?? "";
   document.getElementById("expense-dialog-title").textContent = receipt.vendor || receipt.source_file;
   openDialog("expense-dialog");
@@ -751,7 +780,8 @@ document.getElementById("expense-review-form")?.addEventListener("submit", async
   const form = event.target;
   const data = new FormData(form);
   const fields = Object.fromEntries(expenseFields.map(field => [field, data.get(field)]));
-  fields.included = data.has("included");
+  fields.included_in_arvine = data.has("included_in_arvine");
+  fields.included_in_ivado = data.has("included_in_ivado");
   clearExpenseErrors();
   try {
     await saveExpenseFields(data.get("source_file"), fields);
@@ -765,8 +795,11 @@ document.getElementById("restore-expense-button")?.addEventListener("click", asy
   const receipt = reviewedReceipt(form.elements.source_file.value);
   if (!receipt?.extracted || !window.confirm("Restore the extracted expense fields? Line-item choices will remain.")) return;
   const fields = Object.fromEntries(
-    [...expenseFields, "included"].map(field => [field, receipt.extracted[field]])
+    expenseFields.map(field => [field, receipt.extracted[field]])
   );
+  fields.paid_by = receipt.auto_paid_by ?? receipt.paid_by ?? "employee_personal";
+  fields.included_in_arvine = receipt.extracted.included_in_arvine ?? true;
+  fields.included_in_ivado = receipt.extracted.included_in_ivado ?? true;
   clearExpenseErrors();
   try {
     await saveExpenseFields(receipt.source_file, fields);

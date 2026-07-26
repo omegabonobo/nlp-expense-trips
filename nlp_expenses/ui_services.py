@@ -20,7 +20,13 @@ from nlp_expenses.generator import SUPPORTED_RECEIPTS
 from nlp_expenses.lifecycle import list_packages, trip_lifecycle
 from nlp_expenses.line_items import line_item_review_view
 from nlp_expenses.statement_normalizer import preflight_statement_files
-from nlp_expenses.trip_metadata import required_metadata_gaps, trip_metadata
+from nlp_expenses.trip_metadata import (
+    CLAIM_PROGRAMS,
+    required_metadata_gaps,
+    save_trip_metadata,
+    trip_metadata,
+)
+from nlp_expenses.trip_manifest import CONTRACT_FILENAME
 from nlp_expenses.trips import (
     TRIP_MODES,
     ensure_trip,
@@ -59,14 +65,31 @@ def create_trip_name(month: str, description: str) -> str:
     return name
 
 
-def create_trip(root: Path, month: str, description: str, mode: str = "arvine") -> Path:
+def create_trip(
+    root: Path,
+    month: str,
+    description: str,
+    mode: str = "arvine",
+    claim_program: str | None = None,
+) -> Path:
+    if claim_program is not None and claim_program not in CLAIM_PROGRAMS:
+        raise ValueError("Choose either Arvine only or IVADO sponsored.")
+    if claim_program:
+        mode = "ivado" if claim_program == "ivado_sponsored" else "arvine"
     if mode not in TRIP_MODES:
         raise ValueError("Choose either Arvine or IVADO mode.")
     name = create_trip_name(month, description)
     trip = root.resolve() / "trips" / name
     if trip.exists():
         raise FileExistsError(f"A trip named {name} already exists.")
-    return ensure_trip(root.resolve(), name, mode=mode)
+    trip = ensure_trip(root.resolve(), name, mode=mode)
+    if claim_program:
+        metadata = trip_metadata(trip)
+        metadata["claim_program"] = claim_program
+        if claim_program == "ivado_sponsored" and not metadata["sponsor"]:
+            metadata["sponsor"] = "IVADO Labs"
+        save_trip_metadata(trip, metadata)
+    return trip
 
 
 def resolve_trip(root: Path, name: str) -> Path:
@@ -87,6 +110,18 @@ def change_trip_mode(root: Path, name: str, mode: str) -> None:
     save_trip_mode(resolve_trip(root, name), mode)
 
 
+def change_trip_claim_program(root: Path, name: str, claim_program: str) -> None:
+    if claim_program not in CLAIM_PROGRAMS:
+        raise ValueError("Choose either Arvine only or IVADO sponsored.")
+    trip = resolve_trip(root, name)
+    metadata = trip_metadata(trip)
+    metadata["claim_program"] = claim_program
+    if claim_program == "ivado_sponsored" and not metadata["sponsor"]:
+        metadata["sponsor"] = "IVADO Labs"
+    save_trip_metadata(trip, metadata)
+    save_trip_mode(trip, "ivado" if claim_program == "ivado_sponsored" else "arvine")
+
+
 def trip_summaries(root: Path, include_archived: bool = False) -> list[dict]:
     summaries = []
     for trip in reversed(list_trips(root.resolve())):
@@ -98,6 +133,7 @@ def trip_summaries(root: Path, include_archived: bool = False) -> list[dict]:
                 "name": trip.name,
                 "label": trip_label(trip.name),
                 "mode": trip_mode(trip),
+                "claim_program": trip_metadata(trip).get("claim_program") or "",
                 "archived": archived,
                 "receipt_count": len(list_source_files(trip_receipts_dir(trip))),
                 "statement_count": len(list_source_files(trip_statements_dir(trip))),
@@ -128,6 +164,7 @@ def trip_details(root: Path, name: str) -> dict:
         "name": trip.name,
         "label": trip_label(trip.name),
         "mode": selected_mode,
+        "claim_program": trip_metadata(trip).get("claim_program") or "",
         "metadata": trip_metadata(trip),
         "metadata_gaps": required_metadata_gaps(trip),
         "accounting_profile": trip_accounting_profile(root, trip),
@@ -140,6 +177,7 @@ def trip_details(root: Path, name: str) -> dict:
             {**file_details(path), "validation": statement_reports.get(path.name)} for path in statements
         ],
         "workbooks": [file_details(path) for path in list_workbooks(trip)],
+        "manifests": [file_details(path) for path in list_manifests(trip)],
         "packages": [file_details(path) for path in list_packages(trip)],
         "statement_errors": [
             error for report in statement_reports.values() for error in report["errors"]
@@ -252,6 +290,19 @@ def list_workbooks(trip: Path) -> list[Path]:
         key=lambda path: (path.stat().st_mtime, path.name),
         reverse=True,
     )
+
+
+def list_manifests(trip: Path) -> list[Path]:
+    path = trip / CONTRACT_FILENAME
+    return [path] if path.is_file() else []
+
+
+def resolve_manifest(root: Path, trip_name: str, filename: str) -> Path:
+    trip = resolve_trip(root, trip_name)
+    target = safe_child(trip, filename)
+    if target not in list_manifests(trip):
+        raise FileNotFoundError("Reimbursement manifest was not found in the selected trip.")
+    return target
 
 
 def resolve_workbook(root: Path, trip_name: str, filename: str) -> Path:

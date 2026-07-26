@@ -80,7 +80,7 @@
           {% for trip in state.trips %}
             <a class="trip-item {{ 'active' if state.selected and state.selected.name == trip.name else '' }}" href="/?trip={{ trip.name|urlencode }}{% if state.show_archived %}&archived=1{% endif %}">
               <strong>{{ trip.label }}</strong>
-              <span>{{ 'ARCHIVED · ' if trip.archived else '' }}{{ trip.mode|upper }} · {{ trip.receipt_count }} receipts · {{ trip.statement_count }} statements</span>
+              <span>{{ 'ARCHIVED · ' if trip.archived else '' }}{{ 'IVADO sponsored' if trip.claim_program == 'ivado_sponsored' else 'Arvine only' if trip.claim_program == 'arvine_only' else 'Program not confirmed' }} · {{ trip.receipt_count }} receipts · {{ trip.statement_count }} statements</span>
             </a>
           {% endfor %}
         </div>
@@ -111,10 +111,11 @@
             <h2>{{ trip.label }}</h2>
           </div>
           <div class="mode-field">
-            <label for="mode-select">Processing mode</label>
-            <select id="mode-select" class="select" data-trip="{{ trip.name }}" {{ 'disabled' if trip_busy else '' }}>
-              <option value="arvine" {{ 'selected' if trip.mode == 'arvine' else '' }}>Arvine</option>
-              <option value="ivado" {{ 'selected' if trip.mode == 'ivado' else '' }}>IVADO</option>
+            <label for="claim-program-select">Claim program</label>
+            <select id="claim-program-select" class="select" data-trip="{{ trip.name }}" {{ 'disabled' if trip_busy else '' }}>
+              <option value="" {{ 'selected' if not trip.claim_program }}>Choose…</option>
+              <option value="arvine_only" {{ 'selected' if trip.claim_program == 'arvine_only' }}>Arvine only</option>
+              <option value="ivado_sponsored" {{ 'selected' if trip.claim_program == 'ivado_sponsored' }}>IVADO sponsored</option>
             </select>
             <span class="lifecycle-badge {{ trip.lifecycle.status }}">{{ trip.lifecycle.label }}</span>
           </div>
@@ -364,7 +365,8 @@
                       <span>
                         {{ receipt.source_file }} · {{ receipt.expense_type or 'type missing' }} · {{ receipt.currency or '' }} ·
                         {{ receipt.number_of_people }} {{ 'person' if receipt.number_of_people == 1 else 'people' }} ·
-                        {{ 'excluded from claim' if not receipt.included else 'included' }}
+                        {{ 'excluded by Arvine' if not receipt.included_in_arvine else
+                           'IVADO excluded' if not receipt.included_in_ivado else 'included in both' }}
                       </span>
                       {% if receipt.field_issues %}<small class="field-issue">{{ receipt.field_issues|join(' · ') }}</small>{% endif %}
                     </div>
@@ -380,16 +382,25 @@
                   </div>
                   <div class="line-item-table-wrap">
                     <table class="line-item-table">
-                      <thead><tr><th>Include</th><th>Receipt line</th><th>Amount</th><th>Alcohol</th><th>Detection</th><th></th></tr></thead>
+                      <thead><tr><th>Arvine</th><th>IVADO</th><th>Receipt line</th><th>Amount</th><th>Alcohol</th><th>IVADO reason / detection</th><th></th></tr></thead>
                       <tbody>
                         {% for item in receipt.line_items %}
-                          <tr class="{{ 'excluded' if not item.included else '' }}">
+                          <tr class="{{ 'excluded' if not item.included_in_arvine else '' }}">
                             <td>
-                              <label class="include-switch" title="{{ 'Included in claim' if item.included else 'Deactivated from claim' }}">
-                                <input type="checkbox" class="line-item-included"
+                              <label class="include-switch" title="Included in Arvine reimbursement">
+                                <input type="checkbox" class="line-item-arvine"
                                   data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
-                                  {{ 'checked' if item.included }} {{ 'disabled' if trip_busy or line_review.stale }}>
-                                <span>{{ 'Active' if item.included else 'Off' }}</span>
+                                  {{ 'checked' if item.included_in_arvine }} {{ 'disabled' if trip_busy or line_review.stale }}>
+                                <span>{{ 'Yes' if item.included_in_arvine else 'No' }}</span>
+                              </label>
+                            </td>
+                            <td>
+                              <label class="include-switch" title="Included in IVADO sponsor claim">
+                                <input type="checkbox" class="line-item-ivado"
+                                  data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                                  {{ 'checked' if item.included_in_ivado }}
+                                  {{ 'disabled' if trip_busy or line_review.stale or not item.included_in_arvine }}>
+                                <span>{{ 'Yes' if item.included_in_ivado else 'No' }}</span>
                               </label>
                             </td>
                             <td>
@@ -413,6 +424,14 @@
                               {% if item.alcohol_overridden %}<small>Corrected by user</small>{% endif %}
                             </td>
                             <td>
+                              <select class="select compact-input line-item-ivado-reason"
+                                data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                                {{ 'disabled' if trip_busy or line_review.stale or item.included_in_ivado }}>
+                                <option value="">No exclusion</option>
+                                {% for value in ['alcohol', 'non_business', 'policy_cap', 'missing_documentation', 'other'] %}
+                                  <option value="{{ value }}" {{ 'selected' if item.ivado_exclusion_reason == value }}>{{ value|replace('_', ' ')|title }}</option>
+                                {% endfor %}
+                              </select>
                               <span>{{ item.alcohol_reason or 'No alcohol evidence' }}</span>
                               {% if item.alcohol_matched_term %}<small>Matched “{{ item.alcohol_matched_term }}” · {{ (item.alcohol_confidence * 100)|round|int }}%</small>{% endif %}
                             </td>
@@ -426,7 +445,7 @@
                             </td>
                           </tr>
                         {% else %}
-                          <tr><td colspan="6" class="empty-line">No line items were extracted for this receipt. Add one manually.</td></tr>
+                          <tr><td colspan="7" class="empty-line">No line items were extracted for this receipt. Add one manually.</td></tr>
                         {% endfor %}
                       </tbody>
                     </table>
@@ -434,8 +453,9 @@
                   <div class="line-totals">
                     <span>Receipt {{ '%.2f'|format(receipt.receipt_total) if receipt.receipt_total is not none else '—' }}</span>
                     <span>Lines {{ '%.2f'|format(receipt.line_total) }}</span>
-                    <span>Included {{ '%.2f'|format(receipt.included_total) }}</span>
-                    <span>Excluded {{ '%.2f'|format(receipt.excluded_total) }}</span>
+                    <span>Arvine {{ '%.2f'|format(receipt.arvine_included_total) }}</span>
+                    <span>IVADO {{ '%.2f'|format(receipt.ivado_included_total) }}</span>
+                    <span>IVADO excluded {{ '%.2f'|format(receipt.ivado_excluded_total) }}</span>
                     {% if receipt.difference is not none and receipt.difference %}
                       <strong>Difference {{ '%+.2f'|format(receipt.difference) }}</strong>
                     {% endif %}
@@ -798,9 +818,14 @@
           </p>
 
           <div class="claim-summary">
-            <div><span>Claimable total</span><strong>{{ '%.2f'|format(consolidation.summary.claimable_cad) }} CAD</strong></div>
-            <div><span>Included expenses</span><strong>{{ consolidation.summary.included_expense_count }}/{{ consolidation.summary.expense_count }}</strong></div>
-            <div><span>Statement-backed</span><strong>{{ consolidation.summary.matched_expense_count }}</strong></div>
+            <div><span>Employee reimbursement</span><strong>{{ '%.2f'|format(consolidation.summary.employee_reimbursement_total_cad) }} CAD</strong></div>
+            <div><span>Corporate-paid</span><strong>{{ '%.2f'|format(consolidation.summary.corporate_paid_total_cad) }} CAD</strong></div>
+            {% if consolidation.claim_program == 'ivado_sponsored' %}
+              <div><span>IVADO claim</span><strong>{{ '%.2f'|format(consolidation.summary.ivado_claim_total_cad) }} CAD</strong></div>
+              <div><span>IVADO excluded</span><strong>{{ '%.2f'|format(consolidation.summary.ivado_excluded_total_cad) }} CAD</strong></div>
+            {% else %}
+              <div><span>Reviewed total</span><strong>{{ '%.2f'|format(consolidation.summary.reviewed_total_cad) }} CAD</strong></div>
+            {% endif %}
             <div class="{{ 'review' if consolidation.summary.blocking_count else '' }}"><span>Blocking issues</span><strong>{{ consolidation.summary.blocking_count }}</strong></div>
           </div>
 
@@ -821,7 +846,7 @@
           <div class="reconciliation-table-wrap result-ledger">
             <table class="reconciliation-table">
               <thead>
-                <tr><th>Expense</th><th>Claim basis</th><th>CAD and FX</th><th>Final claim</th><th>Status</th></tr>
+                <tr><th>Expense</th><th>Payer and basis</th><th>CAD and FX</th><th>Arvine result</th>{% if consolidation.claim_program == 'ivado_sponsored' %}<th>IVADO result</th>{% endif %}<th>Status</th></tr>
               </thead>
               <tbody>
                 {% for expense in consolidation.expenses %}
@@ -834,6 +859,7 @@
                     <td>
                       <strong>{{ '%.2f'|format(expense.claimable_original) }} {{ expense.currency or '' }}</strong>
                       <span>
+                        {{ expense.paid_by|replace('_', ' ')|title }} ·
                         {{ 'Excluded' if not expense.included else
                            ('Included lines ÷ ' + expense.number_of_people|string + (' people' if expense.number_of_people != 1 else ' person')) }}
                       </span>
@@ -853,11 +879,21 @@
                         <strong>CAD unavailable</strong>
                       {% endif %}
                     </td>
-                    <td><strong>{{ '%.2f CAD'|format(expense.claimable_cad) if expense.claimable_cad is not none else '—' }}</strong></td>
+                    <td>
+                      <strong>{{ '%.2f CAD'|format(expense.arvine_reimbursable_cad) if expense.arvine_reimbursable_cad is not none else '—' }}</strong>
+                      <span>Employee reimbursement</span>
+                      {% if expense.corporate_paid_cad %}<small>{{ '%.2f CAD'|format(expense.corporate_paid_cad) }} corporate-paid</small>{% endif %}
+                    </td>
+                    {% if consolidation.claim_program == 'ivado_sponsored' %}
+                      <td>
+                        <strong>{{ '%.2f CAD'|format(expense.ivado_claimable_cad) }}</strong>
+                        <span>Claim · {{ '%.2f CAD'|format(expense.ivado_excluded_cad) }} excluded</span>
+                      </td>
+                    {% endif %}
                     <td><span class="match-badge {{ 'ok' if expense.status == 'ready' else 'audit' if expense.status == 'excluded' else 'review' }}">{{ expense.status }}</span></td>
                   </tr>
                 {% else %}
-                  <tr><td colspan="5" class="empty-line">Scan receipts to calculate the claim.</td></tr>
+                  <tr><td colspan="{{ 6 if consolidation.claim_program == 'ivado_sponsored' else 5 }}" class="empty-line">Scan receipts to calculate the claim.</td></tr>
                 {% endfor %}
               </tbody>
             </table>
@@ -971,7 +1007,7 @@
 
           <button class="button primary large" id="generate-button" data-trip="{{ trip.name }}"
             {{ 'disabled' if trip_busy or not trip.receipts or trip.statement_errors or reconciliation_required or allocation_required or line_review_required or line_review_blocking or finalization_required else '' }}>
-            Export trip Excel file
+            Generate report bundle
           </button>
 
           <div id="job-panel" class="job-panel {{ '' if state.job else 'hidden' }}">
@@ -991,7 +1027,7 @@
           <div class="card-heading">
             <div>
               <p class="card-kicker">Output</p>
-              <h3>Generated workbooks</h3>
+              <h3>Generated report bundle</h3>
             </div>
             <span class="count-badge">{{ trip.workbooks|length }}</span>
           </div>
@@ -1010,6 +1046,17 @@
               </div>
             {% else %}
               <div class="empty"><p>No workbook generated yet.</p></div>
+            {% endfor %}
+            {% for manifest in trip.manifests %}
+              <div class="workbook-row">
+                <div>
+                  <strong>{{ manifest.name }}</strong>
+                  <span>Shared accounting contract · {{ (manifest.size / 1024)|round(1) }} KB</span>
+                </div>
+                <div class="button-group">
+                  <a class="button secondary" href="/api/trips/{{ trip.name|urlencode }}/download-manifest?filename={{ manifest.name|urlencode }}">Download</a>
+                </div>
+              </div>
             {% endfor %}
           </div>
         </section>
@@ -1039,7 +1086,10 @@
           {% if trip.lifecycle.current_generation %}
             <div class="notice info">
               <span>
-                Current workbook: <strong>{{ trip.lifecycle.current_generation.workbook }}</strong>
+                Current bundle: <strong>{{ trip.lifecycle.current_generation.workbook }}</strong>
+                {% if trip.lifecycle.current_generation.artifacts %}
+                  + {{ trip.lifecycle.current_generation.artifacts|length - 1 }} synchronized artifact(s)
+                {% endif %}
                 {% if trip.lifecycle.current_generation.manually_modified %} · manually updated after generation{% endif %}
               </span>
             </div>
@@ -1089,8 +1139,11 @@
       </div>
       <label class="field-label">Trip month<input class="input" name="month" type="month" required></label>
       <label class="field-label">Trip name<input class="input" name="description" placeholder="Montreal client meetings" required></label>
-      <label class="field-label">Processing mode
-        <select class="select full-width" name="mode"><option value="arvine">Arvine</option><option value="ivado">IVADO</option></select>
+      <label class="field-label">Claim program
+        <select class="select full-width" name="claim_program" required>
+          <option value="arvine_only">Arvine only</option>
+          <option value="ivado_sponsored">IVADO sponsored</option>
+        </select>
       </label>
       <details class="optional-trip-fields">
         <summary>Add traveller, dates and purpose</summary>
@@ -1142,7 +1195,19 @@
         <p class="help-text">These details explain the business trip, guide statement coverage, and are copied into generated workbooks.</p>
         <div class="form-grid">
           <label class="field-label">Traveller<input class="input" name="traveller" value="{{ metadata.traveller }}"></label>
+          <label class="field-label">Traveller identifier<input class="input" name="traveller_identifier" value="{{ metadata.traveller_identifier }}"></label>
           <label class="field-label">Company<input class="input" name="company" value="{{ metadata.company }}"></label>
+          <label class="field-label">Company identifier<input class="input" name="company_identifier" value="{{ metadata.company_identifier }}"></label>
+          <label class="field-label">Claim program
+            <select class="select" name="claim_program">
+              <option value="">Choose…</option>
+              <option value="arvine_only" {{ 'selected' if metadata.claim_program == 'arvine_only' }}>Arvine only</option>
+              <option value="ivado_sponsored" {{ 'selected' if metadata.claim_program == 'ivado_sponsored' }}>IVADO sponsored</option>
+            </select>
+          </label>
+          <label class="field-label">Report date<input class="input" name="report_date" type="date" value="{{ metadata.report_date }}"></label>
+          <label class="field-label">Sponsor legal name<input class="input" name="sponsor" value="{{ metadata.sponsor }}"></label>
+          <label class="field-label">Sponsor identifier<input class="input" name="sponsor_identifier" value="{{ metadata.sponsor_identifier }}"></label>
           <label class="field-label">Start date<input class="input" name="start_date" type="date" value="{{ metadata.start_date }}"></label>
           <label class="field-label">End date<input class="input" name="end_date" type="date" value="{{ metadata.end_date }}"></label>
           <label class="field-label">Origin(s)<input class="input" name="origins" value="{{ metadata.origins|join(', ') }}"></label>
@@ -1152,8 +1217,46 @@
           <label class="field-label">Cost centre<input class="input" name="cost_centre" value="{{ metadata.cost_centre }}"></label>
           <label class="field-label">Approver<input class="input" name="approver" value="{{ metadata.approver }}"></label>
           <label class="field-label">Payment / reimbursement method<input class="input" name="payment_method" value="{{ metadata.payment_method }}"></label>
+          <label class="field-label">Default receipt payer
+            <select class="select" name="default_paid_by">
+              <option value="employee_personal" {{ 'selected' if metadata.default_paid_by == 'employee_personal' }}>Employee personal</option>
+              <option value="arvine_corporate_bmo" {{ 'selected' if metadata.default_paid_by == 'arvine_corporate_bmo' }}>Arvine corporate BMO</option>
+            </select>
+          </label>
+          <label class="check-field span-2">
+            <input type="checkbox" name="payer_confirmed" {{ 'checked' if metadata.payer_confirmed }}>
+            <span>I confirmed the default payer and any receipt-level exceptions.</span>
+          </label>
           <label class="field-label">Policy profile<input class="input" name="policy_profile" value="{{ metadata.policy_profile }}"></label>
           <label class="field-label">Expected cards/accounts<input class="input" name="expected_accounts" value="{{ metadata.expected_accounts|join(', ') }}"></label>
+        </div>
+        <div class="manual-cad-panel policy-fields">
+          <div>
+            <strong>Settlement and IVADO handoff</strong>
+            <p>These fields make the employee and sponsor money movements explicit in the shared contract.</p>
+          </div>
+          <div class="form-grid">
+            <label class="field-label">Employee settlement status
+              <select class="select" name="employee_settlement_status">
+                {% for value in ['planned', 'approved', 'paid', 'reconciled'] %}<option value="{{ value }}" {{ 'selected' if metadata.settlement.employee_reimbursement.status == value }}>{{ value|title }}</option>{% endfor %}
+              </select>
+            </label>
+            <label class="field-label">Employee payment date<input class="input" name="employee_payment_date" type="date" value="{{ metadata.settlement.employee_reimbursement.payment_date }}"></label>
+            <label class="field-label span-2">Employee payment reference<input class="input" name="employee_payment_reference" value="{{ metadata.settlement.employee_reimbursement.payment_reference }}"></label>
+            <label class="field-label">Sponsor settlement status
+              <select class="select" name="sponsor_settlement_status">
+                {% for value in ['planned', 'approved', 'paid', 'reconciled'] %}<option value="{{ value }}" {{ 'selected' if metadata.settlement.sponsor_reimbursement.status == value }}>{{ value|title }}</option>{% endfor %}
+              </select>
+            </label>
+            <label class="field-label">Sponsor payment date<input class="input" name="sponsor_payment_date" type="date" value="{{ metadata.settlement.sponsor_reimbursement.payment_date }}"></label>
+            <label class="field-label span-2">Sponsor payment reference<input class="input" name="sponsor_payment_reference" value="{{ metadata.settlement.sponsor_reimbursement.payment_reference }}"></label>
+            <label class="field-label">IVADO template version<input class="input" name="ivado_template_version" value="{{ metadata.ivado_template_version }}"></label>
+            <label class="field-label span-2">IVADO claimant/payee instruction<input class="input" name="ivado_claimant_instruction" value="{{ metadata.ivado_claimant_instruction }}"></label>
+            <label class="check-field span-2">
+              <input type="checkbox" name="ivado_claimant_confirmed" {{ 'checked' if metadata.ivado_claimant_confirmed }}>
+              <span>IVADO confirmed that Arvine Labs is the claimant/payee.</span>
+            </label>
+          </div>
         </div>
         <div class="manual-cad-panel policy-fields">
           <div>
@@ -1192,16 +1295,17 @@
           <div><p class="eyebrow">Final review</p><h2>Approve trip package</h2></div>
           <button type="button" class="icon-button close-dialog">×</button>
         </div>
-        <p class="help-text">Approval records hashes of all sources, reconciliation decisions, policy/profile snapshots, and the selected workbook. Any later change reopens the trip.</p>
-        <label class="field-label">Workbook
-          <select class="select full-width" name="workbook" required>
-            {% for workbook in state.selected.workbooks %}
-              <option value="{{ workbook.name }}" {{ 'selected' if state.selected.lifecycle.current_generation and state.selected.lifecycle.current_generation.workbook == workbook.name else '' }}>
-                {{ workbook.name }}
-              </option>
-            {% endfor %}
-          </select>
-        </label>
+        <p class="help-text">Approval records hashes of all sources, review decisions, the Arvine report, optional IVADO report, and shared manifest. Any later change reopens the trip.</p>
+        {% if state.selected.lifecycle.current_generation %}
+          <input type="hidden" name="workbook" value="{{ state.selected.lifecycle.current_generation.workbook }}">
+          <div class="notice info">
+            Approving current bundle:
+            <strong>{{ state.selected.lifecycle.current_generation.workbook }}</strong>
+            {% if state.selected.lifecycle.current_generation.artifacts %}
+              + {{ state.selected.lifecycle.current_generation.artifacts|length - 1 }} synchronized artifact(s)
+            {% endif %}
+          </div>
+        {% endif %}
         <label class="field-label">Reviewer / approver<input class="input" name="reviewer" value="{{ state.selected.metadata.approver }}" required></label>
         <label class="field-label">Approval note<textarea class="input" name="note" rows="3" placeholder="Reviewed receipts, allocations, coverage and accounting assumptions." required></textarea></label>
         <p class="form-error" id="approval-error"></p>
@@ -1220,8 +1324,28 @@
       <input type="hidden" name="source_file">
       <div class="expense-claim-controls">
         <label class="confirmation">
-          <input type="checkbox" name="included">
-          <span>Include this expense in the claim</span>
+          <input type="checkbox" name="included_in_arvine">
+          <span>Include this expense in Arvine reimbursement</span>
+        </label>
+        <label class="confirmation">
+          <input type="checkbox" name="included_in_ivado">
+          <span>Include this expense in the IVADO claim</span>
+        </label>
+        <label class="field-label">IVADO exclusion reason
+          <select class="select" name="ivado_exclusion_reason">
+            <option value="">No exclusion</option>
+            {% for value in ['alcohol', 'non_business', 'policy_cap', 'missing_documentation', 'other'] %}
+              <option value="{{ value }}">{{ value|replace('_', ' ')|title }}</option>
+            {% endfor %}
+          </select>
+          <small class="field-error" data-error-for="ivado_exclusion_reason"></small>
+        </label>
+        <label class="field-label">Paid by
+          <select class="select" name="paid_by">
+            <option value="employee_personal">Employee personal</option>
+            <option value="arvine_corporate_bmo">Arvine corporate BMO</option>
+          </select>
+          <small class="field-error" data-error-for="paid_by"></small>
         </label>
         <label class="field-label">People sharing this expense
           <input class="input" name="number_of_people" type="number" min="1" max="99" step="1" required>

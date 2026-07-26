@@ -1,5 +1,17 @@
 # R016 — Two-stage trip reimbursement and inter-project contract
 
+## Implementation status
+
+**Field-test ready; official IVADO template confirmation remains.**
+
+The app now implements the independent claim-program and payer controls, dual
+Arvine/IVADO eligibility, canonical calculations, report-bundle generation,
+contract `2.0.0` NDJSON validation, explicit settlement legs, synchronized
+artifact approval, and producer/consumer compatibility tests. The generated
+IVADO workbook is intentionally labelled as a contract-backed adapter until the
+current official bilingual template and Arvine claimant/payee instruction are
+confirmed.
+
 ## Decision
 
 Keep `nlp-expenses` and `arvine-accounting-expenses` as separate projects.

@@ -188,7 +188,9 @@ class JobManager:
 
     def _run(self, job_id: str, trip: Path, statements_complete: bool) -> None:
         mode = trip_mode(trip)
-        output_path = versioned_output_path(trip, mode)
+        # The primary artifact is always the Arvine reimbursement/accounting
+        # report. Sponsored trips add a sibling IVADO claim adapter.
+        output_path = versioned_output_path(trip, "arvine")
         self._update(
             job_id,
             status="running",
@@ -207,6 +209,7 @@ class JobManager:
                 progress_callback=lambda event: self._progress(job_id, event),
                 warning_callback=lambda warning: self._warning(job_id, warning),
                 allow_openai_prompt=False,
+                contract_bundle=True,
             )
             if result is None:
                 raise RuntimeError("Generation was cancelled before the workbook was created.")

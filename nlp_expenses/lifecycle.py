@@ -70,20 +70,45 @@ def review_input_snapshot(root: Path, trip_dir: Path) -> dict:
 
 
 def record_generated_workbook(root: Path, trip_dir: Path, workbook: Path) -> dict:
-    workbook = workbook.resolve()
-    if workbook.parent != trip_dir.resolve() or not workbook.is_file():
+    return record_generated_bundle(root, trip_dir, workbook, [workbook])
+
+
+def record_generated_bundle(
+    root: Path,
+    trip_dir: Path,
+    primary_workbook: Path,
+    artifacts: list[Path],
+) -> dict:
+    """Record every generated artifact that must stay synchronized for approval."""
+
+    primary_workbook = primary_workbook.resolve()
+    if primary_workbook.parent != trip_dir.resolve() or not primary_workbook.is_file():
         raise ValueError("Generated workbook must be inside the selected trip.")
+    resolved_artifacts: list[Path] = []
+    for path in artifacts:
+        resolved = path.resolve()
+        if resolved.parent != trip_dir.resolve() or not resolved.is_file():
+            raise ValueError("Generated artifacts must be files inside the selected trip.")
+        if resolved not in resolved_artifacts:
+            resolved_artifacts.append(resolved)
+    if primary_workbook not in resolved_artifacts:
+        resolved_artifacts.insert(0, primary_workbook)
+
     snapshot = review_input_snapshot(root, trip_dir)
     record = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "input_fingerprint": snapshot["fingerprint"],
-        "workbook_sha256_at_generation": file_sha256(workbook),
+        "workbook_sha256_at_generation": file_sha256(primary_workbook),
+        "artifacts": [
+            artifact_entry(trip_dir, path, generated_artifact_kind(path, primary_workbook))
+            for path in resolved_artifacts
+        ],
     }
     config = load_trip_config(trip_dir)
     generated = config.get("generated_workbooks", {})
     if not isinstance(generated, dict):
         generated = {}
-    generated[workbook.name] = record
+    generated[primary_workbook.name] = record
     config["generated_workbooks"] = generated
     save_trip_config(trip_dir, config)
     return record
@@ -115,14 +140,16 @@ def approve_trip(
     reconciliation_summary = approval_reconciliation_check(trip_dir)
     approved_at = datetime.now().isoformat(timespec="seconds")
     approval_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    generated_artifacts = generation_artifacts(trip_dir, workbook, generation)
     manifest = {
-        "manifest_version": 1,
+        "manifest_version": 2,
         "trip": trip_dir.name,
         "approval_id": approval_id,
         "approved_at": approved_at,
         "reviewer": reviewer,
         "note": note,
         "workbook": artifact_entry(trip_dir, workbook, "workbook"),
+        "generated_artifacts": generated_artifacts,
         "review_inputs": current_inputs,
         "accounting_profile": trip_accounting_profile(root, trip_dir),
         "trip_metadata": trip_metadata(trip_dir),
@@ -200,6 +227,15 @@ def approval_is_current(root: Path, trip_dir: Path, manifest: dict | None = None
         return False
     if not workbook.is_file() or file_sha256(workbook) != workbook_entry.get("sha256"):
         return False
+    for entry in manifest.get("generated_artifacts", []):
+        if not isinstance(entry, dict):
+            return False
+        try:
+            artifact = safe_trip_child(trip_dir, str(entry.get("path") or ""))
+        except ValueError:
+            return False
+        if not artifact.is_file() or file_sha256(artifact) != entry.get("sha256"):
+            return False
     return (
         review_input_snapshot(root, trip_dir).get("fingerprint")
         == manifest.get("review_inputs", {}).get("fingerprint")
@@ -257,6 +293,7 @@ def current_generation_record(root: Path, trip_dir: Path) -> dict | None:
                 "current_workbook_sha256": file_sha256(workbook),
                 "manually_modified": (
                     file_sha256(workbook) != record.get("workbook_sha256_at_generation")
+                    or not generated_artifacts_are_current(trip_dir, record)
                 ),
             }
         )
@@ -292,14 +329,24 @@ def export_approved_package(root: Path, trip_dir: Path) -> Path:
                 if entry.get("kind")
                 in {"receipt", "statement", "reconciliation", "line_item_review", "statement_settings"}
             ]
-            paths.append(safe_trip_child(trip_dir, manifest["workbook"]["path"]))
+            generated_entries = manifest.get("generated_artifacts") or [manifest["workbook"]]
+            paths.extend(
+                safe_trip_child(trip_dir, str(entry["path"]))
+                for entry in generated_entries
+                if isinstance(entry, dict) and entry.get("path")
+            )
             config_path = trip_dir / ".nlp-expenses.json"
             if config_path.is_file():
                 paths.append(config_path)
-            for path in paths:
+            unique_paths = list(dict.fromkeys(path.resolve() for path in paths))
+            for path in unique_paths:
                 archive.write(path, path.resolve().relative_to(trip_dir.resolve()).as_posix())
             archive.writestr(
                 "manifest.json",
+                json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+            )
+            archive.writestr(
+                "approval-manifest.json",
                 json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
             )
         os.replace(temporary, target)
@@ -337,8 +384,59 @@ def approval_view(root: Path, trip_dir: Path, manifest: dict | None) -> dict | N
         "reviewer": manifest.get("reviewer"),
         "note": manifest.get("note"),
         "workbook": Path(str(workbook.get("path") or "")).name,
+        "artifacts": [
+            {
+                "kind": entry.get("kind"),
+                "name": Path(str(entry.get("path") or "")).name,
+            }
+            for entry in manifest.get("generated_artifacts", [])
+            if isinstance(entry, dict)
+        ],
         "current": approval_is_current(root, trip_dir, manifest),
     }
+
+
+def generation_artifacts(trip_dir: Path, workbook: Path, generation: dict) -> list[dict]:
+    entries = generation.get("artifacts")
+    if not isinstance(entries, list) or not entries:
+        return [artifact_entry(trip_dir, workbook, "arvine_report")]
+    result = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("Regenerate the report bundle before approval.")
+        artifact = safe_trip_child(trip_dir, str(entry.get("path") or ""))
+        if not artifact.is_file():
+            raise ValueError("A generated report artifact is missing. Regenerate before approval.")
+        if artifact != workbook and file_sha256(artifact) != entry.get("sha256"):
+            raise ValueError("A generated report artifact changed. Regenerate before approval.")
+        result.append(artifact_entry(trip_dir, artifact, str(entry.get("kind") or "generated")))
+    return result
+
+
+def generated_artifacts_are_current(trip_dir: Path, generation: dict) -> bool:
+    entries = generation.get("artifacts")
+    if not isinstance(entries, list) or not entries:
+        return True
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return False
+        try:
+            artifact = safe_trip_child(trip_dir, str(entry.get("path") or ""))
+        except ValueError:
+            return False
+        if not artifact.is_file() or file_sha256(artifact) != entry.get("sha256"):
+            return False
+    return True
+
+
+def generated_artifact_kind(path: Path, primary_workbook: Path) -> str:
+    if path == primary_workbook:
+        return "arvine_report"
+    if path.suffix.lower() == ".ndjson":
+        return "reimbursement_manifest"
+    if path.suffix.lower() == ".xlsx" and "ivado" in path.name.lower():
+        return "ivado_report"
+    return "generated"
 
 
 def artifact_entry(trip_dir: Path, path: Path, kind: str) -> dict:

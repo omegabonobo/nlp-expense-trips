@@ -3,11 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from nlp_expenses.accounting import trip_accounting_profile
 from nlp_expenses.config import ask_openai_for_run, get_openai_settings, prompt_for_openai_if_missing
 from nlp_expenses.extraction.arvine import parse_arvine_receipt
 from nlp_expenses.extraction.receipts import parse_receipt
-from nlp_expenses.extraction.statements import parse_all_statements
 from nlp_expenses.extraction.text import supported_receipt_extensions
 from nlp_expenses.line_items import apply_line_item_review
 from nlp_expenses.models import Expense, GenerationProgress
@@ -19,7 +17,12 @@ from nlp_expenses.statement_normalizer import (
 )
 from nlp_expenses.trip_metadata import apply_trip_metadata_defaults
 from nlp_expenses.trips import TRIP_MODES, trip_mode, trip_receipts_dir, trip_statements_dir
-from nlp_expenses.workbook import build_arvine_workbook, build_workbook
+from nlp_expenses.workbook import (
+    build_arvine_workbook,
+    build_ivado_claim_workbook,
+    build_reimbursement_report_workbook,
+    build_workbook,
+)
 
 
 SUPPORTED_RECEIPTS = supported_receipt_extensions()
@@ -98,6 +101,7 @@ def generate_review(
     progress_callback: ProgressCallback | None = None,
     warning_callback: WarningCallback | None = None,
     allow_openai_prompt: bool = True,
+    contract_bundle: bool = False,
 ) -> Path | None:
     trip_dir = trip_dir.resolve()
     root = root.resolve()
@@ -164,13 +168,11 @@ def generate_review(
     # Receipt review can correct an extracted date. Keep the stable-looking
     # workbook IDs aligned with the reviewed, canonical receipt data.
     assign_simple_expense_ids(expenses)
-    progress("workbook", 0, 1, "Matching expenses and building the Excel workbook")
+    progress("workbook", 0, 1, "Building the reimbursement report bundle")
     if selected_mode == "arvine":
         from nlp_expenses.reconciliation import (
             apply_reconciliation_overrides,
             apply_transaction_decisions,
-            load_manual_matches,
-            load_transaction_allocations,
             load_transaction_decisions,
         )
 
@@ -179,39 +181,81 @@ def generate_review(
             normalization.transactions if normalization else [],
             load_transaction_decisions(trip_dir),
         )
-        result = build_arvine_workbook(
+
+    if not contract_bundle:
+        if selected_mode == "arvine":
+            from nlp_expenses.accounting import trip_accounting_profile
+            from nlp_expenses.lifecycle import record_generated_workbook
+            from nlp_expenses.reconciliation import (
+                load_manual_matches,
+                load_transaction_allocations,
+            )
+
+            result = build_arvine_workbook(
+                trip_dir,
+                expenses,
+                normalization.transactions if normalization else [],
+                output_path=output_path,
+                manual_matches=load_manual_matches(trip_dir),
+                accounting_profile=trip_accounting_profile(root, trip_dir),
+                transaction_allocations=load_transaction_allocations(trip_dir),
+            )
+            record_generated_workbook(root, trip_dir, result)
+            progress("complete", 1, 1, "Workbook ready")
+            return result
+
+        from nlp_expenses.extraction.statements import parse_all_statements
+        from nlp_expenses.lifecycle import record_generated_workbook
+        from nlp_expenses.reconciliation import (
+            ivado_statement_transactions_from_reconciliation,
+            reconciliation_is_fresh,
+        )
+
+        reviewed_transactions = ivado_statement_transactions_from_reconciliation(trip_dir, expenses)
+        use_reviewed_mappings = reconciliation_is_fresh(trip_dir)
+        transactions = reviewed_transactions if use_reviewed_mappings else parse_all_statements(statements_dir)
+        result = build_workbook(
             trip_dir,
             expenses,
-            normalization.transactions if normalization else [],
+            transactions,
             output_path=output_path,
-            manual_matches=load_manual_matches(trip_dir),
-            accounting_profile=trip_accounting_profile(root, trip_dir),
-            transaction_allocations=load_transaction_allocations(trip_dir),
+            pre_matched=use_reviewed_mappings,
         )
-        from nlp_expenses.lifecycle import record_generated_workbook
-
         record_generated_workbook(root, trip_dir, result)
         progress("complete", 1, 1, "Workbook ready")
         return result
-    from nlp_expenses.reconciliation import (
-        ivado_statement_transactions_from_reconciliation,
-        reconciliation_is_fresh,
-    )
 
-    reviewed_transactions = ivado_statement_transactions_from_reconciliation(trip_dir, expenses)
-    use_reviewed_mappings = reconciliation_is_fresh(trip_dir)
-    transactions = reviewed_transactions if use_reviewed_mappings else parse_all_statements(statements_dir)
-    result = build_workbook(
-        trip_dir,
-        expenses,
-        transactions,
-        output_path=output_path,
-        pre_matched=use_reviewed_mappings,
-    )
-    from nlp_expenses.lifecycle import record_generated_workbook
+    from nlp_expenses.lifecycle import record_generated_bundle
+    from nlp_expenses.consolidation import consolidation_view
+    from nlp_expenses.trip_manifest import build_trip_manifest_records, write_trip_manifest
 
-    record_generated_workbook(root, trip_dir, result)
-    progress("complete", 1, 1, "Workbook ready")
+    view = consolidation_view(root, trip_dir)
+    records = build_trip_manifest_records(root, trip_dir, view=view)
+    primary_path = output_path or trip_dir / f"expense_review_{trip_dir.name}_arvine.xlsx"
+    manifest_path = trip_dir / "trip-reimbursement-manifest.v2.ndjson"
+    created: list[Path] = []
+    try:
+        result = build_reimbursement_report_workbook(
+            trip_dir,
+            records,
+            primary_path,
+        )
+        created.append(result)
+        manifest = write_trip_manifest(root, trip_dir, view=view, output_path=manifest_path)
+        created.append(manifest)
+        if view["claim_program"] == "ivado_sponsored":
+            ivado_report = build_ivado_claim_workbook(
+                trip_dir,
+                records,
+                ivado_output_path(primary_path),
+            )
+            created.append(ivado_report)
+        record_generated_bundle(root, trip_dir, result, created)
+    except Exception:
+        for path in created:
+            path.unlink(missing_ok=True)
+        raise
+    progress("complete", 1, 1, "Reimbursement report bundle ready")
     return result
 
 
@@ -223,3 +267,12 @@ def assign_simple_expense_ids(expenses: list[Expense]) -> None:
 
 def append_note(existing: str, note: str) -> str:
     return f"{existing.rstrip()} {note}".strip() if existing else note
+
+
+def ivado_output_path(primary_path: Path) -> Path:
+    marker = "_arvine_"
+    if marker in primary_path.stem:
+        stem = primary_path.stem.replace(marker, "_ivado_", 1)
+    else:
+        stem = f"{primary_path.stem}_ivado"
+    return primary_path.with_name(f"{stem}.xlsx")

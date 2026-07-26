@@ -27,6 +27,7 @@ documentation are complete.
 | R014 | [Single receipt extraction choice](R014-single-receipt-extraction-choice.md) | P1 | Implemented | R013 |
 | R012 | [IVADO frontend parity](R012-ivado-frontend-parity.md) | P2 | Implemented | R001–R009 |
 | R015 | [App-first consolidation and finalization](R015-app-first-consolidation-and-finalization.md) | P0 | Implemented | R002–R014 |
+| R016 | [Two-stage trip reimbursement and inter-project contract](R016-two-stage-trip-reimbursement-contract.md) | P0 | In progress | R010, R011, R013, R015 |
 
 ## Shared completion rules
 

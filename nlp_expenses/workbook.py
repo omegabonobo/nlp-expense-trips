@@ -1265,3 +1265,441 @@ def remove_macos_metadata(path: Path) -> None:
             subprocess.run(["xattr", "-d", attr, str(path)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
+
+
+CANONICAL_RECEIPT_HEADERS = [
+    "Receipt ID",
+    "Date",
+    "Vendor",
+    "Description",
+    "Expense Type",
+    "Source File",
+    "Currency",
+    "Original Total",
+    "CAD Total",
+    "Paid By",
+    "Included in Arvine",
+    "Included in IVADO",
+    "Employee Reimbursement CAD",
+    "Corporate Paid CAD",
+    "IVADO Claim CAD",
+    "IVADO Excluded CAD",
+    "FX Rate",
+    "FX Basis",
+    "People",
+    "IVADO Exclusion Reason",
+]
+
+CANONICAL_LINE_HEADERS = [
+    "Receipt ID",
+    "Line ID",
+    "Vendor",
+    "Description",
+    "Amount",
+    "Currency",
+    "Alcohol",
+    "Included in Arvine",
+    "Included in IVADO",
+    "IVADO Exclusion Reason",
+    "Review Note",
+    "Source File",
+]
+
+
+def build_reimbursement_report_workbook(
+    trip_dir: Path,
+    records: list[dict],
+    output_path: Path,
+) -> Path:
+    """Build the Arvine-facing report directly from manifest v2 records."""
+
+    receipts, report = split_manifest_records(records)
+    workbook = Workbook()
+    summary_ws = workbook.active
+    summary_ws.title = "Report"
+    receipts_ws = workbook.create_sheet("Expense Lines")
+    lines_ws = workbook.create_sheet("Receipt Lines")
+    accounting_ws = workbook.create_sheet("Accounting Rows")
+    settlement_ws = workbook.create_sheet("Settlement")
+    checks_ws = workbook.create_sheet("Checks")
+
+    write_canonical_report_sheet(summary_ws, trip_dir, report, receipts)
+    write_canonical_receipt_sheet(receipts_ws, receipts)
+    write_canonical_line_sheet(lines_ws, receipts)
+    write_canonical_accounting_sheet(accounting_ws, report)
+    write_canonical_settlement_sheet(settlement_ws, report)
+    write_canonical_checks_sheet(checks_ws, report, len(receipts))
+    style_canonical_workbook(workbook)
+    return save_workbook_atomic(workbook, output_path)
+
+
+def build_ivado_claim_workbook(
+    trip_dir: Path,
+    records: list[dict],
+    output_path: Path,
+) -> Path:
+    """Build the sponsored-claim adapter from the same manifest v2 records."""
+
+    receipts, report = split_manifest_records(records)
+    if report.get("claim_program") != "ivado_sponsored":
+        raise ValueError("An IVADO workbook is only produced for IVADO-sponsored trips.")
+
+    workbook = Workbook()
+    summary_ws = workbook.active
+    summary_ws.title = "IVADO Claim"
+    claim_ws = workbook.create_sheet("Claim Lines")
+    exclusion_ws = workbook.create_sheet("Exclusions")
+
+    summary_rows = [
+        ("Report ID", report["report_id"]),
+        ("Trip", report["trip_id"]),
+        ("Report date", report["report_date"]),
+        ("Employee", report["employee"]["legal_name"]),
+        ("Company", report["company"]["legal_name"]),
+        ("Sponsor", (report.get("sponsor") or {}).get("legal_name", "")),
+        ("Description", report["description"]),
+        ("IVADO claim total CAD", report["ivado_claim_total_cad"]),
+        ("IVADO excluded total CAD", report["ivado_excluded_total_cad"]),
+        ("Template version", report.get("ivado_template_version") or "unconfirmed"),
+        (
+            "Claimant instruction",
+            report.get("ivado_claimant_instruction")
+            or "Confirm the current official IVADO form and claimant identity before submission.",
+        ),
+        ("Claimant confirmed", "Yes" if report.get("ivado_claimant_confirmed") else "No"),
+        ("Source contract", "trip-reimbursement-manifest.v2.ndjson"),
+    ]
+    summary_ws.append(["IVADO-sponsored claim adapter", "Value"])
+    for row in summary_rows:
+        summary_ws.append(list(row))
+
+    claim_ws.append(
+        [
+            "Receipt ID",
+            "Date",
+            "Vendor",
+            "Description",
+            "Expense Type",
+            "Source File",
+            "Currency",
+            "Original Total",
+            "CAD Reviewed",
+            "IVADO Claim CAD",
+            "IVADO Excluded CAD",
+            "Paid By",
+            "Exclusion Reason",
+        ]
+    )
+    for receipt in receipts:
+        claim_ws.append(
+            [
+                receipt["id"],
+                receipt.get("document_date"),
+                receipt.get("vendor"),
+                receipt.get("description"),
+                receipt.get("expense_type"),
+                receipt.get("source_file"),
+                receipt.get("currency"),
+                receipt.get("total"),
+                receipt.get("total_cad"),
+                receipt.get("ivado_claimable_cad"),
+                receipt.get("ivado_excluded_cad"),
+                receipt.get("paid_by"),
+                receipt.get("ivado_exclusion_reason"),
+            ]
+        )
+
+    exclusion_ws.append(
+        [
+            "Receipt ID",
+            "Vendor",
+            "Line ID",
+            "Description",
+            "Amount",
+            "Reason",
+            "Review Note",
+            "Source File",
+        ]
+    )
+    for receipt in receipts:
+        if receipt.get("included_in_arvine") and not receipt.get("included_in_ivado"):
+            exclusion_ws.append(
+                [
+                    receipt["id"],
+                    receipt.get("vendor"),
+                    "",
+                    receipt.get("description") or "Whole receipt excluded",
+                    receipt.get("ivado_excluded_cad"),
+                    receipt.get("ivado_exclusion_reason") or "other",
+                    "Whole receipt excluded from the IVADO sponsor claim.",
+                    receipt.get("source_file"),
+                ]
+            )
+            continue
+        for item in receipt.get("line_items", []):
+            if item.get("included_in_arvine") and not item.get("included_in_ivado"):
+                exclusion_ws.append(
+                    [
+                        receipt["id"],
+                        receipt.get("vendor"),
+                        item.get("line_id"),
+                        item.get("description"),
+                        item.get("amount"),
+                        item.get("ivado_exclusion_reason"),
+                        item.get("review_note"),
+                        receipt.get("source_file"),
+                    ]
+                )
+
+    for ws in workbook.worksheets:
+        style_sheet(ws)
+        ws.freeze_panes = "A2"
+        ws.sheet_view.showGridLines = False
+        set_filter_range(ws, ws.max_column, max(ws.max_row, 2))
+    summary_ws.column_dimensions["A"].width = 27
+    summary_ws.column_dimensions["B"].width = 72
+    for cell in summary_ws["B9:B10"]:
+        cell[0].number_format = '#,##0.00;[Red]-#,##0.00'
+    for ws in (claim_ws, exclusion_ws):
+        for row in ws.iter_rows(min_row=2):
+            for cell in row:
+                if isinstance(cell.value, (int, float)):
+                    cell.number_format = '#,##0.00;[Red]-#,##0.00'
+    return save_workbook_atomic(workbook, output_path)
+
+
+def split_manifest_records(records: list[dict]) -> tuple[list[dict], dict]:
+    receipts = [record for record in records if record.get("kind") == "receipt"]
+    reports = [record for record in records if record.get("kind") == "trip_report"]
+    if len(reports) != 1:
+        raise ValueError("Expected exactly one trip report record.")
+    return receipts, reports[0]
+
+
+def write_canonical_report_sheet(ws, trip_dir: Path, report: dict, receipts: list[dict]) -> None:
+    ws.append(["Arvine trip reimbursement report", "Value"])
+    values = [
+        ("Contract version", report["contract_version"]),
+        ("Report ID", report["report_id"]),
+        ("Trip", report["trip_id"]),
+        ("Report date", report["report_date"]),
+        ("Claim program", report["claim_program"]),
+        ("Traveller", report["employee"]["legal_name"]),
+        ("Traveller identifier", report["employee"].get("identifier", "")),
+        ("Company", report["company"]["legal_name"]),
+        ("Company identifier", report["company"].get("identifier", "")),
+        ("Sponsor", (report.get("sponsor") or {}).get("legal_name", "")),
+        ("Business purpose", report["description"]),
+        ("Receipt count", len(receipts)),
+        ("Employee reimbursement CAD", report["employee_reimbursement_total_cad"]),
+        ("Corporate-paid CAD", report["corporate_paid_total_cad"]),
+        ("IVADO claim CAD", report["ivado_claim_total_cad"]),
+        ("IVADO excluded CAD", report["ivado_excluded_total_cad"]),
+        ("Source contract", "trip-reimbursement-manifest.v2.ndjson"),
+        ("Trip folder", trip_dir.name),
+    ]
+    for label, value in values:
+        ws.append([label, value])
+    ws.column_dimensions["A"].width = 34
+    ws.column_dimensions["B"].width = 72
+
+
+def write_canonical_receipt_sheet(ws, receipts: list[dict]) -> None:
+    ws.append(CANONICAL_RECEIPT_HEADERS)
+    for receipt in receipts:
+        ws.append(
+            [
+                receipt["id"],
+                receipt.get("document_date"),
+                receipt.get("vendor"),
+                receipt.get("description"),
+                receipt.get("expense_type"),
+                receipt.get("source_file"),
+                receipt.get("currency"),
+                receipt.get("total"),
+                receipt.get("total_cad"),
+                receipt.get("paid_by"),
+                "Yes" if receipt.get("included_in_arvine") else "No",
+                "Yes" if receipt.get("included_in_ivado") else "No",
+                receipt.get("arvine_reimbursable_cad"),
+                (
+                    receipt.get("total_cad")
+                    if receipt.get("paid_by") == "arvine_corporate_bmo"
+                    else 0.0
+                ),
+                receipt.get("ivado_claimable_cad"),
+                receipt.get("ivado_excluded_cad"),
+                receipt.get("fx_rate"),
+                receipt.get("fx_basis_status"),
+                receipt.get("number_of_people"),
+                receipt.get("ivado_exclusion_reason"),
+            ]
+        )
+        source_cell = ws.cell(ws.max_row, 6)
+        source_cell.hyperlink = receipt.get("source_url")
+        source_cell.style = "Hyperlink"
+    set_filter_range(ws, len(CANONICAL_RECEIPT_HEADERS), max(len(receipts) + 1, 2))
+    ws.freeze_panes = "A2"
+
+
+def write_canonical_line_sheet(ws, receipts: list[dict]) -> None:
+    ws.append(CANONICAL_LINE_HEADERS)
+    for receipt in receipts:
+        for item in receipt.get("line_items", []):
+            ws.append(
+                [
+                    receipt["id"],
+                    item.get("line_id"),
+                    receipt.get("vendor"),
+                    item.get("description"),
+                    item.get("amount"),
+                    receipt.get("currency"),
+                    "Yes" if item.get("is_alcohol") else "No",
+                    "Yes" if item.get("included_in_arvine") else "No",
+                    "Yes" if item.get("included_in_ivado") else "No",
+                    item.get("ivado_exclusion_reason"),
+                    item.get("review_note"),
+                    receipt.get("source_file"),
+                ]
+            )
+    set_filter_range(ws, len(CANONICAL_LINE_HEADERS), max(ws.max_row, 2))
+    ws.freeze_panes = "A2"
+
+
+def write_canonical_accounting_sheet(ws, report: dict) -> None:
+    ws.append(["Component", "Amount CAD"])
+    labels = {
+        "travel_non_meal_cad": "Travel / non-meal",
+        "meal_deductible_cad": "Meals – deductible",
+        "meal_non_deductible_cad": "Meals – non-deductible",
+        "gst_receivable_cad": "GST/HST receivable",
+        "qst_receivable_cad": "QST receivable",
+    }
+    for key, label in labels.items():
+        ws.append([label, report["accounting_summary"].get(key, 0.0)])
+    ws.append(["Total", f"=SUM(B2:B{ws.max_row})"])
+    ws.freeze_panes = "A2"
+
+
+def write_canonical_settlement_sheet(ws, report: dict) -> None:
+    ws.append(
+        [
+            "Leg ID",
+            "Type",
+            "Payer",
+            "Payee",
+            "Amount CAD",
+            "Status",
+            "Payment Date",
+            "Payment Reference",
+        ]
+    )
+    for leg in report.get("settlement_legs", []):
+        ws.append(
+            [
+                leg.get("leg_id"),
+                leg.get("leg_type"),
+                (leg.get("payer") or {}).get("legal_name"),
+                (leg.get("payee") or {}).get("legal_name"),
+                leg.get("amount_cad"),
+                leg.get("status"),
+                leg.get("payment_date"),
+                leg.get("payment_reference"),
+            ]
+        )
+    ws.freeze_panes = "A2"
+
+
+def write_canonical_checks_sheet(ws, report: dict, receipt_count: int) -> None:
+    detail_end = max(receipt_count + 1, 2)
+    ws.append(["Control", "Detail CAD", "Report CAD", "Difference CAD", "Status"])
+    checks = [
+        (
+            "Employee reimbursement",
+            f"=SUM('Expense Lines'!M2:M{detail_end})",
+            report["employee_reimbursement_total_cad"],
+        ),
+        (
+            "Corporate paid",
+            f"=SUM('Expense Lines'!N2:N{detail_end})",
+            report["corporate_paid_total_cad"],
+        ),
+        (
+            "IVADO claim",
+            f"=SUM('Expense Lines'!O2:O{detail_end})",
+            report["ivado_claim_total_cad"],
+        ),
+        (
+            "IVADO exclusions",
+            f"=SUM('Expense Lines'!P2:P{detail_end})",
+            report["ivado_excluded_total_cad"],
+        ),
+        (
+            "Accounting components",
+            "=SUM('Accounting Rows'!B2:B6)",
+            report["employee_reimbursement_total_cad"],
+        ),
+    ]
+    for index, (label, detail, expected) in enumerate(checks, start=2):
+        ws.append(
+            [
+                label,
+                detail,
+                expected,
+                f"=ROUND(B{index}-C{index},2)",
+                f'=IF(ABS(D{index})<=0.02,"PASS","FAIL")',
+            ]
+        )
+    ws.freeze_panes = "A2"
+    ws.conditional_formatting.add(
+        f"E2:E{ws.max_row}",
+        FormulaRule(formula=['E2="FAIL"'], fill=REVIEW_FILL, font=REVIEW_FONT),
+    )
+    ws.conditional_formatting.add(
+        f"E2:E{ws.max_row}",
+        FormulaRule(
+            formula=['E2="PASS"'],
+            fill=PatternFill("solid", fgColor="E2F0D9"),
+            font=Font(color="2E7D32", bold=True),
+        ),
+    )
+
+
+def style_canonical_workbook(workbook: Workbook) -> None:
+    money_sheets = {
+        "Expense Lines": {"H", "I", "M", "N", "O", "P", "Q"},
+        "Receipt Lines": {"E"},
+        "Accounting Rows": {"B"},
+        "Settlement": {"E"},
+        "Checks": {"B", "C", "D"},
+    }
+    for ws in workbook.worksheets:
+        style_sheet(ws)
+        ws.sheet_view.showGridLines = False
+        for column in money_sheets.get(ws.title, set()):
+            for cell in ws[column][1:]:
+                if cell.value is not None:
+                    cell.number_format = '#,##0.00;[Red]-#,##0.00'
+        for row in ws.iter_rows():
+            for cell in row:
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+        for column in range(1, ws.max_column + 1):
+            letter = get_column_letter(column)
+            max_length = max(
+                (
+                    len(str(cell.value))
+                    for cell in ws[letter]
+                    if cell.value not in (None, "")
+                ),
+                default=10,
+            )
+            ws.column_dimensions[letter].width = min(max(max_length + 2, 12), 44)
+    workbook["Report"].sheet_view.showGridLines = False
+    workbook["Report"]["B13"].number_format = "#,##0"
+    for cell in workbook["Report"]["B14:B17"]:
+        cell[0].number_format = '#,##0.00;[Red]-#,##0.00'
+    workbook["Accounting Rows"]["A7"].font = Font(bold=True)
+    workbook["Accounting Rows"]["B7"].font = Font(bold=True)
+    workbook.calculation.fullCalcOnLoad = True
+    workbook.calculation.forceFullCalc = True
+    workbook.calculation.calcMode = "auto"

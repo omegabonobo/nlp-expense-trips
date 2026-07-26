@@ -29,20 +29,24 @@ from nlp_expenses.reconciliation import (
     sync_reconciliation,
 )
 from nlp_expenses.trip_metadata import save_trip_metadata
-from nlp_expenses.trips import ensure_trip
+from nlp_expenses.trips import ensure_trip, trip_mode
 
 
 def complete_metadata(trip: Path) -> None:
     save_trip_metadata(
         trip,
         {
+            "claim_program": "ivado_sponsored" if trip_mode(trip) == "ivado" else "arvine_only",
             "traveller": "Florent",
             "company": "Example Corp.",
+            "sponsor": "IVADO Labs" if trip_mode(trip) == "ivado" else "",
             "start_date": "2026-07-01",
             "end_date": "2026-07-02",
             "business_purpose": "Client workshop",
             "approver": "Manager",
             "payment_method": "Personal card reimbursement",
+            "default_paid_by": "employee_personal",
+            "payer_confirmed": True,
         },
     )
 
@@ -212,7 +216,8 @@ class ConsolidationTests(unittest.TestCase):
 
             preview = consolidation_view(root, trip)
             result = preview["expenses"][0]
-            self.assertEqual(result["claimable_original"], 80.0)
+            self.assertEqual(result["arvine_claimable_original"], 100.0)
+            self.assertEqual(result["ivado_claimable_original"], 80.0)
             self.assertEqual(result["statement_purchase_amount_used"], 100.0)
             self.assertEqual(result["statement_purchase_currency"], "AUD")
             self.assertEqual(result["fx_rate"], 1.1)

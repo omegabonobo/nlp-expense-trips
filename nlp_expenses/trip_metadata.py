@@ -10,12 +10,21 @@ from nlp_expenses.trips import load_trip_config, save_trip_config
 
 METADATA_LIST_FIELDS = {"origins", "destinations"}
 POLICY_CATEGORIES = {"flight", "hotel", "transport", "meal", "other"}
+CLAIM_PROGRAMS = {"arvine_only", "ivado_sponsored"}
+PAID_BY_VALUES = {"employee_personal", "arvine_corporate_bmo"}
+SETTLEMENT_STATUSES = {"planned", "approved", "paid", "reconciled"}
 
 
 def blank_trip_metadata() -> dict:
     return {
         "traveller": "",
+        "traveller_identifier": "",
         "company": "",
+        "company_identifier": "",
+        "sponsor": "",
+        "sponsor_identifier": "",
+        "claim_program": "",
+        "report_date": "",
         "start_date": "",
         "end_date": "",
         "origins": [],
@@ -25,6 +34,23 @@ def blank_trip_metadata() -> dict:
         "cost_centre": "",
         "approver": "",
         "payment_method": "",
+        "default_paid_by": "employee_personal",
+        "payer_confirmed": False,
+        "ivado_template_version": "",
+        "ivado_claimant_instruction": "",
+        "ivado_claimant_confirmed": False,
+        "settlement": {
+            "employee_reimbursement": {
+                "status": "planned",
+                "payment_date": "",
+                "payment_reference": "",
+            },
+            "sponsor_reimbursement": {
+                "status": "planned",
+                "payment_date": "",
+                "payment_reference": "",
+            },
+        },
         "policy_profile": "standard",
         "policy": {
             "receipt_required_threshold": 0.0,
@@ -62,8 +88,38 @@ def save_trip_metadata(trip_dir: Path, submitted: dict) -> dict:
     if "expected_accounts" in submitted:
         config["expected_accounts"] = metadata["expected_accounts"]
     save_trip_config(trip_dir, config)
+    apply_default_payer_to_receipts(trip_dir, metadata["default_paid_by"])
     invalidate_reconciliation_for_metadata_change(trip_dir, previous, metadata)
     return trip_metadata(trip_dir)
+
+
+def apply_default_payer_to_receipts(trip_dir: Path, default_paid_by: str) -> None:
+    try:
+        from nlp_expenses.line_items import (
+            load_line_item_review_state,
+            save_line_item_review_state,
+        )
+
+        state = load_line_item_review_state(trip_dir)
+    except Exception:
+        state = None
+    if not state:
+        return
+    changed = False
+    for receipt in state.get("receipts", []):
+        if not isinstance(receipt, dict):
+            continue
+        if (
+            not receipt.get("paid_by_overridden")
+            and receipt.get("paid_by") != default_paid_by
+        ):
+            receipt["paid_by"] = default_paid_by
+            changed = True
+        if receipt.get("auto_paid_by") != default_paid_by:
+            receipt["auto_paid_by"] = default_paid_by
+            changed = True
+    if changed:
+        save_line_item_review_state(trip_dir, state)
 
 
 def invalidate_reconciliation_for_metadata_change(
@@ -103,7 +159,13 @@ def validate_trip_metadata(submitted: object) -> dict:
     result = blank_trip_metadata()
     for field in (
         "traveller",
+        "traveller_identifier",
         "company",
+        "company_identifier",
+        "sponsor",
+        "sponsor_identifier",
+        "claim_program",
+        "report_date",
         "start_date",
         "end_date",
         "business_purpose",
@@ -111,10 +173,18 @@ def validate_trip_metadata(submitted: object) -> dict:
         "cost_centre",
         "approver",
         "payment_method",
+        "default_paid_by",
+        "ivado_template_version",
+        "ivado_claimant_instruction",
         "policy_profile",
     ):
         if field in submitted:
             result[field] = str(submitted.get(field) or "").strip()
+    for field in ("payer_confirmed", "ivado_claimant_confirmed"):
+        if field in submitted:
+            if not isinstance(submitted[field], bool):
+                raise ValueError(f"{field} must be true or false.")
+            result[field] = submitted[field]
     for field in METADATA_LIST_FIELDS:
         values = submitted.get(field, [])
         if isinstance(values, str):
@@ -131,7 +201,7 @@ def validate_trip_metadata(submitted: object) -> dict:
         " ".join(str(value).split()) for value in expected if str(value).strip()
     ]
 
-    for field in ("start_date", "end_date"):
+    for field in ("report_date", "start_date", "end_date"):
         if result[field]:
             try:
                 date.fromisoformat(result[field])
@@ -139,6 +209,31 @@ def validate_trip_metadata(submitted: object) -> dict:
                 raise ValueError(f"{field} must use YYYY-MM-DD.") from exc
     if result["start_date"] and result["end_date"] and result["start_date"] > result["end_date"]:
         raise ValueError("Trip end date cannot be before the start date.")
+    if result["claim_program"] and result["claim_program"] not in CLAIM_PROGRAMS:
+        raise ValueError("Claim program must be Arvine only or IVADO sponsored.")
+    if result["default_paid_by"] not in PAID_BY_VALUES:
+        raise ValueError("Default payer must be employee personal or Arvine corporate BMO.")
+
+    submitted_settlement = submitted.get("settlement", {})
+    if submitted_settlement is not None and not isinstance(submitted_settlement, dict):
+        raise ValueError("Settlement details must be an object.")
+    settlement = deepcopy(result["settlement"])
+    for leg_type in settlement:
+        submitted_leg = (submitted_settlement or {}).get(leg_type, {})
+        if submitted_leg is not None and not isinstance(submitted_leg, dict):
+            raise ValueError(f"{leg_type} settlement details must be an object.")
+        leg = settlement[leg_type]
+        for field in ("status", "payment_date", "payment_reference"):
+            if field in (submitted_leg or {}):
+                leg[field] = str(submitted_leg.get(field) or "").strip()
+        if leg["status"] not in SETTLEMENT_STATUSES:
+            raise ValueError(f"{leg_type} settlement status is invalid.")
+        if leg["payment_date"]:
+            try:
+                date.fromisoformat(leg["payment_date"])
+            except ValueError as exc:
+                raise ValueError(f"{leg_type} payment date must use YYYY-MM-DD.") from exc
+    result["settlement"] = settlement
 
     policy = deepcopy(result["policy"])
     submitted_policy = submitted.get("policy", {})
@@ -204,6 +299,7 @@ def apply_trip_metadata_defaults(trip_dir: Path, expenses: list[Expense]) -> Non
 def required_metadata_gaps(trip_dir: Path) -> list[str]:
     metadata = trip_metadata(trip_dir)
     labels = {
+        "claim_program": "claim program",
         "traveller": "traveller",
         "company": "company",
         "start_date": "trip start date",
@@ -212,7 +308,12 @@ def required_metadata_gaps(trip_dir: Path) -> list[str]:
         "approver": "approver",
         "payment_method": "payment/reimbursement method",
     }
-    return [label for field, label in labels.items() if not metadata.get(field)]
+    gaps = [label for field, label in labels.items() if not metadata.get(field)]
+    if not metadata.get("payer_confirmed"):
+        gaps.append("receipt payer confirmation")
+    if metadata.get("claim_program") == "ivado_sponsored" and not metadata.get("sponsor"):
+        gaps.append("sponsor legal name")
+    return gaps
 
 
 def trip_policy_warnings(

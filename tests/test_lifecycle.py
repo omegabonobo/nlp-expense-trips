@@ -27,13 +27,17 @@ class LifecycleTests(unittest.TestCase):
         save_trip_metadata(
             trip,
             {
+                "claim_program": "ivado_sponsored",
                 "traveller": "Florent",
                 "company": "Example Inc.",
+                "sponsor": "IVADO Labs",
                 "start_date": "2026-07-01",
                 "end_date": "2026-07-02",
                 "business_purpose": "Client meeting",
                 "approver": "Reviewer",
                 "payment_method": "Employee reimbursement",
+                "default_paid_by": "employee_personal",
+                "payer_confirmed": True,
             },
         )
         receipt = trip / "expenses_receipts" / "receipt.pdf"

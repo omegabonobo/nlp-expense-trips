@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import json
 import os
 import stat
 import tempfile
 import threading
 import time
 import unittest
+import zipfile
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
+
+from openpyxl import load_workbook
 
 from nlp_expenses.generator import generate_review
 from nlp_expenses.jobs import JobManager
@@ -16,7 +20,7 @@ from nlp_expenses.lifecycle import record_generated_workbook
 from nlp_expenses.line_items import save_line_item_review
 from nlp_expenses.models import Expense, LineItem
 from nlp_expenses.trip_metadata import save_trip_metadata
-from nlp_expenses.trips import ensure_trip
+from nlp_expenses.trips import ensure_trip, trip_mode
 from nlp_expenses.ui import create_app, open_local_url
 from nlp_expenses.workbook import build_workbook
 
@@ -41,13 +45,17 @@ class UITests(unittest.TestCase):
         save_trip_metadata(
             trip,
             {
+                "claim_program": "ivado_sponsored" if trip_mode(trip) == "ivado" else "arvine_only",
                 "traveller": "Florent",
                 "company": "Example Corp.",
+                "sponsor": "IVADO Labs" if trip_mode(trip) == "ivado" else "",
                 "start_date": "2026-07-01",
                 "end_date": "2026-07-03",
                 "business_purpose": "Client workshop",
                 "approver": "Manager",
                 "payment_method": "Personal card reimbursement",
+                "default_paid_by": "employee_personal",
+                "payer_confirmed": True,
             },
         )
 
@@ -130,7 +138,11 @@ class UITests(unittest.TestCase):
     def test_create_upload_validate_and_remove(self):
         created = self.client.post(
             "/api/trips",
-            json={"month": "2026-07", "description": "Montreal", "mode": "arvine"},
+            json={
+                "month": "2026-07",
+                "description": "Montreal",
+                "claim_program": "arvine_only",
+            },
             headers=self.headers,
         )
         self.assertEqual(created.status_code, 201)
@@ -155,16 +167,35 @@ class UITests(unittest.TestCase):
         self.assertEqual(removed.status_code, 200)
         self.assertEqual(removed.get_json()["trip"]["statements"], [])
 
+        sponsored = self.client.post(
+            "/api/trips",
+            json={
+                "month": "2026-08",
+                "description": "Sponsored Montreal",
+                "claim_program": "ivado_sponsored",
+                "metadata": {"claim_program": "ivado_sponsored"},
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(sponsored.status_code, 201)
+        sponsored_trip = sponsored.get_json()["trip"]
+        self.assertEqual(sponsored_trip["mode"], "ivado")
+        self.assertEqual(sponsored_trip["metadata"]["sponsor"], "IVADO Labs")
+
     def test_trip_metadata_policy_and_lifecycle_endpoints(self):
         trip = ensure_trip(self.root, "202607_lifecycle", mode="ivado")
         metadata = {
+            "claim_program": "ivado_sponsored",
             "traveller": "Florent",
             "company": "Example Inc.",
+            "sponsor": "IVADO Labs",
             "start_date": "2026-07-01",
             "end_date": "2026-07-02",
             "business_purpose": "Client workshop",
             "approver": "Reviewer",
             "payment_method": "Employee reimbursement",
+            "default_paid_by": "employee_personal",
+            "payer_confirmed": True,
             "policy": {
                 "allowed_categories": ["flight", "hotel", "transport", "meal", "other"],
                 "meal_limit_cad": 75,
@@ -312,7 +343,112 @@ class UITests(unittest.TestCase):
         self.assertEqual(job["status"], "succeeded_warnings")
         self.assertIn("No statement files", job["warnings"][0])
         self.assertTrue(job["output_name"].startswith(f"expense_review_{trip.name}_arvine_"))
-        self.assertTrue((trip / job["output_name"]).exists())
+        workbook_path = trip / job["output_name"]
+        self.assertTrue(workbook_path.exists())
+        self.assertEqual(
+            load_workbook(workbook_path, read_only=True).sheetnames,
+            ["Report", "Expense Lines", "Receipt Lines", "Accounting Rows", "Settlement", "Checks"],
+        )
+        manifest_path = trip / "trip-reimbursement-manifest.v2.ndjson"
+        records = [
+            json.loads(line)
+            for line in manifest_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual([record["kind"] for record in records], ["receipt", "trip_report"])
+        self.assertEqual(records[-1]["claim_program"], "arvine_only")
+        details = self.client.get(f"/api/trips/{trip.name}").get_json()["trip"]
+        self.assertEqual(
+            {entry["kind"] for entry in details["lifecycle"]["current_generation"]["artifacts"]},
+            {"arvine_report", "reimbursement_manifest"},
+        )
+
+        approved = self.client.post(
+            f"/api/trips/{trip.name}/approve",
+            json={
+                "workbook": job["output_name"],
+                "reviewer": "Manager",
+                "note": "Reviewed the canonical report and contract controls.",
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(approved.status_code, 200)
+        exported = self.client.post(
+            f"/api/trips/{trip.name}/export-package",
+            json={},
+            headers=self.headers,
+        )
+        self.assertEqual(exported.status_code, 200)
+        package_path = trip / exported.get_json()["package"]["name"]
+        with zipfile.ZipFile(package_path) as archive:
+            names = set(archive.namelist())
+            self.assertIn(job["output_name"], names)
+            self.assertIn("trip-reimbursement-manifest.v2.ndjson", names)
+            self.assertIn("approval-manifest.json", names)
+
+    def test_sponsored_bundle_adds_ivado_adapter_from_the_same_contract(self):
+        trip = ensure_trip(self.root, "202607_montreal-sponsored", mode="ivado")
+        self.complete_trip_metadata(trip)
+        receipt = trip / "expenses_receipts" / "dinner.pdf"
+        receipt.write_bytes(b"fixture")
+        expense = Expense(
+            source_file=receipt,
+            expense_id="",
+            date="2026-07-01",
+            supplier_name="Bistro",
+            expense_type="meal",
+            amount=115,
+            currency="CAD",
+            line_items=[
+                LineItem(description="Dinner and tip", amount=95),
+                LineItem(
+                    description="Wine",
+                    amount=20,
+                    is_alcohol=True,
+                    alcohol_confidence=0.99,
+                ),
+            ],
+        )
+        save_line_item_review(trip, [expense])
+        finalized = self.client.post(
+            f"/api/trips/{trip.name}/finalize",
+            json={},
+            headers=self.headers,
+        )
+        self.assertEqual(finalized.status_code, 200)
+
+        with patch("nlp_expenses.generator.parse_receipt", return_value=expense):
+            started = self.client.post(
+                f"/api/trips/{trip.name}/generate",
+                json={},
+                headers=self.headers,
+            )
+            terminal = self.wait_for_job(started.get_json()["job"]["id"])
+        self.assertEqual(terminal["status"], "succeeded")
+        primary = trip / terminal["output_name"]
+        ivado = trip / terminal["output_name"].replace("_arvine_", "_ivado_", 1)
+        self.assertTrue(primary.is_file())
+        self.assertTrue(ivado.is_file())
+        self.assertEqual(
+            load_workbook(ivado, read_only=True).sheetnames,
+            ["IVADO Claim", "Claim Lines", "Exclusions"],
+        )
+        records = [
+            json.loads(line)
+            for line in (trip / "trip-reimbursement-manifest.v2.ndjson")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+        receipt_record = records[0]
+        report_record = records[-1]
+        self.assertEqual(receipt_record["arvine_reimbursable_cad"], 115)
+        self.assertEqual(receipt_record["ivado_claimable_cad"], 95)
+        self.assertEqual(receipt_record["ivado_excluded_cad"], 20)
+        self.assertEqual(
+            report_record["employee_reimbursement_total_cad"],
+            report_record["ivado_claim_total_cad"] + report_record["ivado_excluded_total_cad"],
+        )
 
     def test_workbook_generation_inherits_the_receipt_scan_quality(self):
         trip = ensure_trip(self.root, "202607_quality-source", mode="ivado")
