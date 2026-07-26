@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,10 +10,15 @@ from unittest.mock import patch
 from openpyxl import load_workbook
 
 from nlp_expenses.config import ask_openai_for_run
-from nlp_expenses.extraction.alcohol import is_alcohol
-from nlp_expenses.extraction.receipts import find_date, find_invoice_date, heuristic_parse_receipt
+from nlp_expenses.extraction.alcohol import detect_alcohol, is_alcohol
+from nlp_expenses.extraction.receipts import (
+    find_date,
+    find_invoice_date,
+    heuristic_parse_receipt,
+    line_item_from_llm,
+)
 from nlp_expenses.extraction.statements import parse_csv_statement
-from nlp_expenses.generator import assign_simple_expense_ids, generate_review
+from nlp_expenses.generator import SUPPORTED_RECEIPTS, assign_simple_expense_ids, generate_review
 from nlp_expenses.matching import close_split_amount, match_score
 from nlp_expenses.matching import enrich_expenses_from_statements
 from nlp_expenses.models import Expense, StatementTransaction
@@ -78,8 +84,58 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(is_alcohol("Pisco Sour"))
         self.assertTrue(is_alcohol("GLS 2023 JC Own Lobethal Chardonnay"))
         self.assertTrue(is_alcohol("Stomping Ground IPA"))
+        self.assertTrue(is_alcohol("2x Peroni Nastro Azzurro"))
+        self.assertTrue(is_alcohol("Hefeweizen 500ml"))
+        self.assertTrue(is_alcohol("French 75"))
+        self.assertTrue(is_alcohol("Long Island Iced Tea"))
+        self.assertTrue(is_alcohol("Don Julio Blanco"))
+        self.assertTrue(is_alcohol("Corona 330ml"))
+        self.assertTrue(is_alcohol("Aviation"))
+        self.assertTrue(is_alcohol("2 x Penicillin"))
+        self.assertTrue(is_alcohol("Hard seltzer"))
+        self.assertTrue(is_alcohol("Rosé"))
+        self.assertTrue(is_alcohol("Craft lager 5.2% ABV"))
         self.assertFalse(is_alcohol("Flat white coffee"))
         self.assertFalse(is_alcohol("Sparkling Water"))
+        self.assertFalse(is_alcohol("Ginger Beer"))
+        self.assertFalse(is_alcohol("Root beer float"))
+        self.assertFalse(is_alcohol("Heineken 0.0% non-alcoholic"))
+        self.assertFalse(is_alcohol("Heineken 0.0"))
+        self.assertFalse(is_alcohol("Virgin Mojito"))
+        self.assertFalse(is_alcohol("Beer battered fish"))
+        self.assertFalse(is_alcohol("Red wine vinegar"))
+        self.assertFalse(is_alcohol("Americano coffee"))
+        self.assertFalse(is_alcohol("Galician Scotch Filet"))
+        self.assertFalse(is_alcohol("Scotch fillet steak"))
+        self.assertFalse(is_alcohol("GST (10% incl.)"))
+        self.assertFalse(is_alcohol("Weekend surcharge 15%"))
+        self.assertFalse(is_alcohol("10% discount"))
+        self.assertTrue(is_alcohol("TIGER SCHe"))
+        self.assertTrue(is_alcohol("ASAHTML"))
+        self.assertTrue(is_alcohol("Strawberry Fielss"))
+        self.assertTrue(is_alcohol("East Skipper"))
+
+    def test_alcohol_detection_explains_its_decision(self):
+        cocktail = detect_alcohol("French 75")
+        self.assertTrue(cocktail.is_alcohol)
+        self.assertEqual(cocktail.reason, "recognized cocktail")
+        self.assertEqual(cocktail.matched_term, "french 75")
+        self.assertGreaterEqual(cocktail.confidence, 0.95)
+
+        excluded = detect_alcohol("Virgin Mojito")
+        self.assertFalse(excluded.is_alcohol)
+        self.assertEqual(excluded.reason, "non-alcoholic drink style")
+        self.assertEqual(excluded.matched_term, "virgin")
+
+    def test_openai_alcohol_flag_cannot_turn_tax_percentage_into_alcohol(self):
+        item = line_item_from_llm(
+            {"description": "GST (10% incl.)", "amount": 0.07, "is_alcohol": True},
+            extraction_confidence=0.95,
+            include_images=True,
+        )
+        self.assertFalse(item.is_alcohol)
+        self.assertTrue(item.included)
+        self.assertEqual(item.alcohol_reason, "receipt tax or charge")
 
     def test_receipt_heuristic_parses_total_and_corrected_amount(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -397,15 +453,31 @@ class CoreTests(unittest.TestCase):
             )
             self.assertEqual(
                 wb["expense_list"]["G2"].value,
-                '=IF(OR($E2="",$F2=""),"missing",IF(ABS($E2-$F2)<=MAX(0.05,$F2*0.03),"ok","mismatch"))',
+                '=IF($F2="","missing",IF($E2="","receipt total used",IF(ABS($E2-$F2)<=MAX(0.05,$F2*0.03),"ok","mismatch")))',
+            )
+            self.assertIn("COUNTIFS(expense_line_items!", wb["expense_list"]["J2"].value)
+            self.assertIn("$F2/IF(OR($I2", wb["expense_list"]["J2"].value)
+            self.assertEqual(
+                wb["expense_list"]["K2"].value,
+                '=IF($R2<>"",$R2,IF(COUNTIF(card_statements!$D:$D,$A2)=0,"",SUMIFS(card_statements!$C:$C,card_statements!$D:$D,$A2)))',
             )
             self.assertEqual(
-                wb["expense_list"]["J2"].value,
-                '=IF($E2="","",($E2-SUMIFS(expense_line_items!$F:$F,expense_line_items!$A:$A,$A2,expense_line_items!$H:$H,TRUE))/IF(OR($I2="",$I2=0),1,$I2))',
+                wb["expense_list"]["L2"].value,
+                '=IF(OR($K2="",$K2=0),"",IF($H2="CAD",1,IF(OR($V2="",$V2=0),"",$K2/$V2)))',
             )
-            self.assertEqual(wb["expense_list"]["K2"].value, '=IFERROR(SUMIFS(card_statements!$C:$C,card_statements!$D:$D,$A2),"")')
-            self.assertEqual(wb["expense_list"]["L2"].value, '=IF(OR($K2="",$E2="",$E2=0),"",$K2/($E2/IF(OR($I2="",$I2=0),1,$I2)))')
-            self.assertEqual(wb["expense_list"]["M2"].value, '=IF(OR($J2="",$L2=""),"",$J2*$L2)')
+            self.assertIn('"statement_person_share"', wb["expense_list"]["M2"].value)
+            self.assertIn('"statement_receipt_total"', wb["expense_list"]["M2"].value)
+            self.assertEqual(wb["expense_list"]["Q1"].value, "include")
+            self.assertEqual(wb["expense_list"]["R1"].value, "manual_CAD_override")
+            self.assertEqual(wb["expense_list"]["T1"].value, "statement_purchase_amount")
+            self.assertEqual(wb["expense_list"]["U1"].value, "statement_purchase_currency")
+            self.assertEqual(wb["expense_list"]["V1"].value, "accounting_original_basis")
+            self.assertEqual(wb["expense_list"]["W1"].value, "accounting_basis_status")
+            self.assertIn('IF(OR($T2="",$T2=0),$F2', wb["expense_list"]["V2"].value)
+            line_headers = [cell.value for cell in wb["expense_line_items"][1]]
+            self.assertIn("alcohol_detection_confidence", line_headers)
+            self.assertIn("alcohol_detection_reason", line_headers)
+            self.assertIn("alcohol_matched_term", line_headers)
             cf_rules = list(wb["expense_list"].conditional_formatting["K2:K2"])
             self.assertEqual(len(cf_rules), 1)
             self.assertEqual(cf_rules[0].operator, "equal")
@@ -414,14 +486,63 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(wb["expense_list"]["I2"].fill.fgColor.rgb, "00FFF2CC")
             self.assertEqual(wb["card_statements"]["D2"].fill.fgColor.rgb, "00C00000")
 
+    def test_reviewed_receipt_date_updates_generated_expense_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202606_test")
+            receipt = trip / "expenses_receipts" / "receipt.pdf"
+            receipt.write_bytes(b"dummy")
+            expense = Expense(
+                source_file=receipt,
+                expense_id="",
+                date=None,
+                supplier_name="Reviewed Cafe",
+                amount=10,
+                currency="AUD",
+            )
+
+            def apply_review(_trip, expenses, **_kwargs):
+                expenses[0].date = "2026-06-03"
+                return True
+
+            captured = {}
+
+            def build(trip_dir, expenses, transactions, **_kwargs):
+                captured["expense_id"] = expenses[0].expense_id
+                output = trip_dir / "review.xlsx"
+                output.touch()
+                return output
+
+            with patch("nlp_expenses.generator.parse_receipt", return_value=expense), patch(
+                "nlp_expenses.generator.apply_line_item_review", side_effect=apply_review
+            ), patch("nlp_expenses.generator.build_workbook", side_effect=build):
+                output = generate_review(trip, root, llm_mode="off", mode="ivado")
+
+            self.assertEqual(captured["expense_id"], "20260603_#1")
+            self.assertEqual(output, (trip / "review.xlsx").resolve())
+
     def test_integration_existing_melbourne_receipt_count(self):
         root = Path(__file__).resolve().parents[1]
         trip = root / "trips" / "202606_melbourne"
         if not trip.exists():
             self.skipTest("fixture trip not present")
-        output = generate_review(trip, root, llm_mode="off")
-        wb = load_workbook(output, read_only=True)
-        self.assertEqual(wb["expense_list"].max_row - 1, 17)
+        with tempfile.TemporaryDirectory() as tmp:
+            test_root = Path(tmp)
+            test_trip = test_root / "trips" / trip.name
+            test_trip.parent.mkdir()
+            shutil.copytree(
+                trip,
+                test_trip,
+                ignore=shutil.ignore_patterns("*.xlsx", "*.zip", "benchmark_*.json"),
+            )
+            output = generate_review(test_trip, test_root, llm_mode="off")
+            wb = load_workbook(output, read_only=True)
+            receipt_count = sum(
+                1
+                for path in (test_trip / "expenses_receipts").iterdir()
+                if path.is_file() and path.suffix.lower() in SUPPORTED_RECEIPTS
+            )
+            self.assertEqual(wb["expense_list"].max_row - 1, receipt_count)
 
 
 if __name__ == "__main__":

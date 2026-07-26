@@ -6,7 +6,56 @@ import tempfile
 from pathlib import Path
 
 
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".heic"}
+BASE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
+HEIC_EXTENSIONS = {".heic", ".heif"}
+
+
+def initialize_image_support() -> bool:
+    try:
+        from pillow_heif import register_heif_opener
+
+        register_heif_opener(thumbnails=False)
+        return True
+    except Exception:
+        return False
+
+
+HEIC_AVAILABLE = initialize_image_support()
+IMAGE_EXTENSIONS = BASE_IMAGE_EXTENSIONS | (HEIC_EXTENSIONS if HEIC_AVAILABLE else set())
+
+
+def supported_receipt_extensions() -> set[str]:
+    return {".pdf"} | set(IMAGE_EXTENSIONS)
+
+
+def validate_receipt_content(path: Path) -> None:
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        try:
+            with path.open("rb") as handle:
+                signature = handle.read(5)
+            if signature != b"%PDF-":
+                raise ValueError
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"{path.name}: the file is not a readable PDF.") from exc
+        return
+    if suffix not in IMAGE_EXTENSIONS:
+        if suffix in HEIC_EXTENSIONS and not HEIC_AVAILABLE:
+            raise ValueError(
+                f"{path.name}: HEIC decoding is unavailable. Re-run setup or convert the image to PDF, JPEG, or PNG."
+            )
+        raise ValueError(f"{path.name}: unsupported receipt image format.")
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            image.verify()
+        with Image.open(path) as image:
+            image.load()
+    except Exception as exc:
+        raise ValueError(
+            f"{path.name}: the image could not be decoded. Export it again as PDF, JPEG, or PNG."
+        ) from exc
 
 
 def extract_text(path: Path) -> tuple[str, str]:
@@ -78,4 +127,3 @@ def ocr_image(path: Path) -> str:
             return out_base.with_suffix(".txt").read_text(encoding="utf-8", errors="ignore")
         except Exception:
             return ""
-

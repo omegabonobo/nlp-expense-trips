@@ -1,0 +1,348 @@
+from __future__ import annotations
+
+import json
+import os
+import re
+from pathlib import Path
+
+from nlp_expenses.models import Expense, LineItem
+
+from .receipts import (
+    SUPPORTED_CURRENCIES,
+    append_note,
+    heuristic_parse_receipt,
+    line_item_from_llm,
+    money_matches_in_line,
+    receipt_image_inputs,
+)
+from .text import extract_text
+
+
+CANADIAN_MARKERS = re.compile(r"\b(?:canada|québec|quebec|montreal|montréal|toronto|ontario|vancouver|calgary)\b", re.I)
+PROVINCE_MARKERS = {
+    "QC": re.compile(r"\b(?i:québec|quebec|montreal|montréal)\b|\bQC\b"),
+    "ON": re.compile(r"\b(?i:ontario|toronto|ottawa)\b|\bON\b"),
+    "BC": re.compile(r"\b(?i:british columbia|vancouver|victoria)\b|\bBC\b"),
+    "AB": re.compile(r"\b(?i:alberta|calgary|edmonton)\b|\bAB\b"),
+}
+
+
+def parse_arvine_receipt(
+    path: Path,
+    use_llm: bool = False,
+    model: str = "gpt-5.2",
+    force_llm: bool = False,
+) -> Expense:
+    raw_text, method = extract_text(path)
+    parsed = heuristic_parse_arvine_receipt(path, raw_text)
+    needs_help = arvine_quality_score(parsed) < 6.0
+    if use_llm and (force_llm or needs_help or method == "empty"):
+        include_images = method == "empty" or parsed.amount is None or parsed.confidence < 0.72
+        llm = llm_parse_arvine_receipt(path, raw_text, parsed, model, include_images)
+        if llm and (force_llm or arvine_quality_score(llm) >= arvine_quality_score(parsed)):
+            parsed = llm
+    if method == "empty":
+        parsed.review_note = append_note(parsed.review_note, "No extractable text/OCR output; review manually.")
+    normalize_arvine_line_items(parsed)
+    for item in parsed.line_items:
+        item.included = True
+    parsed.corrected_amount_in_currency = parsed.amount
+    parsed.tax_documentation_status = tax_documentation_status(parsed)
+    return parsed
+
+
+def heuristic_parse_arvine_receipt(path: Path, raw_text: str) -> Expense:
+    expense = heuristic_parse_receipt(path, raw_text)
+    for item in expense.line_items:
+        item.included = True
+    expense.corrected_amount_in_currency = expense.amount
+    expense.expense_type = simplify_expense_type(expense.expense_type)
+    expense.description = default_description(expense)
+    expense.gst_hst = find_tax_amount(raw_text, r"\b(?:GST|HST|TPS|TVH)\b")
+    expense.qst = find_tax_amount(raw_text, r"\b(?:QST|TVQ)\b")
+    expense.gst_hst_number = find_registration_number(raw_text, "gst")
+    expense.qst_number = find_registration_number(raw_text, "qst")
+    expense.subtotal = find_subtotal(raw_text)
+    if expense.subtotal is None and expense.amount is not None and (expense.gst_hst is not None or expense.qst is not None):
+        expense.subtotal = round(expense.amount - (expense.gst_hst or 0.0) - (expense.qst or 0.0), 2)
+    expense.country, expense.province = infer_location(raw_text, expense.currency)
+    normalize_arvine_line_items(expense)
+    expense.tax_documentation_status = tax_documentation_status(expense)
+    return expense
+
+
+def simplify_expense_type(value: str | None) -> str:
+    if value and value.startswith("meal"):
+        return "meal"
+    if value in {"flight", "hotel", "transport", "other"}:
+        return value
+    return "other"
+
+
+def default_description(expense: Expense) -> str:
+    labels = {
+        "flight": "Airfare",
+        "hotel": "Accommodation",
+        "transport": "Ground transportation",
+        "meal": "Business meal",
+        "other": "Business expense",
+    }
+    return labels.get(simplify_expense_type(expense.expense_type), "Business expense")
+
+
+def normalize_arvine_line_items(expense: Expense) -> None:
+    """Retain meal purchases and add explicit tax rows for proportional review."""
+
+    if expense.expense_type != "meal":
+        expense.line_items = []
+        return
+    items = [
+        item
+        for item in expense.line_items
+        if item.description not in {"Unreconciled meal item - review", "Alcohol adjustment - manual"}
+        and not re.fullmatch(r"(?:GST|HST|QST|TPS|TVH|TVQ)", item.description.strip(), re.I)
+    ]
+    for description, amount in (("GST/HST", expense.gst_hst), ("QST", expense.qst)):
+        if amount is not None and amount > 0:
+            items.append(
+                LineItem(
+                    description=description,
+                    amount=round(amount, 2),
+                    included=True,
+                    confidence=1.0,
+                    review_note="Tax line added from the structured invoice tax field.",
+                    synthetic=True,
+                )
+            )
+    if expense.amount is not None:
+        gap = round(expense.amount - sum(item.amount or 0 for item in items), 2)
+        if gap > max(0.05, expense.amount * 0.03):
+            items.append(
+                LineItem(
+                    description="Unreconciled meal item - review",
+                    amount=gap,
+                    included=True,
+                    confidence=0.0,
+                    review_note="Generated gap line because extracted meal items and tax did not add up to the receipt total.",
+                    synthetic=True,
+                )
+            )
+    expense.line_items = items
+
+
+def find_tax_amount(text: str, label_pattern: str) -> float | None:
+    pattern = re.compile(label_pattern, re.I)
+    for line in text.splitlines():
+        if not pattern.search(line):
+            continue
+        if re.search(r"\b(?:no|number|registration|reg)\b", line, re.I):
+            continue
+        values = [match.amount for match in money_matches_in_line(line) if abs(match.amount) < 100000]
+        if values:
+            return round(values[-1], 2)
+    return None
+
+
+def find_subtotal(text: str) -> float | None:
+    for line in text.splitlines():
+        if not re.search(r"\bsub\s*-?\s*total\b", line, re.I):
+            continue
+        values = [match.amount for match in money_matches_in_line(line)]
+        if values:
+            return round(values[-1], 2)
+    return None
+
+
+def find_registration_number(text: str, tax: str) -> str:
+    compact = re.sub(r"[ .-]", "", text.upper())
+    if tax == "gst":
+        match = re.search(r"(?<!\d)(\d{9})(RT\d{4})(?!\d)", compact)
+    else:
+        match = re.search(r"(?<!\d)(\d{10})(TQ\d{4})(?!\d)", compact)
+    return "".join(match.groups()) if match else ""
+
+
+def infer_location(text: str, currency: str | None) -> tuple[str, str]:
+    province = ""
+    for code, pattern in PROVINCE_MARKERS.items():
+        if pattern.search(text):
+            province = code
+            break
+    if province or currency == "CAD" or CANADIAN_MARKERS.search(text):
+        return "Canada", province
+    currency_countries = {
+        "AUD": "Australia",
+        "USD": "United States",
+        "EUR": "",
+        "GBP": "United Kingdom",
+        "IDR": "Indonesia",
+        "VND": "Vietnam",
+        "QAR": "Qatar",
+        "HKD": "Hong Kong",
+        "CHF": "Switzerland",
+    }
+    return currency_countries.get(currency or "", ""), ""
+
+
+def tax_documentation_status(expense: Expense) -> str:
+    if expense.country and expense.country != "Canada":
+        return "not_applicable"
+    warnings: list[str] = []
+    total = expense.amount or 0
+    # CRA and Revenu Québec invoice-information thresholds are $100 and $500.
+    if total >= 100 and (expense.gst_hst or 0) > 0 and not expense.gst_hst_number:
+        warnings.append("GST/HST number missing")
+    if total >= 100 and (expense.qst or 0) > 0 and not expense.qst_number:
+        warnings.append("QST number missing")
+    if expense.currency == "CAD" and total >= 500:
+        if not expense.purchaser_name:
+            warnings.append("purchaser name missing")
+        if not expense.payment_terms:
+            warnings.append("payment terms missing")
+        if not expense.description:
+            warnings.append("expense description missing")
+    if warnings:
+        note = "Tax documentation: " + "; ".join(warnings) + "."
+        if note not in expense.review_note:
+            expense.review_note = append_note(expense.review_note, note)
+        return "review"
+    return "ok" if expense.country == "Canada" or expense.currency == "CAD" else "not_applicable"
+
+
+def arvine_quality_score(expense: Expense) -> float:
+    score = 0.0
+    score += 1.5 if expense.date else 0.0
+    score += 1.5 if expense.supplier_name and expense.supplier_name != "Unknown supplier" else 0.0
+    score += 1.5 if expense.amount is not None else 0.0
+    score += 1.0 if expense.currency in SUPPORTED_CURRENCIES else 0.0
+    score += 0.5 if expense.expense_type in {"flight", "hotel", "transport", "meal", "other"} else 0.0
+    score += min(expense.confidence, 1.0)
+    return score
+
+
+def llm_parse_arvine_receipt(
+    path: Path,
+    raw_text: str,
+    heuristic: Expense,
+    model: str,
+    include_images: bool,
+) -> Expense | None:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return None
+    try:
+        from openai import OpenAI
+    except Exception:
+        return None
+    nullable_string = {"type": ["string", "null"]}
+    nullable_number = {"type": ["number", "null"]}
+    fields = {
+        "date": nullable_string,
+        "supplier_name": nullable_string,
+        "description": nullable_string,
+        "expense_type": nullable_string,
+        "amount": nullable_number,
+        "currency": nullable_string,
+        "subtotal": nullable_number,
+        "gst_hst": nullable_number,
+        "qst": nullable_number,
+        "gst_hst_number": nullable_string,
+        "qst_number": nullable_string,
+        "country": nullable_string,
+        "province": nullable_string,
+        "purchaser_name": nullable_string,
+        "payment_terms": nullable_string,
+        "line_items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "description": {"type": "string"},
+                    "amount": nullable_number,
+                    "is_alcohol": {"type": "boolean"},
+                },
+                "required": ["description", "amount", "is_alcohol"],
+            },
+        },
+        "confidence": {"type": "number"},
+    }
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": fields,
+        "required": list(fields),
+    }
+    content = [
+        {
+            "type": "input_text",
+            "text": (
+                f"Source filename: {path.name}\n"
+                f"Heuristic date/vendor/type/total: {heuristic.date}; {heuristic.supplier_name}; "
+                f"{heuristic.expense_type}; {heuristic.amount} {heuristic.currency}\n\n"
+                "Unfiltered OCR/native text:\n"
+                f"{raw_text[:30000]}"
+            ),
+        }
+    ]
+    if include_images:
+        content.extend(receipt_image_inputs(path))
+    try:
+        response = OpenAI(api_key=api_key).responses.create(
+            model=model,
+            input=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Extract one business-expense receipt for Canadian bookkeeping. "
+                        "Use ISO date yyyy-mm-dd and one expense_type from flight, hotel, transport, meal, other. "
+                        "For meal receipts, extract purchased food and drink line items and mark alcoholic drinks. "
+                        "Do not treat non-alcoholic, alcohol-free, 0.0%, mocktail, virgin, ginger beer, root beer, "
+                        "beer-battered food, cooking wine, or wine vinegar as alcoholic. "
+                        "For non-meal receipts return an empty line_items array. "
+                        "GST/HST includes GST, HST, TPS, or TVH; QST includes QST or TVQ. Copy tax registration numbers "
+                        "only when visible and do not invent missing tax, location, or registration data. Use ISO currency codes. "
+                        "province should be a Canadian two-letter abbreviation when known. Return only schema-valid data."
+                    ),
+                },
+                {"role": "user", "content": content},
+            ],
+            text={"format": {"type": "json_schema", "name": "arvine_receipt", "strict": True, "schema": schema}},
+        )
+        data = json.loads(response.output_text)
+    except Exception:
+        return None
+    expense = Expense(
+        source_file=path,
+        expense_id="",
+        date=data.get("date"),
+        supplier_name=data.get("supplier_name"),
+        description=data.get("description") or default_description(heuristic),
+        expense_type=simplify_expense_type(data.get("expense_type")),
+        amount=data.get("amount"),
+        currency=(data.get("currency") or "").upper() or None,
+        corrected_amount_in_currency=data.get("amount"),
+        line_items=[
+            line_item_from_llm(item, float(data.get("confidence") or 0.75), include_images)
+            for item in data.get("line_items", [])
+        ],
+        raw_text=raw_text,
+        confidence=float(data.get("confidence") or 0.75),
+        review_note="Structured with OpenAI receipt extraction; review tax fields.",
+        subtotal=data.get("subtotal"),
+        gst_hst=data.get("gst_hst"),
+        qst=data.get("qst"),
+        gst_hst_number=data.get("gst_hst_number") or "",
+        qst_number=data.get("qst_number") or "",
+        country=data.get("country") or "",
+        province=(data.get("province") or "").upper(),
+        purchaser_name=data.get("purchaser_name") or "",
+        payment_terms=data.get("payment_terms") or "",
+    )
+    if not expense.country:
+        expense.country, inferred_province = infer_location(raw_text, expense.currency)
+        expense.province = expense.province or inferred_province
+    for item in expense.line_items:
+        item.included = True
+    expense.tax_documentation_status = tax_documentation_status(expense)
+    return expense

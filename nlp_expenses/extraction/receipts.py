@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import base64
+import io
 import mimetypes
 import os
 import re
@@ -12,21 +13,23 @@ from pathlib import Path
 
 from nlp_expenses.models import Expense, LineItem
 
-from .alcohol import is_alcohol
+from .alcohol import AlcoholDetection, detect_alcohol
 from .text import extract_text
 
 
 MONTHS = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec"
+SUPPORTED_CURRENCIES = ("AUD", "CAD", "USD", "IDR", "EUR", "GBP", "VND", "QAR", "HKD", "CHF")
+CURRENCY_PATTERN = "|".join(SUPPORTED_CURRENCIES)
 MONEY_RE = re.compile(
-    r"(?P<cur>AUD|CAD|USD|IDR|EUR|GBP|AU\$|CA\$|\$)?\s*(?P<amt>-?(?:\d{1,3}(?:,\d{3})+|\d+,\d{2}|\d+)(?:\.\d{2})?)",
+    rf"(?P<cur>{CURRENCY_PATTERN}|AU\$|CA\$|\$)?\s*(?P<amt>-?(?:\d{{1,3}}(?:,\d{{3}})+|\d+,\d{{2}}|\d+)(?:\.\d{{2}})?)",
     re.I,
 )
 OCR_SPLIT_MONEY_RE = re.compile(
-    r"(?P<cur>AUD|CAD|USD|IDR|EUR|GBP|AU\$|CA\$|\$)\s*(?P<head>\d{1,3})\s+(?P<tail>\d+\.\d{2})",
+    rf"(?P<cur>{CURRENCY_PATTERN}|AU\$|CA\$|\$)\s*(?P<head>\d{{1,3}})\s+(?P<tail>\d+\.\d{{2}})",
     re.I,
 )
 OCR_BROKEN_DECIMAL_RE = re.compile(
-    r"(?P<cur>AUD|CAD|USD|IDR|EUR|GBP|AU\$|CA\$|\$)\s*(?P<whole>\d+)\.\s+(?P<cents>\d{2})(?!\d)",
+    rf"(?P<cur>{CURRENCY_PATTERN}|AU\$|CA\$|\$)\s*(?P<whole>\d+)\.\s+(?P<cents>\d{{2}})(?!\d)",
     re.I,
 )
 ADDITIVE_CHARGE_RE = re.compile(
@@ -205,7 +208,7 @@ def find_total(text: str) -> tuple[float | None, str | None]:
             continue
         for amount, currency in amounts_in_line(line):
             weight = 0
-            has_money_marker = bool(currency or "$" in line or re.search(r"\b(AUD|CAD|USD|IDR|EUR|GBP)\b", line, re.I))
+            has_money_marker = bool(currency or "$" in line or re.search(rf"\b({CURRENCY_PATTERN})\b", line, re.I))
             normalized_currency = normalize_currency(currency, text)
             if normalized_currency == "AUD" and amount > 5000 and not strong_total_label:
                 continue
@@ -350,14 +353,14 @@ def normalize_currency(token: str | None, context: str) -> str | None:
         return "AUD"
     if token in {"CA", "CAD"}:
         return "CAD"
-    if token in {"USD", "IDR", "EUR", "GBP"}:
+    if token in SUPPORTED_CURRENCIES:
         return token
     return infer_currency(context)
 
 
 def infer_currency(text: str) -> str | None:
     upper = text.upper()
-    for code in ["AUD", "CAD", "USD", "IDR", "EUR", "GBP"]:
+    for code in SUPPORTED_CURRENCIES:
         if code in upper:
             return code
     if "AUSTRALIAN DOLLAR" in upper or "AUSTRALIA" in upper or "MELBOURNE" in upper or " VIC" in upper:
@@ -407,7 +410,19 @@ def find_line_items(lines: list[str], fallback_currency: str | None, total_amoun
         if not description or len(description) < 2 or len(re.findall(r"[A-Za-z]", description)) < 3:
             continue
         confidence = 0.75 if is_additive_charge else 0.6
-        items.append(LineItem(description=description[:120], amount=amount, is_alcohol=is_alcohol(description), confidence=confidence))
+        alcohol = detect_alcohol(description)
+        items.append(
+            LineItem(
+                description=description[:120],
+                amount=amount,
+                is_alcohol=alcohol.is_alcohol,
+                included=not alcohol.is_alcohol,
+                confidence=confidence,
+                alcohol_confidence=alcohol.confidence,
+                alcohol_reason=alcohol.reason,
+                alcohol_matched_term=alcohol.matched_term,
+            )
+        )
     return items
 
 
@@ -472,7 +487,7 @@ def is_meal_expense(expense_type: str | None) -> bool:
 
 
 def looks_like_line_item(line: str) -> bool:
-    if "$" in line or re.search(r"\b(AUD|CAD|USD|IDR|EUR|GBP)\b", line, re.I):
+    if "$" in line or re.search(rf"\b({CURRENCY_PATTERN})\b", line, re.I):
         return True
     if re.match(r"^\s*[A-Za-z][A-Za-z0-9 &'*/().,-]{2,}\s+\d+[,.]\d{2}\s*$", line):
         return True
@@ -516,8 +531,10 @@ def add_reconciliation_gap_line(line_items: list[LineItem], amount: float | None
             description="Unreconciled meal item - review",
             amount=gap,
             is_alcohol=False,
+            included=True,
             confidence=0.0,
             review_note="Generated gap line because OCR-extracted meal items did not add up to the receipt total.",
+            synthetic=True,
         ),
     ]
 
@@ -531,13 +548,25 @@ def ensure_minimum_line_items(line_items: list[LineItem], amount: float | None, 
                 description="Receipt total missing - review",
                 amount=None,
                 is_alcohol=False,
+                included=True,
                 confidence=0.0,
                 review_note="Manual review needed: receipt total was not extracted.",
+                synthetic=True,
             )
         ]
     description = "Receipt total - review meal line items" if is_meal_expense(expense_type) else "Receipt total"
     note = "Manual review needed: meal line items were not reliably extracted." if is_meal_expense(expense_type) else ""
-    return [LineItem(description=description, amount=amount, is_alcohol=False, confidence=0.5, review_note=note)]
+    return [
+        LineItem(
+            description=description,
+            amount=amount,
+            is_alcohol=False,
+            included=True,
+            confidence=0.5,
+            review_note=note,
+            synthetic=True,
+        )
+    ]
 
 
 def add_manual_alcohol_adjustment(line_items: list[LineItem]) -> list[LineItem]:
@@ -549,8 +578,12 @@ def add_manual_alcohol_adjustment(line_items: list[LineItem]) -> list[LineItem]:
             description="Alcohol adjustment - manual",
             amount=0.0,
             is_alcohol=True,
+            included=False,
             confidence=1.0,
             review_note="Editable placeholder for alcohol missed by OCR/LLM.",
+            alcohol_confidence=1.0,
+            alcohol_reason="manual alcohol adjustment placeholder",
+            synthetic=True,
         ),
     ]
 
@@ -558,8 +591,11 @@ def add_manual_alcohol_adjustment(line_items: list[LineItem]) -> list[LineItem]:
 def corrected_amount(amount: float | None, line_items: list[LineItem]) -> float | None:
     if amount is None:
         return None
-    alcohol_total = sum(item.amount or 0 for item in line_items if item.is_alcohol)
-    return round(max(amount - alcohol_total, 0), 2)
+    reviewed = [item for item in line_items if item.amount is not None]
+    if not reviewed:
+        return amount
+    included_total = sum(item.amount or 0 for item in reviewed if item.included)
+    return round(max(included_total, 0), 2)
 
 
 def classify_expense(text: str, supplier: str, filename: str) -> str:
@@ -700,7 +736,8 @@ def llm_parse_receipt(path: Path, raw_text: str, heuristic: Expense, model: str,
                         "For meal expenses, line_items should reconcile to the tax-included receipt total when possible; mark alcoholic beverages in line_items. "
                         "Set is_alcohol=true for all alcoholic drinks, including cocktails, spirits, beer, wine, cider, sake, liqueurs, and named drink items that are commonly cocktails. "
                         "Examples that must be alcohol include Pisco Sour, Canta, Chardonnay, IPA, lager, beer, wine, gin, rum, vodka, whisky/whiskey, tequila, mezcal, Aperol Spritz, Negroni, Martini, Margarita, Old Fashioned, and Espresso Martini. "
-                        "Do not mark non-alcoholic drinks like coffee, tea, juice, soft drinks, soda, water, sparkling water, or mocktails as alcohol unless the receipt clearly identifies them as alcoholic. "
+                        "Do not mark non-alcoholic drinks like coffee, tea, juice, soft drinks, soda, water, sparkling water, 0.0% drinks, alcohol-free drinks, mocktails, or virgin cocktails as alcohol unless the receipt clearly identifies a non-zero alcohol content. "
+                        "Ginger beer and root beer are non-alcoholic unless the receipt explicitly says alcoholic; beer-battered food, cooking wine, wine vinegar, and Americano coffee are not alcoholic drink lines. "
                         "If a meal total is clear but one or more purchased lines cannot be read, add one line named 'Unreconciled meal item - review' for the exact gap instead of inventing a menu item. "
                         "Return only schema-valid data."
                     ),
@@ -728,17 +765,43 @@ def llm_parse_receipt(path: Path, raw_text: str, heuristic: Expense, model: str,
         amount=data.get("amount"),
         currency=(data.get("currency") or "").upper() or None,
         line_items=[
-            LineItem(
-                description=item.get("description", ""),
-                amount=item.get("amount"),
-                is_alcohol=bool(item.get("is_alcohol")) or is_alcohol(item.get("description", "")),
-                confidence=float(data.get("confidence") or 0.75),
-                review_note="Review OpenAI-extracted line item." if include_images else "",
-            )
+            line_item_from_llm(item, float(data.get("confidence") or 0.75), include_images)
             for item in data.get("line_items", [])
         ],
         raw_text=raw_text,
         confidence=float(data.get("confidence") or 0.75),
+    )
+
+
+def line_item_from_llm(item: dict, extraction_confidence: float, include_images: bool) -> LineItem:
+    description = item.get("description", "")
+    local = detect_alcohol(description)
+    llm_says_alcohol = bool(item.get("is_alcohol"))
+    explicit_non_alcohol = (
+        not local.is_alcohol
+        and local.confidence >= 0.99
+        and local.reason not in {"empty description", "no alcohol evidence"}
+    )
+    if local.is_alcohol:
+        alcohol = local
+    elif llm_says_alcohol and not explicit_non_alcohol:
+        alcohol = AlcoholDetection(
+            is_alcohol=True,
+            confidence=extraction_confidence,
+            reason="OpenAI classified the line as alcohol",
+        )
+    else:
+        alcohol = local
+    return LineItem(
+        description=description,
+        amount=item.get("amount"),
+        is_alcohol=alcohol.is_alcohol,
+        included=not alcohol.is_alcohol,
+        confidence=extraction_confidence,
+        review_note="Review OpenAI-extracted line item." if include_images else "",
+        alcohol_confidence=alcohol.confidence,
+        alcohol_reason=alcohol.reason,
+        alcohol_matched_term=alcohol.matched_term,
     )
 
 
@@ -784,6 +847,17 @@ def pdf_image_inputs(path: Path, max_pages: int = 2) -> list[dict]:
 
 
 def file_image_inputs(path: Path) -> list[dict]:
+    if path.suffix.lower() in {".heic", ".heif"}:
+        try:
+            from PIL import Image
+
+            buffer = io.BytesIO()
+            with Image.open(path) as image:
+                image.convert("RGB").save(buffer, format="PNG")
+            encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+            return [{"type": "input_image", "image_url": f"data:image/png;base64,{encoded}"}]
+        except Exception:
+            return []
     mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
     try:
         encoded = base64.b64encode(path.read_bytes()).decode("ascii")

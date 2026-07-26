@@ -9,9 +9,11 @@ description = "Local CLI for converting trip receipt scans and card statements i
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "Flask>=3.1,<4",
     "openpyxl>=3.1.0",
     "pypdf>=4.0.0",
     "Pillow>=10.0.0",
+    "pillow-heif>=1.1,<2",
     "pytesseract>=0.3.10",
     "PyMuPDF>=1.24.0",
     "xlrd>=2.0.1",
@@ -19,7 +21,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = []
+test = [
+    "pytest>=8,<10",
+]
 
 [project.scripts]
 nlp-expenses = "nlp_expenses.cli:main"
@@ -27,3 +31,6 @@ nlp-expenses = "nlp_expenses.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["nlp_expenses*"]
+
+[tool.setuptools.package-data]
+nlp_expenses = ["templates/*.html", "static/*.css", "static/*.js"]

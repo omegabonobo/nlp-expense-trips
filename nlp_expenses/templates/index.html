@@ -1,0 +1,1353 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <title>NLP Expenses</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <style>
+    #raw-template-warning { display: none; }
+    html.raw-template body > *:not(#raw-template-warning) { display: none !important; }
+    html.raw-template #raw-template-warning {
+      display: block; max-width: 680px; margin: 12vh auto; padding: 32px;
+      border: 1px solid #dce3de; border-radius: 16px; background: #fff;
+      color: #17221d; font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      box-shadow: 0 10px 28px rgba(22, 48, 35, .10);
+    }
+    html.raw-template #raw-template-warning h1 { margin-top: 0; }
+    html.raw-template #raw-template-warning code {
+      display: block; margin: 16px 0; padding: 12px; border-radius: 8px;
+      background: #f4f6f4; overflow-wrap: anywhere;
+    }
+  </style>
+  <script>
+    if (
+      window.location.protocol === "file:" ||
+      document.querySelector('meta[name="csrf-token"]').content.includes("{" + "{")
+    ) {
+      document.documentElement.classList.add("raw-template");
+      document.addEventListener("DOMContentLoaded", () => {
+        const warning = document.getElementById("raw-template-warning");
+        if (warning) document.body.replaceChildren(warning);
+      });
+    }
+  </script>
+</head>
+<body>
+  <main id="raw-template-warning">
+    <h1>This is the application template, not the running app</h1>
+    <p>Close this tab. In Finder, open the project’s top-level launcher:</p>
+    <code>NLP Expenses.command</code>
+    <p>Keep the Terminal window open. The correct page opens automatically and its address starts with <strong>http://127.0.0.1:</strong>.</p>
+  </main>
+  <script id="initial-state" type="application/json">{{ state|tojson }}</script>
+  <header class="app-header">
+    <div>
+      <p class="eyebrow">Local expense workspace</p>
+      <h1>NLP Expenses</h1>
+    </div>
+    <div class="system-status">
+      <span class="status-dot {{ 'ok' if state.system.tesseract_available else 'warning' }}"></span>
+      OCR {{ 'ready' if state.system.tesseract_available else 'needs setup' }}
+      <span class="separator">·</span>
+      OpenAI {{ 'key saved' if state.system.openai_configured else 'no key saved' }}
+      <button class="button secondary small open-settings-button">
+        {{ 'OpenAI settings' if state.system.openai_configured else 'Add OpenAI key' }}
+      </button>
+    </div>
+  </header>
+
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="sidebar-heading">
+        <h2>Business trips</h2>
+        <button class="button small primary" id="new-trip-button">New trip</button>
+      </div>
+      <a class="archive-toggle" href="/{% if not state.show_archived %}?archived=1{% endif %}">
+        {{ 'Hide archived trips' if state.show_archived else 'Show archived trips' }}
+      </a>
+      {% if state.trips %}
+        <label class="field-label" for="trip-select">Current trip</label>
+        <select id="trip-select" class="select full-width">
+          {% for trip in state.trips %}
+            <option value="{{ trip.name }}" {{ 'selected' if state.selected and state.selected.name == trip.name else '' }}>
+              {{ trip.label }}
+            </option>
+          {% endfor %}
+        </select>
+        <div class="trip-list">
+          {% for trip in state.trips %}
+            <a class="trip-item {{ 'active' if state.selected and state.selected.name == trip.name else '' }}" href="/?trip={{ trip.name|urlencode }}{% if state.show_archived %}&archived=1{% endif %}">
+              <strong>{{ trip.label }}</strong>
+              <span>{{ 'ARCHIVED · ' if trip.archived else '' }}{{ trip.mode|upper }} · {{ trip.receipt_count }} receipts · {{ trip.statement_count }} statements</span>
+            </a>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="empty compact">
+          <p>No trips yet.</p>
+          <p>Create one to get started.</p>
+        </div>
+      {% endif %}
+    </aside>
+
+    <main class="main-content">
+      {% if state.selected %}
+        {% set trip = state.selected %}
+        {% set reconciliation = state.reconciliation %}
+        {% set consolidation = state.consolidation %}
+        {% set line_review = trip.line_item_review %}
+        {% set trip_busy = state.active_job and state.active_job.status in ['queued', 'running'] %}
+        {% set reconciliation_required = trip.statements and (not reconciliation.available or reconciliation.stale) %}
+        {% set allocation_required = trip.mode == 'arvine' and reconciliation and reconciliation.available and reconciliation.summary.incomplete_allocation_count %}
+        {% set line_review_required = trip.receipts and (not line_review.available or line_review.stale) %}
+        {% set line_review_blocking = line_review.available and not line_review.stale and line_review.summary.blocking_count %}
+        {% set finalization_required = not consolidation.is_finalized %}
+        {% set receipt_quality = line_review.quality if line_review.available else ('best' if state.system.openai_configured else 'basic') %}
+        <section class="page-title">
+          <div>
+            <p class="eyebrow">{{ trip.name }}</p>
+            <h2>{{ trip.label }}</h2>
+          </div>
+          <div class="mode-field">
+            <label for="mode-select">Processing mode</label>
+            <select id="mode-select" class="select" data-trip="{{ trip.name }}" {{ 'disabled' if trip_busy else '' }}>
+              <option value="arvine" {{ 'selected' if trip.mode == 'arvine' else '' }}>Arvine</option>
+              <option value="ivado" {{ 'selected' if trip.mode == 'ivado' else '' }}>IVADO</option>
+            </select>
+            <span class="lifecycle-badge {{ trip.lifecycle.status }}">{{ trip.lifecycle.label }}</span>
+          </div>
+        </section>
+
+        {% if trip_busy %}
+          <div class="notice info">
+            {{ 'Invoice and statement sync' if state.active_job.kind == 'reconciliation' else 'Receipt line-item scan' if state.active_job.kind == 'line_items' else 'Workbook generation' }}
+            is running. Source files and mappings are locked until it finishes.
+          </div>
+        {% endif %}
+
+        <section class="card trip-metadata-card">
+          <div class="card-heading">
+            <div>
+              <p class="card-kicker">Trip record</p>
+              <h3>Traveller, purpose and policy</h3>
+            </div>
+            <button class="button secondary small" id="open-trip-metadata-button" {{ 'disabled' if trip_busy }}>Edit trip details</button>
+          </div>
+          <div class="metadata-grid">
+            <div><span>Traveller / company</span><strong>{{ trip.metadata.traveller or 'Not set' }}{% if trip.metadata.company %} · {{ trip.metadata.company }}{% endif %}</strong></div>
+            <div><span>Travel dates</span><strong>{{ trip.metadata.start_date or 'Not set' }} → {{ trip.metadata.end_date or 'Not set' }}</strong></div>
+            <div><span>Destination</span><strong>{{ trip.metadata.destinations|join(', ') or 'Not set' }}</strong></div>
+            <div><span>Business purpose</span><strong>{{ trip.metadata.business_purpose or 'Not set' }}</strong></div>
+          </div>
+          {% if trip.metadata_gaps %}
+            <div class="notice warning">
+              Complete before approval: {{ trip.metadata_gaps|join(', ') }}.
+            </div>
+          {% endif %}
+        </section>
+
+        <section class="card location-card">
+          <div>
+            <p class="card-kicker">Trip folder</p>
+            <code>{{ trip.path }}</code>
+          </div>
+          <div class="button-group">
+            <button class="button secondary" id="refresh-files-button">Refresh files</button>
+            <button class="button finder-button" data-target="trip">Reveal in Finder</button>
+          </div>
+          <div class="folder-row">
+            <div>
+              <span>Receipt scans</span>
+              <code>{{ trip.receipts_path }}</code>
+            </div>
+            <button class="button secondary finder-button" data-target="receipts">Open folder</button>
+          </div>
+          <div class="folder-row">
+            <div>
+              <span>Bank and card statements</span>
+              <code>{{ trip.statements_path }}</code>
+            </div>
+            <button class="button secondary finder-button" data-target="statements">Open folder</button>
+          </div>
+        </section>
+
+        <div class="upload-grid">
+          <section class="card file-card">
+            <div class="card-heading">
+              <div>
+                <p class="card-kicker">Step 1</p>
+                <h3>Receipt scans</h3>
+              </div>
+              <div class="button-group">
+                <span class="count-badge">{{ trip.receipts|length }}</span>
+                <button class="button secondary small finder-button" data-target="receipts">Reveal folder in Finder</button>
+              </div>
+            </div>
+            <label class="drop-zone" data-upload-kind="receipts">
+              <input type="file" multiple accept="{{ state.system.receipt_accept }}" {{ 'disabled' if trip_busy else '' }}>
+              <strong>Drop receipts here</strong>
+              <span>or click to choose {{ state.system.receipt_extensions|join(', ')|upper }} files</span>
+            </label>
+            <div class="file-list">
+              {% for file in trip.receipts %}
+                <div class="file-row">
+                  <div class="file-name">
+                    <strong>{{ file.name }}</strong>
+                    <span>{{ (file.size / 1024)|round(1) }} KB</span>
+                  </div>
+                  <button class="icon-button remove-file" title="Remove file" data-kind="receipts" data-filename="{{ file.name }}" {{ 'disabled' if trip_busy else '' }}>×</button>
+                </div>
+              {% else %}
+                <p class="empty-line">No receipts uploaded.</p>
+              {% endfor %}
+            </div>
+          </section>
+
+          <section class="card file-card">
+            <div class="card-heading">
+              <div>
+                <p class="card-kicker">Step 2</p>
+                <h3>Statements</h3>
+              </div>
+              <div class="button-group">
+                <span class="count-badge">{{ trip.statements|length }}</span>
+                <button class="button secondary small finder-button" data-target="statements">Reveal folder in Finder</button>
+              </div>
+            </div>
+            <label class="drop-zone" data-upload-kind="statements">
+              <input type="file" multiple accept="{{ '.csv,.xls,.xlsx' if trip.mode == 'arvine' else '.csv,.xls,.xlsx,.pdf' }}" {{ 'disabled' if trip_busy else '' }}>
+              <strong>Drop statements here</strong>
+              <span>{{ 'CSV, XLS, or XLSX' if trip.mode == 'arvine' else 'CSV, XLS, XLSX, or PDF' }}</span>
+            </label>
+            <div class="file-list">
+              {% for file in trip.statements %}
+                <div class="file-row statement-row">
+                  <div class="file-name">
+                    <strong>{{ file.name }}</strong>
+                    {% if file.validation %}
+                      {% if file.validation.errors %}
+                        <span class="validation error">Needs attention</span>
+                      {% else %}
+                        <span class="validation ok">{{ file.validation.provider|upper }} · {{ file.validation.rows_normalized }} rows</span>
+                      {% endif %}
+                    {% else %}
+                      <span>{{ (file.size / 1024)|round(1) }} KB</span>
+                    {% endif %}
+                  </div>
+                  <button class="icon-button remove-file" title="Remove file" data-kind="statements" data-filename="{{ file.name }}" {{ 'disabled' if trip_busy else '' }}>×</button>
+                  {% if file.validation %}
+                    {% for error in file.validation.errors %}<p class="file-message error">{{ error }}</p>{% endfor %}
+                    {% for warning in file.validation.warnings %}<p class="file-message warning">{{ warning }}</p>{% endfor %}
+                    {% if file.validation.date_samples %}
+                      <p class="file-message">Dates: {{ file.validation.date_samples|join(' · ') }}</p>
+                    {% endif %}
+                    {% if file.validation.date_convention_required %}
+                      <div class="date-convention-control">
+                        <select class="select date-convention-select" data-filename="{{ file.name }}">
+                          <option value="day_first">Day-first (31/07/2026)</option>
+                          <option value="month_first">Month-first (07/31/2026)</option>
+                        </select>
+                        <button class="button secondary small save-date-convention" data-filename="{{ file.name }}"
+                          {{ 'disabled' if trip_busy else '' }}>Use convention</button>
+                      </div>
+                    {% elif file.validation.date_convention %}
+                      <p class="file-message">Date convention: {{ file.validation.date_convention|replace('_', '-') }}</p>
+                    {% endif %}
+                  {% endif %}
+                </div>
+              {% else %}
+                <p class="empty-line">No statements uploaded.</p>
+              {% endfor %}
+            </div>
+          </section>
+        </div>
+
+        <section class="card line-item-card">
+          <div class="card-heading">
+            <div>
+              <p class="card-kicker">Step 3</p>
+              <h3>Extract and review receipts</h3>
+            </div>
+            {% if line_review.available %}
+              <span class="mode-badge">Last scan {{ line_review.synced_at|replace('T', ' ') }}</span>
+            {% endif %}
+          </div>
+          <p class="section-description">
+            Choose the receipt-reading method once, then review the extracted fields and meal items. The same method is reused
+            for reconciliation and Excel; statement parsing, matching, and workbook creation always run locally.
+          </p>
+          <div class="receipt-extraction">
+            <div>
+              <strong>Receipt extraction method</strong>
+              <span>This affects receipt fields and line items—not the Excel format or statement parser.</span>
+            </div>
+            <div class="quality-options">
+              <label class="quality-option {{ 'unavailable' if not state.system.openai_configured else '' }}">
+                <input type="radio" name="receipt-quality" value="best" {{ 'checked' if receipt_quality == 'best' else '' }}
+                  {{ 'disabled' if not state.system.openai_configured else '' }}>
+                <span>
+                  <strong>Best quality · OpenAI</strong>
+                  <small>
+                    Better for unclear scans, complex layouts, and foreign-language receipts. Requires a key and internet;
+                    receipt content is sent to OpenAI and API charges may apply.
+                  </small>
+                </span>
+              </label>
+              <label class="quality-option">
+                <input type="radio" name="receipt-quality" value="basic" {{ 'checked' if receipt_quality == 'basic' else '' }}>
+                <span>
+                  <strong>Basic / offline</strong>
+                  <small>
+                    Runs entirely on this Mac with OCR and local heuristics. No API key or API cost, but difficult scans
+                    are more likely to need manual correction.
+                  </small>
+                </span>
+              </label>
+            </div>
+            <button class="button primary" id="sync-line-items-button"
+              {{ 'disabled' if trip_busy or not trip.receipts }}>
+              {{ 'Rescan receipts' if line_review.available else 'Scan receipts' }}
+            </button>
+          </div>
+
+          {% if line_review.available %}
+            <div class="notice info">
+              <span>
+                Current receipt scan used
+                <strong>{{ 'Best quality · OpenAI' if line_review.quality == 'best' else 'Basic / offline' }}</strong>.
+                Rescanning with another method updates the automatic extraction; manual line choices are preserved for unchanged files.
+              </span>
+            </div>
+          {% endif %}
+          {% if not state.system.openai_configured %}
+            <div class="notice info">
+              <span>Best quality is unavailable until an OpenAI API key is saved locally in this project.</span>
+              <button class="button secondary small open-settings-button">Configure key</button>
+            </div>
+          {% endif %}
+          {% if not state.system.tesseract_available %}
+            <div class="notice warning">Basic/offline receipt scanning needs Tesseract. Install it with <code>brew install tesseract</code>, or use Best quality.</div>
+          {% endif %}
+
+          {% if line_review.stale %}
+            <div class="notice warning">Receipt files or processing mode changed after the last scan. Rescan before editing, reconciling, or generating.</div>
+          {% endif %}
+
+          <div id="line-item-job-panel" class="job-panel {{ '' if state.line_item_job else 'hidden' }}">
+            <div class="progress-track"><span id="line-item-progress-bar"></span></div>
+            <div class="job-heading">
+              <strong id="line-item-job-message">{{ state.line_item_job.message if state.line_item_job else '' }}</strong>
+              <span id="line-item-job-status">{{ state.line_item_job.status|replace('_', ' ')|title if state.line_item_job else '' }}</span>
+            </div>
+            <div id="line-item-job-error" class="job-error">{{ state.line_item_job.error if state.line_item_job and state.line_item_job.error else '' }}</div>
+            <ul id="line-item-job-warnings">
+              {% if state.line_item_job %}{% for warning in state.line_item_job.warnings %}<li>{{ warning }}</li>{% endfor %}{% endif %}
+            </ul>
+          </div>
+
+          {% if line_review.available %}
+            <div class="line-review-summary">
+              <div><strong>{{ line_review.summary.line_count }}</strong><span>visible lines</span></div>
+              <div><strong>{{ line_review.summary.alcohol_count }}</strong><span>marked alcohol</span></div>
+              <div><strong>{{ line_review.summary.excluded_count }}</strong><span>deactivated</span></div>
+              <div class="{{ 'review' if line_review.summary.review_count else '' }}"><strong>{{ line_review.summary.review_count }}</strong><span>receipts need review</span></div>
+            </div>
+
+            <div class="line-receipt-list">
+              {% for receipt in line_review.receipts %}
+                <article id="receipt-{{ receipt.source_file }}" class="line-receipt {{ 'needs-review' if receipt.status == 'review' or receipt.field_issues else '' }}">
+                  <div class="line-receipt-heading">
+                    <div>
+                      <strong>{{ receipt.vendor or receipt.source_file }}</strong>
+                      <span>
+                        {{ receipt.source_file }} · {{ receipt.expense_type or 'type missing' }} · {{ receipt.currency or '' }} ·
+                        {{ receipt.number_of_people }} {{ 'person' if receipt.number_of_people == 1 else 'people' }} ·
+                        {{ 'excluded from claim' if not receipt.included else 'included' }}
+                      </span>
+                      {% if receipt.field_issues %}<small class="field-issue">{{ receipt.field_issues|join(' · ') }}</small>{% endif %}
+                    </div>
+                    <div class="line-receipt-actions">
+                      <span class="match-badge {{ 'review' if receipt.status == 'review' else 'ok' }}">{{ receipt.status|replace('_', ' ') }}</span>
+                      <button class="button secondary small edit-expense" data-source-file="{{ receipt.source_file }}"
+                        {{ 'disabled' if trip_busy or line_review.stale }}>Edit expense</button>
+                      <button class="button secondary small add-line-item" data-source-file="{{ receipt.source_file }}"
+                        {{ 'disabled' if trip_busy or line_review.stale }}>Add line</button>
+                      <button class="button secondary small reset-line-items" data-source-file="{{ receipt.source_file }}"
+                        {{ 'disabled' if trip_busy or line_review.stale }}>Reset automatic</button>
+                    </div>
+                  </div>
+                  <div class="line-item-table-wrap">
+                    <table class="line-item-table">
+                      <thead><tr><th>Include</th><th>Receipt line</th><th>Amount</th><th>Alcohol</th><th>Detection</th><th></th></tr></thead>
+                      <tbody>
+                        {% for item in receipt.line_items %}
+                          <tr class="{{ 'excluded' if not item.included else '' }}">
+                            <td>
+                              <label class="include-switch" title="{{ 'Included in claim' if item.included else 'Deactivated from claim' }}">
+                                <input type="checkbox" class="line-item-included"
+                                  data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                                  {{ 'checked' if item.included }} {{ 'disabled' if trip_busy or line_review.stale }}>
+                                <span>{{ 'Active' if item.included else 'Off' }}</span>
+                              </label>
+                            </td>
+                            <td>
+                              <input class="input compact-input line-item-description" value="{{ item.description }}"
+                                data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                                {{ 'disabled' if trip_busy or line_review.stale }}>
+                              {% if item.synthetic %}<span class="synthetic-label">Generated review line</span>{% endif %}
+                              {% if item.inclusion_overridden %}<small>User inclusion override</small>{% endif %}
+                            </td>
+                            <td><input class="input compact-input line-item-amount" type="number" min="0" step="0.01"
+                              value="{{ '%.2f'|format(item.amount) if item.amount is not none else '' }}"
+                              data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                              {{ 'disabled' if trip_busy or line_review.stale }}></td>
+                            <td>
+                              <label class="alcohol-check">
+                                <input type="checkbox" class="line-item-alcohol"
+                                  data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                                  {{ 'checked' if item.is_alcohol }} {{ 'disabled' if trip_busy or line_review.stale }}>
+                                <span>{{ 'Alcohol' if item.is_alcohol else 'No' }}</span>
+                              </label>
+                              {% if item.alcohol_overridden %}<small>Corrected by user</small>{% endif %}
+                            </td>
+                            <td>
+                              <span>{{ item.alcohol_reason or 'No alcohol evidence' }}</span>
+                              {% if item.alcohol_matched_term %}<small>Matched “{{ item.alcohol_matched_term }}” · {{ (item.alcohol_confidence * 100)|round|int }}%</small>{% endif %}
+                            </td>
+                            <td class="line-actions">
+                              <button class="button secondary small save-line-item"
+                                data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                                {{ 'disabled' if trip_busy or line_review.stale }}>Save</button>
+                              <button class="icon-button remove-line-item"
+                                data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                                title="Remove line" {{ 'disabled' if trip_busy or line_review.stale }}>×</button>
+                            </td>
+                          </tr>
+                        {% else %}
+                          <tr><td colspan="6" class="empty-line">No line items were extracted for this receipt. Add one manually.</td></tr>
+                        {% endfor %}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div class="line-totals">
+                    <span>Receipt {{ '%.2f'|format(receipt.receipt_total) if receipt.receipt_total is not none else '—' }}</span>
+                    <span>Lines {{ '%.2f'|format(receipt.line_total) }}</span>
+                    <span>Included {{ '%.2f'|format(receipt.included_total) }}</span>
+                    <span>Excluded {{ '%.2f'|format(receipt.excluded_total) }}</span>
+                    {% if receipt.difference is not none and receipt.difference %}
+                      <strong>Difference {{ '%+.2f'|format(receipt.difference) }}</strong>
+                    {% endif %}
+                  </div>
+                  {% if receipt.blocking %}
+                    <div class="notice error">Excluded lines cannot be allocated safely until this receipt reconciles without an unreadable balancing line.</div>
+                  {% elif receipt.status == 'review' %}
+                    <div class="notice warning">Review the generated balancing line or receipt total. No exclusion is blocked unless claimable lines are deactivated.</div>
+                  {% endif %}
+                </article>
+              {% endfor %}
+            </div>
+          {% else %}
+            <div class="empty reconciliation-empty">
+              <p><strong>No line-item scan has been run yet.</strong></p>
+              <p>Scan the receipts to review alcohol and choose which meal items belong in the claim.</p>
+            </div>
+          {% endif %}
+        </section>
+
+        <section id="reconciliation" class="card reconciliation-card">
+            <div class="card-heading">
+              <div>
+                <p class="card-kicker">Step 4</p>
+                <h3>Reconcile invoices and card statements</h3>
+              </div>
+              {% if reconciliation.available %}
+                <span class="mode-badge">Last sync {{ reconciliation.synced_at|replace('T', ' ') }}</span>
+              {% endif %}
+            </div>
+            <p class="section-description">
+              Sync to retry automatic matching, then review or change each card transaction’s invoice mapping before generating Excel.
+            </p>
+            <div class="reconciliation-toolbar">
+              <div class="inherited-method">
+                <span>Receipt extraction inherited from Step 3</span>
+                <strong>
+                  {{ 'Best quality · OpenAI' if line_review.available and line_review.quality == 'best'
+                    else 'Basic / offline' if line_review.available
+                    else 'Scan receipts first' }}
+                </strong>
+                <small>Card-statement parsing and matching run locally; there is no separate quality choice here.</small>
+              </div>
+              <button class="button primary" id="sync-reconciliation-button"
+                {{ 'disabled' if trip_busy or not trip.receipts or not trip.statements or trip.statement_errors or line_review_required else '' }}>
+                Sync and auto-match
+              </button>
+            </div>
+
+            {% if line_review_required %}
+              <div class="notice warning">Scan the current receipts in Step 3 before reconciliation.</div>
+            {% endif %}
+            {% if reconciliation.stale %}
+              <div class="notice warning">Receipts or statements changed after the last sync. Sync again before reviewing the mappings.</div>
+            {% endif %}
+
+            <div id="reconciliation-job-panel" class="job-panel {{ '' if state.reconciliation_job else 'hidden' }}">
+              <div class="progress-track"><span id="reconciliation-progress-bar"></span></div>
+              <div class="job-heading">
+                <strong id="reconciliation-job-message">{{ state.reconciliation_job.message if state.reconciliation_job else '' }}</strong>
+                <span id="reconciliation-job-status">{{ state.reconciliation_job.status|replace('_', ' ')|title if state.reconciliation_job else '' }}</span>
+              </div>
+              <div id="reconciliation-job-error" class="job-error">{{ state.reconciliation_job.error if state.reconciliation_job and state.reconciliation_job.error else '' }}</div>
+              <ul id="reconciliation-job-warnings">
+                {% if state.reconciliation_job %}{% for warning in state.reconciliation_job.warnings %}<li>{{ warning }}</li>{% endfor %}{% endif %}
+              </ul>
+            </div>
+
+            {% if reconciliation.available %}
+              <div class="reconciliation-summary">
+                <div><strong>{{ reconciliation.summary.matched_invoice_count }}/{{ reconciliation.summary.invoice_count }}</strong><span>invoices matched</span></div>
+                <div><strong>{{ reconciliation.summary.matched_transaction_count }}/{{ reconciliation.summary.transaction_count }}</strong><span>card transactions mapped</span></div>
+                <div class="{{ 'review' if reconciliation.summary.needs_review_count else '' }}"><strong>{{ reconciliation.summary.needs_review_count }}</strong><span>items need review</span></div>
+              </div>
+
+              {% if trip.mode == 'arvine' %}
+              <div class="coverage-panel">
+                <div class="subsection-heading">
+                  <div>
+                    <h4>Statement coverage</h4>
+                    <p>Evidence for the “all statements added” confirmation.</p>
+                  </div>
+                </div>
+                <div class="coverage-grid">
+                  {% for account in reconciliation.coverage.accounts %}
+                    <div class="coverage-account {{ 'review' if account.unresolved_duplicate_count else '' }}">
+                      <strong>{{ account.label }}</strong>
+                      <span>
+                        {{ account.earliest_date or 'date unavailable' }} → {{ account.latest_date or 'date unavailable' }}
+                      </span>
+                      <small>
+                        {{ account.transaction_count }} transactions · {{ account.match_eligible_count }} match eligible ·
+                        {{ account.source_files|join(', ') }}
+                      </small>
+                      {% if account.overlapping_files %}<small>Overlapping file date ranges</small>{% endif %}
+                    </div>
+                  {% else %}
+                    <p class="empty-line">No normalized statement coverage is available.</p>
+                  {% endfor %}
+                </div>
+                {% if reconciliation.coverage.expected_start %}
+                  <p class="coverage-window">
+                    Expected trip coverage:
+                    <strong>{{ reconciliation.coverage.expected_start }} → {{ reconciliation.coverage.expected_end }}</strong>
+                    {% if reconciliation.coverage.buffer_days %}({{ reconciliation.coverage.buffer_days }} day buffer){% endif %}
+                  </p>
+                {% else %}
+                  <p class="coverage-window">Add trip start and end dates to validate statement coverage against the travel window.</p>
+                {% endif %}
+                <label class="field-label coverage-expected">
+                  Expected cards/accounts, one per line
+                  <textarea class="input" id="expected-accounts" rows="3" placeholder="AMEX ••••1234">{{ reconciliation.coverage.expected_accounts|join('\n') }}</textarea>
+                </label>
+                <button class="button secondary small" id="save-coverage-settings" {{ 'disabled' if trip_busy }}>Save expected accounts</button>
+                {% if reconciliation.coverage.gaps %}
+                  <div class="notice warning coverage-gaps">
+                    <div>
+                      <strong>Coverage gaps need acknowledgement</strong>
+                      {% for gap in reconciliation.coverage.gaps %}<span>{{ gap.message }}</span>{% endfor %}
+                    </div>
+                  </div>
+                {% endif %}
+              </div>
+
+              {% if reconciliation.policy_warnings %}
+                <div class="policy-warning-panel">
+                  <div class="subsection-heading">
+                    <div>
+                      <h4>Policy review</h4>
+                      <p>Warnings stay visible; a documented exception resolves them for approval.</p>
+                    </div>
+                  </div>
+                  {% for warning in reconciliation.policy_warnings %}
+                    <div class="policy-warning-row {{ 'resolved' if warning.resolved else '' }}">
+                      <div>
+                        <strong>{{ warning.message }}</strong>
+                        {% if warning.exception_note %}<span>Exception: {{ warning.exception_note }}</span>{% endif %}
+                      </div>
+                      <button class="button secondary small policy-exception"
+                        data-warning-id="{{ warning.id }}"
+                        data-note="{{ warning.exception_note }}"
+                        {{ 'disabled' if trip_busy }}>
+                        {{ 'Edit exception' if warning.resolved else 'Document exception' }}
+                      </button>
+                    </div>
+                  {% endfor %}
+                </div>
+              {% endif %}
+
+              <div class="subsection-heading">
+                <div>
+                  <h4>Invoice and CAD review</h4>
+                  <p>Receipt fields use the shared editor from Step 3; exact CAD and FX come from the mapping below.</p>
+                </div>
+              </div>
+              <div class="reconciliation-table-wrap">
+                <table class="reconciliation-table invoice-review-table">
+                  <thead>
+                    <tr>
+                      <th>Invoice</th>
+                      <th>Original total</th>
+                      <th>Extraction</th>
+                      <th>CAD used and FX</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for expense in reconciliation.expenses %}
+                      <tr class="{{ 'needs-review' if expense.extraction_status != 'ok' or expense.cad_source == 'unavailable' else '' }}">
+                        <td>
+                          <strong>{{ expense.vendor or expense.source_file }}</strong>
+                          <span>{{ expense.date or 'date missing' }} · {{ expense.expense_type or 'type missing' }}</span>
+                          <small>{{ expense.source_file }}</small>
+                        </td>
+                        <td>
+                          <strong>{{ '%.2f'|format(expense.amount) if expense.amount is not none else '?' }} {{ expense.currency or '' }}</strong>
+                          {% if expense.overridden_fields %}
+                            <span class="override-note">Overridden: {{ expense.overridden_fields|join(', ') }}</span>
+                          {% endif %}
+                        </td>
+                        <td>
+                          <span class="match-badge {{ expense.extraction_status }}">{{ expense.extraction_status }}</span>
+                          {% if expense.review_note %}<small title="{{ expense.review_note }}">{{ expense.review_note }}</small>{% endif %}
+                        </td>
+                        <td>
+                          {% if expense.cad_amount_used is not none %}
+                            <strong>{{ '%.2f'|format(expense.cad_amount_used) }} CAD</strong>
+                            <span>
+                              {% if expense.cad_source == 'manual' %}Manual override
+                              {% elif expense.cad_source == 'statement_aggregated' %}Aggregated statement CAD
+                              {% elif expense.cad_source == 'statement' %}Exact statement CAD
+                              {% else %}CAD invoice total{% endif %}
+                            </span>
+                            {% if expense.fx_rate is not none %}<small>FX {{ '%.6f'|format(expense.fx_rate) }}</small>{% endif %}
+                          {% else %}
+                            <strong>Unavailable</strong>
+                            <span>Map complete statement funding or add a manual CAD amount</span>
+                          {% endif %}
+                        </td>
+                        <td>
+                          <button class="button secondary edit-expense" data-source-file="{{ expense.source_file }}"
+                            {{ 'disabled' if trip_busy else '' }}>Edit expense</button>
+                        </td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+
+              {% if reconciliation.unmatched_expenses %}
+                <div class="unmatched-invoices">
+                  <strong>Invoices without a card match</strong>
+                  <div>
+                    {% for expense in reconciliation.unmatched_expenses %}
+                      <span>{{ expense.vendor or expense.source_file }} · {{ expense.amount if expense.amount is not none else '?' }} {{ expense.currency or '' }}</span>
+                    {% endfor %}
+                  </div>
+                </div>
+              {% endif %}
+              {% endif %}
+
+              <div id="statement-mappings" class="subsection-heading">
+                <div>
+                  <h4>Statement mappings</h4>
+                  <p>Each charge should point to the receipt it settles. The resulting CAD amount and FX rate feed the final claim.</p>
+                </div>
+              </div>
+              <div class="reconciliation-table-wrap">
+                <table class="reconciliation-table">
+                  <thead>
+                    <tr>
+                      <th>Card transaction</th>
+                      <th>Statement amount</th>
+                      <th>Invoice mapping</th>
+                      <th>Accounting FX rate</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for transaction in reconciliation.transactions %}
+                      <tr class="{{ 'needs-review' if transaction.match_eligible and not transaction.ignored and (not transaction.expense_file or transaction.cad_completeness != 'complete' or transaction.normalization_status in ['review', 'possible_duplicate']) else 'audit-row' if not transaction.match_eligible or transaction.ignored else '' }}">
+                        <td>
+                          <strong>{{ transaction.description or 'No description' }}</strong>
+                          <span>{{ transaction.transaction_date or 'date missing' }} · {{ transaction.provider|upper }} {{ transaction.account_label }}</span>
+                          <small>
+                            {% for source in transaction.source_rows %}
+                              {{ source.file }} row {{ source.row }}{{ ' · ' if not loop.last else '' }}
+                            {% endfor %}
+                          </small>
+                          {% if transaction.review_note %}<small class="transaction-note">{{ transaction.review_note }}</small>{% endif %}
+                        </td>
+                        <td>
+                          <strong>
+                            {{ '%.2f'|format(transaction.purchase_amount) if transaction.purchase_amount is not none else '?' }}
+                            {{ transaction.purchase_currency or '' }}
+                          </strong>
+                          <span>
+                            {% if transaction.cad_amount is not none %}
+                              {{ '%.2f'|format(transaction.cad_amount) }} CAD charged
+                            {% else %}
+                              CAD {{ transaction.cad_completeness }}
+                            {% endif %}
+                          </span>
+                        </td>
+                        <td>
+                          <select class="select mapping-select" data-group-id="{{ transaction.group_id }}" {{ 'disabled' if trip_busy or reconciliation.stale or not transaction.match_eligible or transaction.ignored or transaction.allocations else '' }}>
+                            <option value="__auto__" {{ 'selected' if not transaction.override_active else '' }}>
+                              Automatic result{% if transaction.expense_label and not transaction.override_active %}: {{ transaction.expense_label }}{% endif %}
+                            </option>
+                            <option value="" {{ 'selected' if transaction.override_active and transaction.override_expense_file is none else '' }}>Unmatched</option>
+                            {% for expense in reconciliation.expenses %}
+                              <option value="{{ expense.source_file }}"
+                                {{ 'selected' if transaction.override_active and transaction.override_expense_file == expense.source_file else '' }}>
+                                {{ expense.vendor or expense.source_file }} · {{ expense.amount if expense.amount is not none else '?' }} {{ expense.currency or '' }} · {{ expense.date or 'date missing' }}
+                              </option>
+                            {% endfor %}
+                          </select>
+                          {% if transaction.suggested_expense_label and not transaction.expense_file %}
+                            <small>Suggested: {{ transaction.suggested_expense_label }} ({{ (transaction.match_confidence * 100)|round|int }}%)</small>
+                          {% endif %}
+                          {% if transaction.allocations %}
+                            <small>
+                              {{ transaction.allocations|length }} allocations ·
+                              {{ '%.2f'|format(transaction.allocation_total) }} CAD assigned ·
+                              balance {{ '%.2f'|format(transaction.allocation_balance) }} CAD
+                            </small>
+                          {% endif %}
+                          {% if trip.mode == 'arvine' %}
+                            <button class="button secondary small edit-allocations" data-group-id="{{ transaction.group_id }}"
+                              {{ 'disabled' if trip_busy or reconciliation.stale or transaction.ignored or transaction.cad_completeness != 'complete' else '' }}>
+                              {{ 'Edit split' if transaction.allocations else 'Split / allocate' }}
+                            </button>
+                          {% endif %}
+                        </td>
+                        <td>
+                          {% if transaction.allocations %}
+                            <strong>{{ transaction.allocation_status|replace('_', ' ')|title }}</strong>
+                            <span>Balance {{ '%.2f'|format(transaction.allocation_balance) }} CAD</span>
+                          {% elif transaction.fx_rate is not none and transaction.expense_file %}
+                            <strong>{{ '%.6f'|format(transaction.fx_rate) }}</strong>
+                            <span>CAD per invoice currency unit</span>
+                          {% else %}
+                            <strong>—</strong>
+                            <span>{{ 'Complete CAD amount unavailable' if transaction.cad_completeness != 'complete' else 'Map an invoice to calculate' }}</span>
+                          {% endif %}
+                        </td>
+                        <td>
+                          <span class="match-badge {{ transaction.match_status }}">{{ transaction.match_status }}</span>
+                          {% if transaction.match_confidence %}<small>{{ (transaction.match_confidence * 100)|round|int }}% confidence</small>{% endif %}
+                          {% if transaction.match_eligible or transaction.ignored %}
+                            <label class="duplicate-field">Disposition
+                              <select class="select transaction-decision"
+                                data-group-id="{{ transaction.group_id }}"
+                                data-possible-duplicate="{{ 'true' if transaction.possible_duplicate else 'false' }}"
+                                {{ 'disabled' if trip_busy or reconciliation.stale else '' }}>
+                                {% if transaction.possible_duplicate %}
+                                  <option value="unresolved" {{ 'selected' if transaction.duplicate_resolution == 'unresolved' else '' }}>Needs duplicate decision</option>
+                                {% endif %}
+                                <option value="keep" {{ 'selected' if not transaction.ignored and (not transaction.possible_duplicate or transaction.duplicate_resolution == 'keep') else '' }}>
+                                  {{ 'Keep repeated transaction' if transaction.possible_duplicate else 'Include in trip review' }}
+                                </option>
+                                <option value="ignore" {{ 'selected' if transaction.ignored else '' }}>
+                                  {{ 'Ignore as duplicate' if transaction.possible_duplicate else 'Exclude from this trip' }}
+                                </option>
+                              </select>
+                            </label>
+                            {% if transaction.decision_note %}<small>{{ transaction.decision_note }}</small>{% endif %}
+                          {% elif transaction.normalization_status != 'ok' %}
+                            <small>Normalization: {{ transaction.normalization_status|replace('_', ' ') }}</small>
+                          {% endif %}
+                        </td>
+                      </tr>
+                    {% else %}
+                      <tr><td colspan="5" class="empty-line">No match-eligible card transactions were found.</td></tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            {% else %}
+              <div class="empty reconciliation-empty">
+                <p><strong>No reconciliation has been run yet.</strong></p>
+                <p>Sync after uploading invoices and statements to review mappings and accounting exchange rates here.</p>
+              </div>
+            {% endif %}
+        </section>
+
+        <section id="final-review" class="card consolidation-card">
+          <div class="card-heading">
+            <div>
+              <p class="card-kicker">Step 5</p>
+              <h3>Review and finalize the claim</h3>
+            </div>
+            <span class="mode-badge {{ 'finalized' if consolidation.is_finalized else '' }}">
+              {{ 'Finalized' if consolidation.is_finalized else consolidation.summary.blocking_count|string + ' blocking' }}
+            </span>
+          </div>
+          <p class="section-description">
+            This is the claim that will be exported. Correct receipt fields, people, included lines, and statement mappings above;
+            calculated CAD and accounting results update here before Excel is created.
+          </p>
+
+          <div class="claim-summary">
+            <div><span>Claimable total</span><strong>{{ '%.2f'|format(consolidation.summary.claimable_cad) }} CAD</strong></div>
+            <div><span>Included expenses</span><strong>{{ consolidation.summary.included_expense_count }}/{{ consolidation.summary.expense_count }}</strong></div>
+            <div><span>Statement-backed</span><strong>{{ consolidation.summary.matched_expense_count }}</strong></div>
+            <div class="{{ 'review' if consolidation.summary.blocking_count else '' }}"><span>Blocking issues</span><strong>{{ consolidation.summary.blocking_count }}</strong></div>
+          </div>
+
+          <div class="issue-queue">
+            <div class="subsection-heading">
+              <div><h4>Review queue</h4><p>Every blocking item must be resolved before finalization.</p></div>
+            </div>
+            {% for issue in consolidation.issues %}
+              <a class="issue-row {{ issue.severity }}" href="#{{ issue.target }}">
+                <span>{{ issue.kind|replace('_', ' ')|title }}</span>
+                <strong>{{ issue.message }}</strong>
+              </a>
+            {% else %}
+              <div class="notice info">No blocking review items remain. Check the calculated expense ledger, then finalize.</div>
+            {% endfor %}
+          </div>
+
+          <div class="reconciliation-table-wrap result-ledger">
+            <table class="reconciliation-table">
+              <thead>
+                <tr><th>Expense</th><th>Claim basis</th><th>CAD and FX</th><th>Final claim</th><th>Status</th></tr>
+              </thead>
+              <tbody>
+                {% for expense in consolidation.expenses %}
+                  <tr class="{{ 'audit-row' if not expense.included else 'needs-review' if expense.status == 'review' else '' }}">
+                    <td>
+                      <strong>{{ expense.vendor or expense.source_file }}</strong>
+                      <span>{{ expense.date or 'date missing' }} · {{ expense.expense_type or 'type missing' }}</span>
+                      <small>{{ expense.source_file }}</small>
+                    </td>
+                    <td>
+                      <strong>{{ '%.2f'|format(expense.claimable_original) }} {{ expense.currency or '' }}</strong>
+                      <span>
+                        {{ 'Excluded' if not expense.included else
+                           ('Included lines ÷ ' + expense.number_of_people|string + (' people' if expense.number_of_people != 1 else ' person')) }}
+                      </span>
+                    </td>
+                    <td>
+                      {% if expense.cad_amount_used is not none %}
+                        <strong>{{ '%.2f'|format(expense.cad_amount_used) }} CAD source</strong>
+                        <span>{{ expense.cad_source|replace('_', ' ')|title }}</span>
+                        {% if expense.fx_rate is not none %}<small>FX {{ '%.6f'|format(expense.fx_rate) }} CAD/{{ expense.currency }}</small>{% endif %}
+                        {% if expense.fx_basis_amount_used is not none %}
+                          <small>
+                            FX basis {{ '%.2f'|format(expense.fx_basis_amount_used) }} {{ expense.currency }}
+                            · {{ expense.fx_basis_status|replace('_', ' ') }}
+                          </small>
+                        {% endif %}
+                      {% else %}
+                        <strong>CAD unavailable</strong>
+                      {% endif %}
+                    </td>
+                    <td><strong>{{ '%.2f CAD'|format(expense.claimable_cad) if expense.claimable_cad is not none else '—' }}</strong></td>
+                    <td><span class="match-badge {{ 'ok' if expense.status == 'ready' else 'audit' if expense.status == 'excluded' else 'review' }}">{{ expense.status }}</span></td>
+                  </tr>
+                {% else %}
+                  <tr><td colspan="5" class="empty-line">Scan receipts to calculate the claim.</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+
+          {% if consolidation.accounting.available %}
+            <div class="accounting-preview">
+              <div>
+                <strong>Accounting preview · profile {{ consolidation.accounting.profile_version }}</strong>
+                <span>Counter-account: {{ consolidation.accounting.counter_account }}</span>
+              </div>
+              <div class="accounting-preview-rows">
+                {% for row in consolidation.accounting.rows %}
+                  <span>{{ row.account }} <strong>{{ '%.2f'|format(row.amount_cad) }} CAD</strong></span>
+                {% endfor %}
+              </div>
+              <div class="accounting-check {{ 'review' if consolidation.accounting.balance_difference|abs >= 0.01 else '' }}">
+                Journal {{ '%.2f'|format(consolidation.accounting.journal_total) }} CAD ·
+                claim {{ '%.2f'|format(consolidation.accounting.claim_total) }} CAD ·
+                difference {{ '%+.2f'|format(consolidation.accounting.balance_difference) }}
+              </div>
+            </div>
+          {% endif %}
+
+          {% if trip.mode == 'arvine' %}
+            <label class="confirmation">
+              <input type="checkbox" id="statements-complete" {{ 'checked' if consolidation.is_finalized }}>
+              <span>I confirm that all card and bank statements for this trip have been added.</span>
+            </label>
+            {% if reconciliation and reconciliation.available and reconciliation.coverage.gaps %}
+              <label class="field-label">
+                Coverage gap explanation
+                <textarea class="input" id="coverage-acknowledgement" rows="3" placeholder="Explain why finalization can proceed despite the gaps." required>{{ reconciliation.coverage.confirmation.note if reconciliation.coverage.confirmation else '' }}</textarea>
+              </label>
+            {% endif %}
+          {% endif %}
+
+          {% if consolidation.is_finalized %}
+            <div class="notice info">
+              Finalized {{ consolidation.finalized_at|replace('T', ' ') }}. Any source or review change automatically reopens it.
+            </div>
+          {% endif %}
+          <button class="button primary large" id="finalize-button"
+            {{ 'disabled' if trip_busy or not consolidation.is_ready }}>
+            {{ 'Finalize current review again' if consolidation.is_finalized else 'Finalize current review' }}
+          </button>
+        </section>
+
+        <section class="card generate-card">
+          <div class="card-heading">
+            <div>
+              <p class="card-kicker">Step 6</p>
+              <h3>Export the finalized claim to Excel</h3>
+            </div>
+            <span class="mode-badge">{{ trip.mode|upper }}</span>
+          </div>
+
+          {% if trip.mode == 'arvine' %}
+            <div class="accounting-assumptions">
+              <div>
+                <strong>Accounting assumptions · profile {{ trip.accounting_profile.version }}</strong>
+                <span>
+                  {{ trip.accounting_profile.counter_account }} ·
+                  GST/HST {{ 'registered' if trip.accounting_profile.gst_hst_registrant else 'not registered' }} ·
+                  QST {{ 'registered' if trip.accounting_profile.qst_registrant else 'not registered' }} ·
+                  meals {{ (trip.accounting_profile.meal_deduction_pct * 100)|round|int }}% deductible
+                </span>
+              </div>
+              <button class="button secondary small" id="open-accounting-button" {{ 'disabled' if trip_busy }}>Review assumptions</button>
+            </div>
+          {% endif %}
+
+          <div class="processing-summary">
+            <div>
+              <span>Receipt extraction</span>
+              <strong>
+                {{ 'Best quality · OpenAI' if line_review.available and line_review.quality == 'best'
+                  else 'Basic / offline' if line_review.available
+                  else 'Not scanned yet' }}
+              </strong>
+              <small>Inherited from Step 3 and kept consistent for this workbook.</small>
+            </div>
+            <div>
+              <span>Excel creation</span>
+              <strong>Local on this Mac</strong>
+              <small>No separate AI choice. It applies your reviewed line items, mappings, and accounting rules.</small>
+            </div>
+          </div>
+
+          {% if not state.system.heic_available %}
+            <div class="notice info">HEIC is not enabled in this environment. Re-run local setup, or export iPhone scans as PDF, JPEG, or PNG.</div>
+          {% endif %}
+          {% if trip.statement_errors %}
+            <div class="notice error">Resolve the statement errors above before generating.</div>
+          {% endif %}
+          {% if reconciliation_required %}
+            <div class="notice warning">Run Sync and auto-match with the current receipts and statements before generating.</div>
+          {% endif %}
+          {% if allocation_required %}
+            <div class="notice warning">Finish all split allocations so their CAD totals balance before generating.</div>
+          {% endif %}
+          {% if line_review_required %}
+            <div class="notice warning">Scan and review the current receipt line items before generating.</div>
+          {% endif %}
+          {% if line_review_blocking %}
+            <div class="notice error">Resolve excluded lines on receipts with incomplete line totals before generating.</div>
+          {% endif %}
+          {% if finalization_required %}
+            <div class="notice warning">Finalize the current app review above before exporting Excel.</div>
+          {% endif %}
+
+          <button class="button primary large" id="generate-button" data-trip="{{ trip.name }}"
+            {{ 'disabled' if trip_busy or not trip.receipts or trip.statement_errors or reconciliation_required or allocation_required or line_review_required or line_review_blocking or finalization_required else '' }}>
+            Export trip Excel file
+          </button>
+
+          <div id="job-panel" class="job-panel {{ '' if state.job else 'hidden' }}">
+            <div class="progress-track"><span id="progress-bar"></span></div>
+            <div class="job-heading">
+              <strong id="job-message">{{ state.job.message if state.job else '' }}</strong>
+              <span id="job-status">{{ state.job.status|replace('_', ' ')|title if state.job else '' }}</span>
+            </div>
+            <div id="job-error" class="job-error">{{ state.job.error if state.job and state.job.error else '' }}</div>
+            <ul id="job-warnings">
+              {% if state.job %}{% for warning in state.job.warnings %}<li>{{ warning }}</li>{% endfor %}{% endif %}
+            </ul>
+          </div>
+        </section>
+
+        <section class="card workbooks-card">
+          <div class="card-heading">
+            <div>
+              <p class="card-kicker">Output</p>
+              <h3>Generated workbooks</h3>
+            </div>
+            <span class="count-badge">{{ trip.workbooks|length }}</span>
+          </div>
+          <div class="workbook-list">
+            {% for workbook in trip.workbooks %}
+              <div class="workbook-row">
+                <div>
+                  <strong>{{ workbook.name }}</strong>
+                  <span>{{ workbook.modified|replace('T', ' ') }} · {{ (workbook.size / 1024)|round(1) }} KB</span>
+                </div>
+                <div class="button-group">
+                  <button class="button primary open-workbook" data-filename="{{ workbook.name }}">Open in Excel</button>
+                  <button class="button secondary reveal-workbook" data-filename="{{ workbook.name }}">Finder</button>
+                  <a class="button secondary" href="/api/trips/{{ trip.name|urlencode }}/download-workbook?filename={{ workbook.name|urlencode }}">Download</a>
+                </div>
+              </div>
+            {% else %}
+              <div class="empty"><p>No workbook generated yet.</p></div>
+            {% endfor %}
+          </div>
+        </section>
+
+        <section class="card lifecycle-card">
+          <div class="card-heading">
+            <div>
+              <p class="card-kicker">Review lifecycle</p>
+              <h3>{{ trip.lifecycle.label }}</h3>
+            </div>
+            <span class="lifecycle-badge {{ trip.lifecycle.status }}">{{ trip.lifecycle.label }}</span>
+          </div>
+          <p class="section-description">{{ trip.lifecycle.reason }}</p>
+          {% if trip.lifecycle.approval %}
+            <div class="approval-record {{ 'current' if trip.lifecycle.approval.current else 'stale' }}">
+              <strong>
+                {{ 'Current approval' if trip.lifecycle.approval.current else 'Prior approval — trip changed afterwards' }}
+              </strong>
+              <span>
+                {{ trip.lifecycle.approval.approved_at|replace('T', ' ') }} ·
+                {{ trip.lifecycle.approval.reviewer }} ·
+                {{ trip.lifecycle.approval.workbook }}
+              </span>
+              <small>{{ trip.lifecycle.approval.note }}</small>
+            </div>
+          {% endif %}
+          {% if trip.lifecycle.current_generation %}
+            <div class="notice info">
+              <span>
+                Current workbook: <strong>{{ trip.lifecycle.current_generation.workbook }}</strong>
+                {% if trip.lifecycle.current_generation.manually_modified %} · manually updated after generation{% endif %}
+              </span>
+            </div>
+          {% endif %}
+          <div class="lifecycle-actions">
+            {% if trip.lifecycle.archived %}
+              <button class="button primary archive-trip-button" data-archived="false">Restore trip</button>
+            {% else %}
+              <button class="button primary" id="open-approval-button"
+                {{ 'disabled' if trip_busy or not trip.lifecycle.current_generation or trip.metadata_gaps }}>
+                {{ 'Approve current version' if trip.lifecycle.approval else 'Approve trip' }}
+              </button>
+              <button class="button secondary" id="export-package-button"
+                {{ 'disabled' if trip_busy or not trip.lifecycle.approval_current }}>
+                Export approved ZIP
+              </button>
+              <button class="button secondary archive-trip-button" data-archived="true" {{ 'disabled' if trip_busy }}>Archive trip</button>
+            {% endif %}
+          </div>
+          {% if trip.packages %}
+            <div class="package-list">
+              {% for package in trip.packages %}
+                <div>
+                  <span>{{ package.name }} · {{ (package.size / 1024)|round(1) }} KB</span>
+                  <a class="button secondary small" href="/api/trips/{{ trip.name|urlencode }}/download-package?filename={{ package.name|urlencode }}">Download</a>
+                </div>
+              {% endfor %}
+            </div>
+          {% endif %}
+        </section>
+      {% else %}
+        <section class="empty welcome-empty">
+          <p class="eyebrow">Ready when you are</p>
+          <h2>Create your first business trip</h2>
+          <p>The app will create the folders for receipts, statements, and versioned Excel workbooks.</p>
+          <button class="button primary" id="empty-new-trip-button">Create a trip</button>
+        </section>
+      {% endif %}
+    </main>
+  </div>
+
+  <dialog id="new-trip-dialog" class="modal">
+    <form id="new-trip-form">
+      <div class="modal-heading">
+        <div><p class="eyebrow">New workspace</p><h2>Create a business trip</h2></div>
+        <button type="button" class="icon-button close-dialog">×</button>
+      </div>
+      <label class="field-label">Trip month<input class="input" name="month" type="month" required></label>
+      <label class="field-label">Trip name<input class="input" name="description" placeholder="Montreal client meetings" required></label>
+      <label class="field-label">Processing mode
+        <select class="select full-width" name="mode"><option value="arvine">Arvine</option><option value="ivado">IVADO</option></select>
+      </label>
+      <details class="optional-trip-fields">
+        <summary>Add traveller, dates and purpose</summary>
+        <label class="field-label">Traveller<input class="input" name="traveller"></label>
+        <div class="form-grid">
+          <label class="field-label">Start date<input class="input" name="start_date" type="date"></label>
+          <label class="field-label">End date<input class="input" name="end_date" type="date"></label>
+        </div>
+        <label class="field-label">Business purpose<input class="input" name="business_purpose" placeholder="Client meetings and project planning"></label>
+      </details>
+      <p class="form-error" id="new-trip-error"></p>
+      <button class="button primary full-width" type="submit">Create trip</button>
+    </form>
+  </dialog>
+
+  <dialog id="settings-dialog" class="modal">
+    <form id="settings-form">
+      <div class="modal-heading">
+        <div><p class="eyebrow">Local settings</p><h2>OpenAI API key</h2></div>
+        <button type="button" class="icon-button close-dialog">×</button>
+      </div>
+      <p class="help-text">
+        Paste the key here. It is saved only on this Mac in
+        <code class="settings-path">{{ state.system.openai_env_path }}</code>
+        with private file permissions (<code>0600</code>) and is never sent back to the browser.
+        Each colleague must add their own key on their own copy of the app.
+        <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">Create or manage an API key</a>.
+      </p>
+      <label class="field-label">
+        {{ 'Replace configured API key' if state.system.openai_configured else 'API key' }}
+        <input class="input" name="api_key" type="password" autocomplete="off" required>
+      </label>
+      <p class="form-error" id="settings-error"></p>
+      <button class="button primary full-width" type="submit">
+        {{ 'Replace key' if state.system.openai_configured else 'Save key and enable Best quality' }}
+      </button>
+    </form>
+  </dialog>
+
+  {% if state.selected %}
+    {% set metadata = state.selected.metadata %}
+    {% set policy = metadata.policy %}
+    <dialog id="trip-metadata-dialog" class="modal wide-modal">
+      <form id="trip-metadata-form">
+        <div class="modal-heading">
+          <div><p class="eyebrow">Trip record</p><h2>Trip details and policy</h2></div>
+          <button type="button" class="icon-button close-dialog">×</button>
+        </div>
+        <p class="help-text">These details explain the business trip, guide statement coverage, and are copied into generated workbooks.</p>
+        <div class="form-grid">
+          <label class="field-label">Traveller<input class="input" name="traveller" value="{{ metadata.traveller }}"></label>
+          <label class="field-label">Company<input class="input" name="company" value="{{ metadata.company }}"></label>
+          <label class="field-label">Start date<input class="input" name="start_date" type="date" value="{{ metadata.start_date }}"></label>
+          <label class="field-label">End date<input class="input" name="end_date" type="date" value="{{ metadata.end_date }}"></label>
+          <label class="field-label">Origin(s)<input class="input" name="origins" value="{{ metadata.origins|join(', ') }}"></label>
+          <label class="field-label">Destination(s)<input class="input" name="destinations" value="{{ metadata.destinations|join(', ') }}"></label>
+          <label class="field-label span-2">Business purpose<input class="input" name="business_purpose" value="{{ metadata.business_purpose }}"></label>
+          <label class="field-label">Client / project<input class="input" name="client_project" value="{{ metadata.client_project }}"></label>
+          <label class="field-label">Cost centre<input class="input" name="cost_centre" value="{{ metadata.cost_centre }}"></label>
+          <label class="field-label">Approver<input class="input" name="approver" value="{{ metadata.approver }}"></label>
+          <label class="field-label">Payment / reimbursement method<input class="input" name="payment_method" value="{{ metadata.payment_method }}"></label>
+          <label class="field-label">Policy profile<input class="input" name="policy_profile" value="{{ metadata.policy_profile }}"></label>
+          <label class="field-label">Expected cards/accounts<input class="input" name="expected_accounts" value="{{ metadata.expected_accounts|join(', ') }}"></label>
+        </div>
+        <div class="manual-cad-panel policy-fields">
+          <div>
+            <strong>Policy controls</strong>
+            <p>Violations create review warnings. They do not silently exclude or change expenses.</p>
+          </div>
+          <div class="form-grid">
+            <label class="field-label">Receipt threshold CAD<input class="input" name="receipt_required_threshold" type="number" min="0" step="0.01" value="{{ policy.receipt_required_threshold }}"></label>
+            <label class="field-label">Meal limit CAD<input class="input" name="meal_limit_cad" type="number" min="0" step="0.01" value="{{ policy.meal_limit_cad if policy.meal_limit_cad is not none else '' }}"></label>
+            <label class="field-label span-2">Allowed categories<input class="input" name="allowed_categories" value="{{ policy.allowed_categories|join(', ') }}"></label>
+            <label class="field-label">Alcohol treatment
+              <select class="select" name="alcohol_treatment">
+                {% for value in ['allow', 'review', 'prohibit'] %}<option value="{{ value }}" {{ 'selected' if policy.alcohol_treatment == value else '' }}>{{ value|title }}</option>{% endfor %}
+              </select>
+            </label>
+            <label class="field-label">Personal expense treatment
+              <select class="select" name="personal_expense_treatment">
+                {% for value in ['allow', 'review', 'prohibit'] %}<option value="{{ value }}" {{ 'selected' if policy.personal_expense_treatment == value else '' }}>{{ value|title }}</option>{% endfor %}
+              </select>
+            </label>
+            <label class="field-label">Mileage rate CAD<input class="input" name="mileage_rate_cad" type="number" min="0" step="0.001" value="{{ policy.mileage_rate_cad if policy.mileage_rate_cad is not none else '' }}"></label>
+            <label class="field-label">Per diem CAD<input class="input" name="per_diem_cad" type="number" min="0" step="0.01" value="{{ policy.per_diem_cad if policy.per_diem_cad is not none else '' }}"></label>
+            <label class="field-label">Statement coverage buffer (days)<input class="input" name="statement_coverage_buffer_days" type="number" min="0" max="60" step="1" value="{{ policy.statement_coverage_buffer_days }}"></label>
+          </div>
+        </div>
+        <p class="form-error" id="trip-metadata-error"></p>
+        <div class="modal-actions">
+          <button class="button primary" type="submit">Save trip details</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="approval-dialog" class="modal">
+      <form id="approval-form">
+        <div class="modal-heading">
+          <div><p class="eyebrow">Final review</p><h2>Approve trip package</h2></div>
+          <button type="button" class="icon-button close-dialog">×</button>
+        </div>
+        <p class="help-text">Approval records hashes of all sources, reconciliation decisions, policy/profile snapshots, and the selected workbook. Any later change reopens the trip.</p>
+        <label class="field-label">Workbook
+          <select class="select full-width" name="workbook" required>
+            {% for workbook in state.selected.workbooks %}
+              <option value="{{ workbook.name }}" {{ 'selected' if state.selected.lifecycle.current_generation and state.selected.lifecycle.current_generation.workbook == workbook.name else '' }}>
+                {{ workbook.name }}
+              </option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="field-label">Reviewer / approver<input class="input" name="reviewer" value="{{ state.selected.metadata.approver }}" required></label>
+        <label class="field-label">Approval note<textarea class="input" name="note" rows="3" placeholder="Reviewed receipts, allocations, coverage and accounting assumptions." required></textarea></label>
+        <p class="form-error" id="approval-error"></p>
+        <button class="button primary full-width" type="submit">Approve this version</button>
+      </form>
+    </dialog>
+  {% endif %}
+
+  <dialog id="expense-dialog" class="modal wide-modal">
+    <form id="expense-review-form">
+      <div class="modal-heading">
+        <div><p class="eyebrow">Expense review</p><h2 id="expense-dialog-title">Review expense</h2></div>
+        <button type="button" class="icon-button close-dialog">×</button>
+      </div>
+      <p class="help-text">These values are the source of truth for the final preview and exported workbook.</p>
+      <input type="hidden" name="source_file">
+      <div class="expense-claim-controls">
+        <label class="confirmation">
+          <input type="checkbox" name="included">
+          <span>Include this expense in the claim</span>
+        </label>
+        <label class="field-label">People sharing this expense
+          <input class="input" name="number_of_people" type="number" min="1" max="99" step="1" required>
+          <small class="field-error" data-error-for="number_of_people"></small>
+        </label>
+      </div>
+      <div class="form-grid">
+        <label class="field-label">Receipt date<input class="input" name="date" type="date"><small class="field-error" data-error-for="date"></small></label>
+        <label class="field-label">Currency<input class="input" name="currency" maxlength="3" placeholder="CAD"><small class="field-error" data-error-for="currency"></small></label>
+        <label class="field-label span-2">Vendor<input class="input" name="vendor"><small class="field-error" data-error-for="vendor"></small></label>
+        <label class="field-label span-2">Description<input class="input" name="description"><small class="field-error" data-error-for="description"></small></label>
+        <label class="field-label">Expense type<input class="input" name="expense_type" placeholder="meal, hotel, transport"><small class="field-error" data-error-for="expense_type"></small></label>
+        <label class="field-label">Receipt total<input class="input" name="amount" type="number" min="0" step="0.01"><small class="field-error" data-error-for="amount"></small></label>
+        <label class="field-label">Country<input class="input" name="country"><small class="field-error" data-error-for="country"></small></label>
+        <label class="field-label">Province / state<input class="input" name="province"><small class="field-error" data-error-for="province"></small></label>
+        <label class="field-label">Subtotal<input class="input" name="subtotal" type="number" min="0" step="0.01"><small class="field-error" data-error-for="subtotal"></small></label>
+        <label class="field-label">GST/HST<input class="input" name="gst_hst" type="number" min="0" step="0.01"><small class="field-error" data-error-for="gst_hst"></small></label>
+        <label class="field-label">QST<input class="input" name="qst" type="number" min="0" step="0.01"><small class="field-error" data-error-for="qst"></small></label>
+        <label class="field-label">Tax documentation<input class="input" name="tax_documentation_status" placeholder="ok or review"><small class="field-error" data-error-for="tax_documentation_status"></small></label>
+        <label class="field-label">GST/HST number<input class="input" name="gst_hst_number"><small class="field-error" data-error-for="gst_hst_number"></small></label>
+        <label class="field-label">QST number<input class="input" name="qst_number"><small class="field-error" data-error-for="qst_number"></small></label>
+        <label class="field-label span-2">Business purpose<input class="input" name="business_purpose"><small class="field-error" data-error-for="business_purpose"></small></label>
+        <label class="field-label span-2">Meal attendees / client<input class="input" name="attendees_client"><small class="field-error" data-error-for="attendees_client"></small></label>
+        <label class="field-label">Manual CAD amount<input class="input" name="manual_cad_override" type="number" min="0.01" step="0.01" placeholder="Only if exact statement CAD is unavailable"><small class="field-error" data-error-for="manual_cad_override"></small></label>
+        <label class="field-label">Manual CAD source / reason<input class="input" name="manual_cad_note" placeholder="Provider confirmation, card portal…"><small class="field-error" data-error-for="manual_cad_note"></small></label>
+        <label class="field-label span-2">Review note<textarea class="input" name="review_note" rows="3"></textarea><small class="field-error" data-error-for="review_note"></small></label>
+      </div>
+      <p class="form-error" id="expense-review-error"></p>
+      <div class="modal-actions">
+        <button class="button secondary" type="button" id="restore-expense-button">Restore extracted values</button>
+        <button class="button primary" type="submit">Save expense</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="transaction-disposition-dialog" class="modal">
+    <form id="transaction-disposition-form">
+      <div class="modal-heading">
+        <div>
+          <p class="eyebrow">Statement review</p>
+          <h2 id="transaction-disposition-title">Exclude transaction</h2>
+        </div>
+        <button type="button" class="icon-button cancel-transaction-disposition">×</button>
+      </div>
+      <input type="hidden" name="group_id">
+      <input type="hidden" name="possible_duplicate">
+      <p class="help-text" id="transaction-disposition-help">
+        The transaction stays in the audit trail but will not be matched to a trip expense.
+      </p>
+      <label class="field-label">
+        Reason
+        <textarea class="input" name="note" rows="4"
+          placeholder="Personal subscription, unrelated charge, overlapping statement export…" required></textarea>
+      </label>
+      <p class="form-error" id="transaction-disposition-error"></p>
+      <div class="modal-actions">
+        <button class="button secondary cancel-transaction-disposition" type="button">Cancel</button>
+        <button class="button primary" type="submit">Exclude transaction</button>
+      </div>
+    </form>
+  </dialog>
+
+  {% if state.selected and state.selected.mode == 'arvine' %}
+    {% set profile = state.selected.accounting_profile %}
+    <dialog id="accounting-dialog" class="modal wide-modal">
+      <form id="accounting-form">
+        <div class="modal-heading">
+          <div><p class="eyebrow">Accounting assumptions</p><h2>Trip accounting profile</h2></div>
+          <button type="button" class="icon-button close-dialog">×</button>
+        </div>
+        <p class="help-text">These are configurable assumptions, not tax advice. A snapshot is written into each generated workbook.</p>
+        <div class="form-grid">
+          <label class="field-label span-2">Company / legal name<input class="input" name="company_legal_name" value="{{ profile.company_legal_name }}"></label>
+          <label class="field-label">Profile version<input class="input" name="version" value="{{ profile.version }}" required></label>
+          <label class="field-label">Effective date<input class="input" name="effective_date" type="date" value="{{ profile.effective_date }}" required></label>
+          <label class="field-label">Reimbursement type
+            <select class="select" name="traveller_reimbursement_type">
+              <option value="shareholder_reimbursement" {{ 'selected' if profile.traveller_reimbursement_type == 'shareholder_reimbursement' else '' }}>Shareholder reimbursement</option>
+              <option value="employee_reimbursement" {{ 'selected' if profile.traveller_reimbursement_type == 'employee_reimbursement' else '' }}>Employee reimbursement</option>
+              <option value="corporate_card" {{ 'selected' if profile.traveller_reimbursement_type == 'corporate_card' else '' }}>Corporate card</option>
+            </select>
+          </label>
+          <label class="field-label">Counter-account<input class="input" name="counter_account" value="{{ profile.counter_account }}" required></label>
+          <label class="confirmation"><input type="checkbox" name="gst_hst_registrant" {{ 'checked' if profile.gst_hst_registrant else '' }}><span>GST/HST registrant</span></label>
+          <label class="confirmation"><input type="checkbox" name="qst_registrant" {{ 'checked' if profile.qst_registrant else '' }}><span>QST registrant</span></label>
+          <label class="field-label">Commercial use %<input class="input" name="commercial_use_pct" type="number" min="0" max="100" step="0.01" value="{{ profile.commercial_use_pct * 100 }}"></label>
+          <label class="field-label">Normal tax recovery %<input class="input" name="normal_tax_recovery_pct" type="number" min="0" max="100" step="0.01" value="{{ profile.normal_tax_recovery_pct * 100 }}"></label>
+          <label class="field-label">Meal tax recovery %<input class="input" name="meal_tax_recovery_pct" type="number" min="0" max="100" step="0.01" value="{{ profile.meal_tax_recovery_pct * 100 }}"></label>
+          <label class="field-label">Normal deduction %<input class="input" name="normal_deduction_pct" type="number" min="0" max="100" step="0.01" value="{{ profile.normal_deduction_pct * 100 }}"></label>
+          <label class="field-label">Meal deduction %<input class="input" name="meal_deduction_pct" type="number" min="0" max="100" step="0.01" value="{{ profile.meal_deduction_pct * 100 }}"></label>
+          <label class="field-label">Tax calculation method<input class="input" name="tax_calculation_method" value="{{ profile.tax_calculation_method }}"></label>
+          <label class="field-label">Non-meal account<input class="input" name="account_non_meal" value="{{ profile.account_mapping.non_meal }}"></label>
+          <label class="field-label">Meal deductible account<input class="input" name="account_meal_deductible" value="{{ profile.account_mapping.meal_deductible }}"></label>
+          <label class="field-label">Meal non-deductible account<input class="input" name="account_meal_nondeductible" value="{{ profile.account_mapping.meal_nondeductible }}"></label>
+          <label class="field-label">GST/HST receivable account<input class="input" name="account_gst_hst_receivable" value="{{ profile.account_mapping.gst_hst_receivable }}"></label>
+          <label class="field-label">QST receivable account<input class="input" name="account_qst_receivable" value="{{ profile.account_mapping.qst_receivable }}"></label>
+        </div>
+        <label class="confirmation default-profile"><input type="checkbox" name="make_default"><span>Use this profile as the default for new trips.</span></label>
+        <p class="form-error" id="accounting-error"></p>
+        <div class="modal-actions">
+          <button class="button primary" type="submit">Save accounting profile</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="allocation-dialog" class="modal allocation-modal">
+      <form id="allocation-form">
+        <div class="modal-heading">
+          <div><p class="eyebrow">Statement allocation</p><h2 id="allocation-title">Split transaction</h2></div>
+          <button type="button" class="icon-button close-dialog">×</button>
+        </div>
+        <input type="hidden" name="group_id">
+        <p class="help-text" id="allocation-target"></p>
+        <div id="allocation-rows" class="allocation-rows"></div>
+        <button class="button secondary small" id="add-allocation-row" type="button">Add allocation</button>
+        <div class="allocation-balance" id="allocation-balance"></div>
+        <p class="form-error" id="allocation-error"></p>
+        <div class="modal-actions">
+          <button class="button secondary" id="clear-allocations" type="button">Use simple mapping</button>
+          <button class="button primary" type="submit">Save allocations</button>
+        </div>
+      </form>
+    </dialog>
+  {% endif %}
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime
 from difflib import SequenceMatcher
 import re
 
-from nlp_expenses.models import Expense, StatementTransaction
+from nlp_expenses.models import Expense, NormalizedTransaction, StatementTransaction
 
 
 def match_transactions(expenses: list[Expense], transactions: list[StatementTransaction]) -> None:
@@ -22,6 +23,154 @@ def match_transactions(expenses: list[Expense], transactions: list[StatementTran
             if best_score >= 0.72:
                 transaction.expense_id = best_expense.expense_id
     enrich_expenses_from_statements(expenses, transactions)
+
+
+def match_normalized_transactions(expenses: list[Expense], transactions: list[NormalizedTransaction]) -> None:
+    groups: dict[str, list[NormalizedTransaction]] = defaultdict(list)
+    for transaction in transactions:
+        groups[transaction.transaction_group_id].append(transaction)
+
+    enrichment_rows: list[StatementTransaction] = []
+    for legs in groups.values():
+        eligible = [leg for leg in legs if leg.match_eligible]
+        if not eligible:
+            continue
+        representative = eligible[0]
+        purchase_currency = common_value([leg.purchase_currency for leg in eligible])
+        purchase_amount = sum_values([leg.purchase_amount for leg in eligible]) if purchase_currency else None
+        cad_complete = all(leg.cad_completeness == "complete" for leg in eligible)
+        cad_amount = sum_values([leg.cad_amount for leg in eligible]) if cad_complete else None
+
+        best_expense: Expense | None = None
+        best_score = 0.0
+        for expense in expenses:
+            score = normalized_match_score(
+                expense,
+                representative.transaction_date,
+                representative.description,
+                purchase_amount,
+                purchase_currency,
+                cad_amount,
+            )
+            if score > best_score:
+                best_score = score
+                best_expense = expense
+
+        if not best_expense or best_score < 0.35:
+            continue
+        confidence = round(best_score, 3)
+        auto_assign = best_score >= 0.72 and all(
+            leg.normalization_status in {"ok", "duplicate_confirmed"}
+            for leg in eligible
+        )
+        for leg in legs:
+            leg.suggested_expense_id = best_expense.expense_id
+            leg.match_confidence = confidence
+            leg.match_status = "suggested"
+            if auto_assign:
+                leg.expense_id = best_expense.expense_id
+                leg.match_status = "auto"
+        enrichment_rows.append(
+            StatementTransaction(
+                source_file=representative.source_file,
+                date=representative.transaction_date,
+                description=representative.description,
+                amount_cad=cad_amount,
+                foreign_amount=purchase_amount,
+                foreign_currency=purchase_currency,
+                expense_id=best_expense.expense_id if auto_assign else "",
+                suggested_expense_id=best_expense.expense_id,
+                match_confidence=confidence,
+            )
+        )
+    enrich_expenses_from_statements(expenses, enrichment_rows)
+    for expense in expenses:
+        if expense.expense_type and expense.expense_type.startswith("meal"):
+            expense.expense_type = "meal"
+
+
+def apply_manual_matches(
+    expenses: list[Expense],
+    transactions: list[NormalizedTransaction],
+    manual_matches: dict[str, str | None],
+) -> None:
+    """Apply persisted transaction-group overrides after automatic matching.
+
+    Values are receipt filenames rather than generated expense IDs so mappings
+    remain stable when receipt dates or list ordering change between runs.
+    A present key with a ``None`` value is an explicit manual unmatch.
+    """
+
+    expenses_by_file = {expense.source_file.name: expense for expense in expenses}
+    groups: dict[str, list[NormalizedTransaction]] = defaultdict(list)
+    for transaction in transactions:
+        groups[transaction.transaction_group_id].append(transaction)
+
+    for group_id, receipt_file in manual_matches.items():
+        legs = groups.get(group_id)
+        if not legs:
+            continue
+        expense = expenses_by_file.get(receipt_file) if receipt_file else None
+        if receipt_file and not expense:
+            continue
+        for leg in legs:
+            if not leg.match_eligible:
+                continue
+            if expense:
+                leg.expense_id = expense.expense_id
+                leg.suggested_expense_id = expense.expense_id
+                leg.match_status = "manual"
+                leg.match_confidence = 1.0
+            else:
+                leg.expense_id = ""
+                leg.match_status = "unmatched"
+
+
+def normalized_match_score(
+    expense: Expense,
+    transaction_date: str | None,
+    description: str,
+    purchase_amount: float | None,
+    purchase_currency: str | None,
+    cad_amount: float | None,
+) -> float:
+    score = 0.0
+    date_delta = days_between(expense.date, transaction_date)
+    if date_delta is not None:
+        if date_delta == 0:
+            score += 0.3
+        elif date_delta <= 3:
+            score += max(0.0, 0.24 - 0.05 * date_delta)
+    if expense.amount is not None:
+        if (
+            purchase_amount is not None
+            and expense.currency == purchase_currency
+            and close_amount(expense.amount, abs(purchase_amount))
+        ):
+            score += 0.36
+        elif expense.currency == "CAD" and cad_amount is not None and close_amount(expense.amount, abs(cad_amount)):
+            score += 0.36
+        elif cad_amount is not None and close_amount(expense.amount, abs(cad_amount)):
+            score += 0.18
+    supplier = (expense.supplier_name or "").lower()
+    normalized_description = description.lower()
+    if supplier and normalized_description:
+        score += 0.34 * SequenceMatcher(None, supplier, normalized_description).ratio()
+        supplier_tokens = {token for token in supplier.split() if len(token) > 2}
+        if supplier_tokens and any(token in normalized_description for token in supplier_tokens):
+            score += 0.12
+    return min(score, 1.0)
+
+
+def common_value(values: list[str | None]) -> str | None:
+    present = {value for value in values if value}
+    return next(iter(present)) if len(present) == 1 else None
+
+
+def sum_values(values: list[float | None]) -> float | None:
+    if not values or any(value is None for value in values):
+        return None
+    return round(sum(value or 0.0 for value in values), 2)
 
 
 def match_score(expense: Expense, transaction: StatementTransaction) -> float:
