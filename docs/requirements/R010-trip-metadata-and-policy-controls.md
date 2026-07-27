@@ -1,51 +1,24 @@
-# R010 — Trip Metadata and Policy Controls
+# R010 — Trip metadata and policy controls
 
-**Priority:** P2  
-**Status:** Implemented
+**Status:** Superseded by R016
 
-## Problem
+The original requirement proposed company/sponsor identifiers, routes,
+project/cost-centre fields, approver, payment method, policy profiles, limits,
+settlement details, and related controls on every trip.
 
-A trip is currently identified by month and description. A complete business
-trip record also needs traveller, dates, destinations, business objective,
-client/project, cost centre, reimbursement method, and policy context.
+Field testing against IVADO's actual workbook showed that those fields do not
+drive the required expense output, and most are not consumed by
+`arvine-accounting-expenses`. R016 therefore replaced this requirement with a
+minimal trip record:
 
-## Required outcome
+- claim program and traveller are required;
+- dates and business purpose are optional;
+- default payer is editable;
+- payer and number of employees sharing a bill are reviewed per receipt;
+- statement coverage settings remain in the statement-reconciliation step;
+- accounting/tax assumptions remain in the accounting settings;
+- no approver, legal identifiers, settlement references, policy profile, or
+  IVADO-template confirmation is required for report generation.
 
-The trip folder must hold enough structured metadata to explain why expenses
-were incurred and how they should be reviewed.
-
-## Functional requirements
-
-1. Trip metadata fields:
-   - traveller and company;
-   - start and end dates;
-   - origin and destinations;
-   - business purpose;
-   - client/project and cost centre;
-   - approver;
-   - reimbursement/payment method;
-   - expected cards/accounts;
-   - policy profile.
-2. Existing trips migrate with blank optional fields.
-3. Invoice business purpose inherits the trip purpose but remains editable.
-4. Policy controls may define:
-   - receipt-required threshold;
-   - allowed categories;
-   - meal limits;
-   - alcohol treatment;
-   - personal expense treatment;
-   - mileage and per-diem rules.
-5. Violations create review warnings, not silent data changes.
-6. Metadata appears in the workbook summary.
-
-## Acceptance criteria
-
-- A new trip captures core metadata without making the creation form onerous.
-- Missing required metadata blocks final approval but not initial uploads.
-- Policy exceptions are visible with an explanation field.
-- Existing trips continue to open.
-
-## Non-goals
-
-- Travel booking or itinerary management.
-- Automatically determining company policy.
+Existing stored metadata remains readable for backward compatibility, but it is
+not presented as required input and is not emitted in contract 3.0.

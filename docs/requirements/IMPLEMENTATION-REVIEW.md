@@ -1,31 +1,29 @@
 # End-to-End Business Trip Consolidation Review
 
 **Review date:** 2026-07-26
-**Primary workflow:** Shared app-first review, with a canonical Arvine report,
-an optional IVADO claim adapter, and a versioned inter-project manifest
+**Primary workflow:** Shared app-first review, with a compact Arvine report,
+an optional three-tab IVADO workbook, and a minimal versioned inter-project manifest
 **Result:** Both modes cover local consolidation from source collection through
 editable results, finalization, versioned report-bundle export, and an approved
-package. The workflow is ready for field testing; submission of an
-IVADO-sponsored claim still requires confirmation of the current official IVADO
-template and claimant/payee instruction.
+package. The workflow is ready for field testing against the supplied IVADO
+expense-report workbook.
 
 ## Capability coverage
 
 | Stage | Implemented capability | Evidence / control |
 |---|---|---|
-| Trip setup | Create/select a local trip, choose claim program independently from the default receipt payer, and capture legal entities, traveller, dates, route, purpose, approver, settlement, expected accounts, and policy | `.nlp-expenses.json` remains the source of truth |
+| Trip setup | Create/select a local trip, choose claim program and default payer, enter the traveller, and optionally add dates/purpose | Only claim program and traveller block finalization |
 | Source collection | Copy validated receipts and statements into explicit trip folders without modifying originals | Safe paths, atomic uploads, content validation, duplicate detection, Finder actions |
 | Statement interpretation | Preflight Arvine CSV/XLS/XLSX files and require explicit handling of ambiguous numeric dates | Provider, row count, warnings, errors, date samples, per-file convention |
 | Reconciliation | Sync receipts and normalized card transactions in either mode, calculate statement-backed CAD totals and accounting FX rates | Persistent source fingerprint, automatic confidence, manual mappings |
 | Exceptions | Correct invoice fields, add justified manual CAD, resolve possible duplicates, allocate split charges/refunds/fees/personal portions | Auditable reconciliation metadata and workbook statement rows |
 | Completeness | Show provider/account/date coverage, expected accounts, overlap/duplicate indicators, trip-window gaps, and acknowledgement | Coverage confirmation is stored and written to Excel |
 | Accounting | Apply a versioned trip snapshot for entity, registrant status, recovery/deduction percentages, counter-account, and journal mapping | Applied assumptions are embedded in each workbook |
-| Policy | Flag category, meal-limit, and personal-allocation exceptions without silently changing data | Exception explanations remain visible in UI and workbook |
-| App finalization | Review an issue queue, edit expense fields/person count/payer/Arvine eligibility/IVADO eligibility/lines, inspect CAD/FX and accounting results, then finalize the current input fingerprint | Any later source or decision change automatically reopens the review |
-| Output | Always export a canonical Arvine report and `trip-reimbursement-manifest.v2.ndjson`; add a separate IVADO claim adapter for sponsored trips | All artifacts are generated from the same reviewed calculation and can be downloaded independently |
-| Final review | Approve only a current generated input snapshot with complete metadata and no blocking review items | Separate approval record with SHA-256 hashes for every synchronized artifact |
+| App finalization | Review an issue queue, edit expense fields/employee share/payer/Arvine eligibility/IVADO eligibility/lines, inspect CAD/FX and accounting results, then finalize the current input fingerprint | Any later source or decision change automatically reopens the review |
+| Output | Always export a two-tab Arvine report and `trip-reimbursement-manifest.v3.ndjson`; add the three-tab IVADO workbook for sponsored trips | IVADO contains Expense Report, consolidated Card Statements, and all Receipt Items |
+| Final review | Lock only a current generated input snapshot with no blocking review items | Separate lock record with SHA-256 hashes for every synchronized artifact |
 | Retention | Export a ZIP with sources, reconciliation data, metadata, all generated artifacts, and compatibility plus approval manifests; archive/restore without moving files | Approval freshness changes automatically if any hashed artifact changes |
-| Inter-project handoff | Emit contract `2.0.0` receipt and trip-report records with legal entities, payer, dual eligibility, accounting components, and explicit settlement legs | Producer schema validation plus consumer parser/CLI compatibility tests |
+| Inter-project handoff | Emit minimal contract `3.0.0` receipt and trip-report records with payer, employee count, dual amounts, line evidence, and derived accounting components | No legal identifiers, approvers, policy profiles, template confirmations, or settlement legs |
 
 ## Deliberate limitations and remaining gaps
 
@@ -52,11 +50,10 @@ template and claimant/payee instruction.
 7. **Local single-user trust model.** Approval records provide reproducibility
    and change detection, not cryptographic identity, legal signatures, or
    protection from a user deliberately editing both source and manifest files.
-8. **The IVADO workbook is a contract-backed adapter, not yet the confirmed
-   official bilingual template.** The app records the template version and
-   Arvine claimant/payee instruction, and warns until they are confirmed. Obtain
-   the current official IVADO file and written submission instruction before
-   treating the adapter as submission-ready.
+8. **The IVADO workbook is intentionally copy/paste-ready rather than a clone of
+   the official template.** Its first tab uses the equivalent entry columns,
+   while the other two tabs preserve normalized statement and receipt-line
+   evidence.
 
 ## Recommended field acceptance
 

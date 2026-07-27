@@ -123,7 +123,10 @@ code { font-family: "SFMono-Regular", Consolas, monospace; color: #405149; overf
 .line-receipt-heading strong { font-size: 12px; overflow-wrap: anywhere; }
 .line-receipt-heading span { color: var(--muted); font-size: 10px; }
 .line-receipt-heading .field-issue { color: var(--red); font-size: 10px; }
-.line-receipt-actions { display: flex; align-items: center; gap: 8px; }
+.line-receipt-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.people-review-form { display: flex; align-items: end; gap: 6px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.people-review-form label { display: grid; gap: 3px; color: var(--muted); font-size: 9px; white-space: nowrap; }
+.people-review-form .input { width: 76px; min-height: 30px; padding: 5px 8px; }
 .line-item-table-wrap { overflow-x: auto; }
 .line-item-table { width: 100%; min-width: 790px; border-collapse: collapse; text-align: left; }
 .line-item-table th { padding: 9px 11px; background: #eef3f0; color: var(--muted); font-size: 9px; letter-spacing: .05em; text-transform: uppercase; }

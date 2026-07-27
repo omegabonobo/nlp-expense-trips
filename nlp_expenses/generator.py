@@ -227,12 +227,16 @@ def generate_review(
 
     from nlp_expenses.lifecycle import record_generated_bundle
     from nlp_expenses.consolidation import consolidation_view
-    from nlp_expenses.trip_manifest import build_trip_manifest_records, write_trip_manifest
+    from nlp_expenses.trip_manifest import (
+        CONTRACT_FILENAME,
+        build_trip_manifest_records,
+        write_trip_manifest,
+    )
 
     view = consolidation_view(root, trip_dir)
     records = build_trip_manifest_records(root, trip_dir, view=view)
     primary_path = output_path or trip_dir / f"expense_review_{trip_dir.name}_arvine.xlsx"
-    manifest_path = trip_dir / "trip-reimbursement-manifest.v2.ndjson"
+    manifest_path = trip_dir / CONTRACT_FILENAME
     created: list[Path] = []
     try:
         result = build_reimbursement_report_workbook(

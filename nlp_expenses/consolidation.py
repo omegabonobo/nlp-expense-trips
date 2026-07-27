@@ -109,19 +109,6 @@ def consolidation_view(root: Path, trip_dir: Path) -> dict:
             "trip-record",
             gap,
         )
-    if claim_program == "ivado_sponsored" and not metadata.get("ivado_claimant_confirmed"):
-        add_issue(
-            issues,
-            "ivado_template",
-            "warning",
-            (
-                "The IVADO workbook is a contract-backed claim adapter. Confirm the current "
-                "official template version and claimant identity before submitting it."
-            ),
-            "trip-record",
-            "ivado_claimant_confirmed",
-        )
-
     reconciliation_expenses = {
         expense["source_file"]: expense
         for expense in reconciliation.get("expenses", [])
@@ -235,7 +222,6 @@ def consolidation_view(root: Path, trip_dir: Path) -> dict:
         "issues": issues,
         "expenses": expenses,
         "accounting": accounting,
-        "settlement": metadata.get("settlement", {}),
         "controls": {
             "payer_difference_cad": payer_control,
             "ivado_difference_cad": ivado_control,
@@ -423,6 +409,8 @@ def calculate_expense_result(
         "vendor": receipt.get("vendor"),
         "description": receipt.get("description"),
         "expense_type": receipt.get("expense_type"),
+        "country": receipt.get("country"),
+        "province": receipt.get("province"),
         "amount": amount,
         "subtotal": numeric(receipt.get("subtotal")),
         "currency": receipt.get("currency"),

@@ -103,59 +103,13 @@ document.getElementById("new-trip-form")?.addEventListener("submit", async event
 document.getElementById("trip-metadata-form")?.addEventListener("submit", async event => {
   event.preventDefault();
   const data = new FormData(event.target);
-  const splitList = name => String(data.get(name) || "").split(",").map(value => value.trim()).filter(Boolean);
-  const optionalAmount = name => {
-    const value = String(data.get(name) || "").trim();
-    return value === "" ? null : Number(value);
-  };
   const metadata = {
     traveller: data.get("traveller"),
-    traveller_identifier: data.get("traveller_identifier"),
-    company: data.get("company"),
-    company_identifier: data.get("company_identifier"),
-    sponsor: data.get("sponsor"),
-    sponsor_identifier: data.get("sponsor_identifier"),
-    claim_program: data.get("claim_program"),
-    report_date: data.get("report_date"),
+    claim_program: state.selected?.claim_program || "",
     start_date: data.get("start_date"),
     end_date: data.get("end_date"),
-    origins: splitList("origins"),
-    destinations: splitList("destinations"),
     business_purpose: data.get("business_purpose"),
-    client_project: data.get("client_project"),
-    cost_centre: data.get("cost_centre"),
-    approver: data.get("approver"),
-    payment_method: data.get("payment_method"),
     default_paid_by: data.get("default_paid_by"),
-    payer_confirmed: data.has("payer_confirmed"),
-    ivado_template_version: data.get("ivado_template_version"),
-    ivado_claimant_instruction: data.get("ivado_claimant_instruction"),
-    ivado_claimant_confirmed: data.has("ivado_claimant_confirmed"),
-    settlement: {
-      employee_reimbursement: {
-        status: data.get("employee_settlement_status"),
-        payment_date: data.get("employee_payment_date"),
-        payment_reference: data.get("employee_payment_reference")
-      },
-      sponsor_reimbursement: {
-        status: data.get("sponsor_settlement_status"),
-        payment_date: data.get("sponsor_payment_date"),
-        payment_reference: data.get("sponsor_payment_reference")
-      }
-    },
-    policy_profile: data.get("policy_profile"),
-    expected_accounts: splitList("expected_accounts"),
-    policy_exceptions: state.selected?.metadata?.policy_exceptions || {},
-    policy: {
-      receipt_required_threshold: optionalAmount("receipt_required_threshold") ?? 0,
-      allowed_categories: splitList("allowed_categories"),
-      meal_limit_cad: optionalAmount("meal_limit_cad"),
-      alcohol_treatment: data.get("alcohol_treatment"),
-      personal_expense_treatment: data.get("personal_expense_treatment"),
-      mileage_rate_cad: optionalAmount("mileage_rate_cad"),
-      per_diem_cad: optionalAmount("per_diem_cad"),
-      statement_coverage_buffer_days: Number(data.get("statement_coverage_buffer_days") || 0)
-    }
   };
   const error = document.getElementById("trip-metadata-error");
   error.textContent = "";
@@ -164,7 +118,7 @@ document.getElementById("trip-metadata-form")?.addEventListener("submit", async 
       method: "POST",
       body: JSON.stringify({ metadata })
     });
-    toast("Trip details and policy saved.");
+    toast("Trip details saved.");
     window.location.reload();
   } catch (failure) { error.textContent = failure.message; }
 });
@@ -179,8 +133,8 @@ document.getElementById("approval-form")?.addEventListener("submit", async event
       method: "POST",
       body: JSON.stringify({
         workbook: data.get("workbook"),
-        reviewer: data.get("reviewer"),
-        note: data.get("note")
+        reviewer: state.selected?.metadata?.traveller || "Self-reviewed",
+        note: data.get("note") || "Reviewed in the trip app."
       })
     });
     toast("Trip version approved and hashed.");
@@ -767,6 +721,27 @@ document.querySelectorAll(".edit-expense").forEach(button => button.addEventList
   document.getElementById("expense-dialog-title").textContent = receipt.vendor || receipt.source_file;
   openDialog("expense-dialog");
 }));
+
+document.querySelectorAll(".people-review-form").forEach(form => {
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    const input = form.querySelector(".people-review-input");
+    const numberOfPeople = Number(input?.value || 0);
+    if (!Number.isInteger(numberOfPeople) || numberOfPeople < 1 || numberOfPeople > 99) {
+      toast("Enter a whole number of employees from 1 to 99.", true);
+      return;
+    }
+    input.disabled = true;
+    try {
+      await saveExpenseFields(form.dataset.sourceFile, { number_of_people: numberOfPeople });
+      toast(`Employee share saved as 1/${numberOfPeople}. Resync statements to refresh matching.`);
+      window.location.reload();
+    } catch (failure) {
+      input.disabled = false;
+      toast(failure.message, true);
+    }
+  });
+});
 
 async function saveExpenseFields(sourceFile, fields) {
   return api(`/api/trips/${encodeURIComponent(selectedTrip)}/line-items/expense`, {

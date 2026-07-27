@@ -1,181 +1,122 @@
-# R016 — Two-stage trip reimbursement and inter-project contract
+# R016 — Minimal trip reimbursement contract and reports
 
 ## Implementation status
 
-**Field-test ready; official IVADO template confirmation remains.**
+**Ready for field testing.**
 
-The app now implements the independent claim-program and payer controls, dual
-Arvine/IVADO eligibility, canonical calculations, report-bundle generation,
-contract `2.0.0` NDJSON validation, explicit settlement legs, synchronized
-artifact approval, and producer/consumer compatibility tests. The generated
-IVADO workbook is intentionally labelled as a contract-backed adapter until the
-current official bilingual template and Arvine claimant/payee instruction are
-confirmed.
+The supplied IVADO workbook is the authoritative output reference. The app
+produces a compact Arvine report, a three-tab IVADO workbook, and contract
+`3.0.0` with producer/consumer compatibility tests.
 
 ## Decision
 
 Keep `nlp-expenses` and `arvine-accounting-expenses` as separate projects.
 
-- `nlp-expenses` owns receipt extraction, line-item review, alcohol identification,
-  trip policy, payer identification, and the two report outputs.
-- `arvine-accounting-expenses` owns BMO reconciliation, reimbursement-payment
-  reconciliation, accounting-master mappings, and reviewed Tx staging.
-- The boundary is the versioned NDJSON record schema at
-  `contracts/trip-reimbursement-manifest.v2.schema.json`.
+- `nlp-expenses` owns receipt extraction, statement reconciliation, employee
+  sharing, line-item/alcohol review, and report generation.
+- `arvine-accounting-expenses` owns BMO reimbursement matching, accounting
+  mappings, and reviewed Tx staging.
+- The boundary is
+  `contracts/trip-reimbursement-manifest.v3.schema.json`.
 
-The projects must not infer each other's business rules from workbook layouts.
+The boundary contains only data the accounting consumer needs. It does not
+carry legal identifiers, approvers, settlement legs, policy profiles, payment
+references, or IVADO-template confirmations.
 
-## User policy
+## Minimal user input
 
-The normal travel policy is:
+Trip setup requires:
 
-1. The employee pays every trip expense personally.
-2. Arvine Labs reimburses the employee for the full Arvine-approved amount.
-3. For an IVADO-sponsored trip, Arvine Labs separately claims from IVADO Labs the
-   IVADO-eligible amount.
-4. Alcohol and other IVADO policy exclusions reduce only the IVADO claim. They do not
-   reduce the Arvine-to-employee reimbursement unless Arvine policy separately rejects
-   the expense.
-5. A corporate BMO payment remains an explicit fallback payer. It creates no
-   Arvine-to-employee reimbursement for that expense.
+1. claim program (`arvine_only` or `ivado_sponsored`);
+2. traveller.
 
-## Independent dimensions
+Trip dates and business purpose are optional context. The default payer is
+editable once and can be overridden on each receipt.
 
-`claim_program` is trip-level:
+Every receipt exposes `Employees sharing bill`, defaulting to 1. If a receipt
+is shared by N employees, the report and matching amount use the traveller's
+`1/N` share. The full invoice and every extracted line remain in the audit
+output, so a split never destroys evidence. Statement-backed matching avoids
+dividing a card transaction that already represents the traveller's share a
+second time.
 
-- `arvine_only`
-- `ivado_sponsored`
+## Independent amounts
 
 `paid_by` is expense-level:
 
-- `employee_personal`
-- `arvine_corporate_bmo`
+- `employee_personal`;
+- `arvine_corporate_bmo`.
 
-These values are never derived from one another.
+Each receipt carries:
 
-## Derived amounts
+- `total_cad`: reviewed traveller share;
+- `arvine_reimbursable_cad`: amount Arvine owes the employee;
+- `ivado_claimable_cad`: amount included in the IVADO report;
+- `ivado_excluded_cad`: IVADO-only removals, including alcohol.
 
-Each receipt carries three CAD decisions:
-
-- `arvine_reimbursable_cad`: amount Arvine owes the employee; zero for a corporate-paid
-  receipt.
-- `ivado_claimable_cad`: amount Arvine may claim from IVADO.
-- `ivado_excluded_cad`: IVADO-only exclusions, including alcohol.
-
-For an IVADO-sponsored trip, the report controls are:
+For sponsored trips:
 
 ```text
-employee_reimbursement_total_cad
-  = sum(arvine_reimbursable_cad)
-
-ivado_claim_total_cad
-  = sum(ivado_claimable_cad)
-
-ivado_excluded_total_cad
-  = sum(ivado_excluded_cad)
-
 sum(total_cad)
   = employee_reimbursement_total_cad + corporate_paid_total_cad
-
-sum(total_cad)
   = ivado_claim_total_cad + ivado_excluded_total_cad
 ```
 
 All controls use a CAD 0.02 tolerance.
 
-For an Arvine-only trip, `ivado_claim_total_cad` and
-`ivado_excluded_total_cad` are both zero.
+## Generated workbooks
 
-## Required report package
+### Arvine workbook
 
-`nlp-expenses` produces one package from one reviewed dataset.
+Two tabs:
 
-### 1. Arvine Labs report
+1. `Expense Report`: traveller, report date, purpose, and one row per receipt
+   with full receipt, `1/N` share, payer, reviewed CAD, reimbursement, and
+   IVADO amounts.
+2. `Accounting Rows`: the five derived accounting components and a control
+   against the employee reimbursement.
 
-This is always produced. Recommended tabs:
+### IVADO workbook
 
-1. `Report`
-   - report/trip identifiers;
-   - employee and Arvine legal names;
-   - claim program;
-   - full employee reimbursement;
-   - corporate-paid total;
-   - IVADO claim and exclusions when applicable;
-   - settlement status and references.
-2. `Expense Lines`
-   - one row per reviewed receipt or allocation;
-   - `paid_by`;
-   - original and authoritative CAD amounts;
-   - taxes and tip;
-   - Arvine reimbursement;
-   - IVADO claimable and excluded amounts;
-   - exclusion reason and receipt URL.
-3. `Accounting Rows`
-   - Arvine accounting components for employee-paid expenses;
-   - employee reimbursement settlement only when paid/reconciled.
-4. `Checks`
-   - receipt and statement reconciliation;
-   - report totals;
-   - payer and settlement controls;
-   - IVADO claim/exclusion controls.
-5. Existing audit tabs
-   - statement detail;
-   - line-item review;
-   - data contract/configuration.
+Exactly three tabs:
 
-### 2. IVADO report
+1. `Expense Report`: the equivalent of IVADO's
+   `modèle - Template FR EN` expense-entry tab, including sequence, invoice
+   date, supplier, description, location, receipt status, foreign amount,
+   reviewed CAD, GL allocation, taxes, allocated total, and difference.
+2. `Card Statements`: all uploaded statement transactions normalized into one
+   table with their receipt mappings.
+3. `Receipt Items`: every extracted line, full-invoice amount, traveller
+   `1/N` share, alcohol flag, Arvine/IVADO inclusion, and removed original/CAD
+   amount. Removed alcohol remains visible and highlighted.
 
-This is produced only when `claim_program = ivado_sponsored`.
+## Contract 3.0
 
-- Use the verified bilingual IVADO template.
-- Populate it from the same reviewed expense rows.
-- Include only `ivado_claimable_cad`.
-- Remove alcohol and other IVADO exclusions from the submitted amounts.
-- Preserve the original receipt sequence, receipt-present flag, foreign amount, CAD
-  statement amount, location, GL category, tax columns, and approval fields required by
-  the template.
-- The IVADO total must equal `ivado_claim_total_cad`.
+Receipt records contain only:
 
-The IVADO template currently describes employee reimbursement and has no company/payee
-field. The submission workflow must therefore store the confirmed IVADO instruction
-that identifies Arvine Labs as the claimant/payee. Until confirmed, the generated form
-must flag this as a review control rather than invent a field.
+- identity/date/vendor/description/category/source file;
+- location, original currency/total, optional taxes, and reviewed CAD;
+- payer, employee count, Arvine/IVADO inclusion and amounts;
+- receipt items and their alcohol/removal decisions.
 
-## Settlement legs
+The trip report contains only:
 
-The manifest makes money movement explicit:
+- trip/report IDs, report date, claim program, traveller, and description;
+- the four report totals;
+- the five derived accounting amounts consumed downstream.
 
-1. `employee_reimbursement`
-   - payer: Arvine Labs
-   - payee: employee
-   - amount: `employee_reimbursement_total_cad`
-2. `sponsor_reimbursement` for IVADO trips
-   - payer: IVADO Labs
-   - payee: Arvine Labs
-   - amount: `ivado_claim_total_cad`
+The producer is authoritative. The consumer remains compatible with contract
+2.0 and legacy unversioned records, while new output uses 3.0.
 
-`arvine-accounting-expenses` matches only the first leg to the BMO reimbursement
-transfer. The second leg remains a separate sponsor receivable/payment workflow and
-must never settle the employee payable.
-
-## Compatibility
-
-- Contract version: `2.0.0`.
-- The producer is authoritative.
-- The consumer may accept legacy manifests, but new output must include
-  `contract_version`.
-- `reimbursement_total_cad` is a legacy alias for
-  `employee_reimbursement_total_cad`.
-- Any contract change requires a version bump, an updated schema copy in both
-  repositories, and producer/consumer fixture tests.
+Any semantic change requires a version bump, byte-identical schema copies in
+both repositories, and producer/consumer fixtures.
 
 ## Acceptance criteria
 
-- A fully personal-paid IVADO trip reimburses the employee for the full Arvine-approved
-  amount.
-- The IVADO form total excludes alcohol and ties to `ivado_claim_total_cad`.
-- Corporate BMO fallback expenses do not increase the employee reimbursement.
-- The same receipt cannot create both a corporate BMO expense settlement and an
-  employee reimbursement.
-- The accounting consumer can distinguish and audit both settlement legs.
+- A shared invoice uses the reviewed `1/N` employee share and still shows the
+  full invoice items.
+- Alcohol excluded from IVADO remains visible with the amount removed.
+- IVADO `Expense Report` equals `ivado_claim_total_cad`.
+- Corporate-paid receipts do not increase employee reimbursement.
+- Arvine accounting components equal employee reimbursement.
 - Contract copies in both repositories are byte-for-byte identical.

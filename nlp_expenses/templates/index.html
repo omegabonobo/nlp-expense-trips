@@ -132,15 +132,15 @@
           <div class="card-heading">
             <div>
               <p class="card-kicker">Trip record</p>
-              <h3>Traveller, purpose and policy</h3>
+              <h3>Traveller and trip context</h3>
             </div>
             <button class="button secondary small" id="open-trip-metadata-button" {{ 'disabled' if trip_busy }}>Edit trip details</button>
           </div>
           <div class="metadata-grid">
-            <div><span>Traveller / company</span><strong>{{ trip.metadata.traveller or 'Not set' }}{% if trip.metadata.company %} · {{ trip.metadata.company }}{% endif %}</strong></div>
-            <div><span>Travel dates</span><strong>{{ trip.metadata.start_date or 'Not set' }} → {{ trip.metadata.end_date or 'Not set' }}</strong></div>
-            <div><span>Destination</span><strong>{{ trip.metadata.destinations|join(', ') or 'Not set' }}</strong></div>
-            <div><span>Business purpose</span><strong>{{ trip.metadata.business_purpose or 'Not set' }}</strong></div>
+            <div><span>Traveller</span><strong>{{ trip.metadata.traveller or 'Not set' }}</strong></div>
+            <div><span>Travel dates (optional)</span><strong>{{ trip.metadata.start_date or 'Not set' }} → {{ trip.metadata.end_date or 'Not set' }}</strong></div>
+            <div><span>Purpose (optional)</span><strong>{{ trip.metadata.business_purpose or 'Not set' }}</strong></div>
+            <div><span>Default payer</span><strong>{{ 'Employee personal' if trip.metadata.default_paid_by == 'employee_personal' else 'Arvine corporate BMO' }}</strong></div>
           </div>
           {% if trip.metadata_gaps %}
             <div class="notice warning">
@@ -371,6 +371,16 @@
                       {% if receipt.field_issues %}<small class="field-issue">{{ receipt.field_issues|join(' · ') }}</small>{% endif %}
                     </div>
                     <div class="line-receipt-actions">
+                      <form class="people-review-form" data-source-file="{{ receipt.source_file }}">
+                        <label>
+                          Employees sharing bill
+                          <input class="input people-review-input" name="number_of_people" type="number"
+                            min="1" max="99" step="1" value="{{ receipt.number_of_people }}"
+                            {{ 'disabled' if trip_busy or line_review.stale }}>
+                        </label>
+                        <button class="button secondary small" type="submit"
+                          {{ 'disabled' if trip_busy or line_review.stale }}>Save share</button>
+                      </form>
                       <span class="match-badge {{ 'review' if receipt.status == 'review' else 'ok' }}">{{ receipt.status|replace('_', ' ') }}</span>
                       <button class="button secondary small edit-expense" data-source-file="{{ receipt.source_file }}"
                         {{ 'disabled' if trip_busy or line_review.stale }}>Edit expense</button>
@@ -1189,98 +1199,22 @@
     <dialog id="trip-metadata-dialog" class="modal wide-modal">
       <form id="trip-metadata-form">
         <div class="modal-heading">
-          <div><p class="eyebrow">Trip record</p><h2>Trip details and policy</h2></div>
+          <div><p class="eyebrow">Trip record</p><h2>Trip details</h2></div>
           <button type="button" class="icon-button close-dialog">×</button>
         </div>
-        <p class="help-text">These details explain the business trip, guide statement coverage, and are copied into generated workbooks.</p>
+        <p class="help-text">Only the traveller is required. Dates help check statement coverage; purpose labels the Arvine report. Company and IVADO sponsor names are fixed by the output and do not need to be entered here.</p>
         <div class="form-grid">
-          <label class="field-label">Traveller<input class="input" name="traveller" value="{{ metadata.traveller }}"></label>
-          <label class="field-label">Traveller identifier<input class="input" name="traveller_identifier" value="{{ metadata.traveller_identifier }}"></label>
-          <label class="field-label">Company<input class="input" name="company" value="{{ metadata.company }}"></label>
-          <label class="field-label">Company identifier<input class="input" name="company_identifier" value="{{ metadata.company_identifier }}"></label>
-          <label class="field-label">Claim program
-            <select class="select" name="claim_program">
-              <option value="">Choose…</option>
-              <option value="arvine_only" {{ 'selected' if metadata.claim_program == 'arvine_only' }}>Arvine only</option>
-              <option value="ivado_sponsored" {{ 'selected' if metadata.claim_program == 'ivado_sponsored' }}>IVADO sponsored</option>
-            </select>
-          </label>
-          <label class="field-label">Report date<input class="input" name="report_date" type="date" value="{{ metadata.report_date }}"></label>
-          <label class="field-label">Sponsor legal name<input class="input" name="sponsor" value="{{ metadata.sponsor }}"></label>
-          <label class="field-label">Sponsor identifier<input class="input" name="sponsor_identifier" value="{{ metadata.sponsor_identifier }}"></label>
-          <label class="field-label">Start date<input class="input" name="start_date" type="date" value="{{ metadata.start_date }}"></label>
-          <label class="field-label">End date<input class="input" name="end_date" type="date" value="{{ metadata.end_date }}"></label>
-          <label class="field-label">Origin(s)<input class="input" name="origins" value="{{ metadata.origins|join(', ') }}"></label>
-          <label class="field-label">Destination(s)<input class="input" name="destinations" value="{{ metadata.destinations|join(', ') }}"></label>
-          <label class="field-label span-2">Business purpose<input class="input" name="business_purpose" value="{{ metadata.business_purpose }}"></label>
-          <label class="field-label">Client / project<input class="input" name="client_project" value="{{ metadata.client_project }}"></label>
-          <label class="field-label">Cost centre<input class="input" name="cost_centre" value="{{ metadata.cost_centre }}"></label>
-          <label class="field-label">Approver<input class="input" name="approver" value="{{ metadata.approver }}"></label>
-          <label class="field-label">Payment / reimbursement method<input class="input" name="payment_method" value="{{ metadata.payment_method }}"></label>
+          <label class="field-label span-2">Traveller<input class="input" name="traveller" value="{{ metadata.traveller }}" required></label>
+          <label class="field-label">Start date (optional)<input class="input" name="start_date" type="date" value="{{ metadata.start_date }}"></label>
+          <label class="field-label">End date (optional)<input class="input" name="end_date" type="date" value="{{ metadata.end_date }}"></label>
+          <label class="field-label span-2">Business purpose (optional)<input class="input" name="business_purpose" value="{{ metadata.business_purpose }}" placeholder="Client meetings and project planning"></label>
           <label class="field-label">Default receipt payer
             <select class="select" name="default_paid_by">
               <option value="employee_personal" {{ 'selected' if metadata.default_paid_by == 'employee_personal' }}>Employee personal</option>
               <option value="arvine_corporate_bmo" {{ 'selected' if metadata.default_paid_by == 'arvine_corporate_bmo' }}>Arvine corporate BMO</option>
             </select>
           </label>
-          <label class="check-field span-2">
-            <input type="checkbox" name="payer_confirmed" {{ 'checked' if metadata.payer_confirmed }}>
-            <span>I confirmed the default payer and any receipt-level exceptions.</span>
-          </label>
-          <label class="field-label">Policy profile<input class="input" name="policy_profile" value="{{ metadata.policy_profile }}"></label>
-          <label class="field-label">Expected cards/accounts<input class="input" name="expected_accounts" value="{{ metadata.expected_accounts|join(', ') }}"></label>
-        </div>
-        <div class="manual-cad-panel policy-fields">
-          <div>
-            <strong>Settlement and IVADO handoff</strong>
-            <p>These fields make the employee and sponsor money movements explicit in the shared contract.</p>
-          </div>
-          <div class="form-grid">
-            <label class="field-label">Employee settlement status
-              <select class="select" name="employee_settlement_status">
-                {% for value in ['planned', 'approved', 'paid', 'reconciled'] %}<option value="{{ value }}" {{ 'selected' if metadata.settlement.employee_reimbursement.status == value }}>{{ value|title }}</option>{% endfor %}
-              </select>
-            </label>
-            <label class="field-label">Employee payment date<input class="input" name="employee_payment_date" type="date" value="{{ metadata.settlement.employee_reimbursement.payment_date }}"></label>
-            <label class="field-label span-2">Employee payment reference<input class="input" name="employee_payment_reference" value="{{ metadata.settlement.employee_reimbursement.payment_reference }}"></label>
-            <label class="field-label">Sponsor settlement status
-              <select class="select" name="sponsor_settlement_status">
-                {% for value in ['planned', 'approved', 'paid', 'reconciled'] %}<option value="{{ value }}" {{ 'selected' if metadata.settlement.sponsor_reimbursement.status == value }}>{{ value|title }}</option>{% endfor %}
-              </select>
-            </label>
-            <label class="field-label">Sponsor payment date<input class="input" name="sponsor_payment_date" type="date" value="{{ metadata.settlement.sponsor_reimbursement.payment_date }}"></label>
-            <label class="field-label span-2">Sponsor payment reference<input class="input" name="sponsor_payment_reference" value="{{ metadata.settlement.sponsor_reimbursement.payment_reference }}"></label>
-            <label class="field-label">IVADO template version<input class="input" name="ivado_template_version" value="{{ metadata.ivado_template_version }}"></label>
-            <label class="field-label span-2">IVADO claimant/payee instruction<input class="input" name="ivado_claimant_instruction" value="{{ metadata.ivado_claimant_instruction }}"></label>
-            <label class="check-field span-2">
-              <input type="checkbox" name="ivado_claimant_confirmed" {{ 'checked' if metadata.ivado_claimant_confirmed }}>
-              <span>IVADO confirmed that Arvine Labs is the claimant/payee.</span>
-            </label>
-          </div>
-        </div>
-        <div class="manual-cad-panel policy-fields">
-          <div>
-            <strong>Policy controls</strong>
-            <p>Violations create review warnings. They do not silently exclude or change expenses.</p>
-          </div>
-          <div class="form-grid">
-            <label class="field-label">Receipt threshold CAD<input class="input" name="receipt_required_threshold" type="number" min="0" step="0.01" value="{{ policy.receipt_required_threshold }}"></label>
-            <label class="field-label">Meal limit CAD<input class="input" name="meal_limit_cad" type="number" min="0" step="0.01" value="{{ policy.meal_limit_cad if policy.meal_limit_cad is not none else '' }}"></label>
-            <label class="field-label span-2">Allowed categories<input class="input" name="allowed_categories" value="{{ policy.allowed_categories|join(', ') }}"></label>
-            <label class="field-label">Alcohol treatment
-              <select class="select" name="alcohol_treatment">
-                {% for value in ['allow', 'review', 'prohibit'] %}<option value="{{ value }}" {{ 'selected' if policy.alcohol_treatment == value else '' }}>{{ value|title }}</option>{% endfor %}
-              </select>
-            </label>
-            <label class="field-label">Personal expense treatment
-              <select class="select" name="personal_expense_treatment">
-                {% for value in ['allow', 'review', 'prohibit'] %}<option value="{{ value }}" {{ 'selected' if policy.personal_expense_treatment == value else '' }}>{{ value|title }}</option>{% endfor %}
-              </select>
-            </label>
-            <label class="field-label">Mileage rate CAD<input class="input" name="mileage_rate_cad" type="number" min="0" step="0.001" value="{{ policy.mileage_rate_cad if policy.mileage_rate_cad is not none else '' }}"></label>
-            <label class="field-label">Per diem CAD<input class="input" name="per_diem_cad" type="number" min="0" step="0.01" value="{{ policy.per_diem_cad if policy.per_diem_cad is not none else '' }}"></label>
-            <label class="field-label">Statement coverage buffer (days)<input class="input" name="statement_coverage_buffer_days" type="number" min="0" max="60" step="1" value="{{ policy.statement_coverage_buffer_days }}"></label>
-          </div>
+          <p class="help-text span-2">You can override the payer and employee count on each receipt during review.</p>
         </div>
         <p class="form-error" id="trip-metadata-error"></p>
         <div class="modal-actions">
@@ -1295,7 +1229,7 @@
           <div><p class="eyebrow">Final review</p><h2>Approve trip package</h2></div>
           <button type="button" class="icon-button close-dialog">×</button>
         </div>
-        <p class="help-text">Approval records hashes of all sources, review decisions, the Arvine report, optional IVADO report, and shared manifest. Any later change reopens the trip.</p>
+        <p class="help-text">Locking records hashes of all sources, review decisions, generated reports, and the shared manifest. Any later change reopens the trip.</p>
         {% if state.selected.lifecycle.current_generation %}
           <input type="hidden" name="workbook" value="{{ state.selected.lifecycle.current_generation.workbook }}">
           <div class="notice info">
@@ -1306,10 +1240,9 @@
             {% endif %}
           </div>
         {% endif %}
-        <label class="field-label">Reviewer / approver<input class="input" name="reviewer" value="{{ state.selected.metadata.approver }}" required></label>
-        <label class="field-label">Approval note<textarea class="input" name="note" rows="3" placeholder="Reviewed receipts, allocations, coverage and accounting assumptions." required></textarea></label>
+        <label class="field-label">Review note (optional)<textarea class="input" name="note" rows="3" placeholder="Receipts, employee shares, alcohol exclusions and statement mappings reviewed."></textarea></label>
         <p class="form-error" id="approval-error"></p>
-        <button class="button primary full-width" type="submit">Approve this version</button>
+        <button class="button primary full-width" type="submit">Lock this reviewed version</button>
       </form>
     </dialog>
   {% endif %}

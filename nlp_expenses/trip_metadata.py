@@ -301,19 +301,8 @@ def required_metadata_gaps(trip_dir: Path) -> list[str]:
     labels = {
         "claim_program": "claim program",
         "traveller": "traveller",
-        "company": "company",
-        "start_date": "trip start date",
-        "end_date": "trip end date",
-        "business_purpose": "business purpose",
-        "approver": "approver",
-        "payment_method": "payment/reimbursement method",
     }
-    gaps = [label for field, label in labels.items() if not metadata.get(field)]
-    if not metadata.get("payer_confirmed"):
-        gaps.append("receipt payer confirmation")
-    if metadata.get("claim_program") == "ivado_sponsored" and not metadata.get("sponsor"):
-        gaps.append("sponsor legal name")
-    return gaps
+    return [label for field, label in labels.items() if not metadata.get(field)]
 
 
 def trip_policy_warnings(

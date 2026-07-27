@@ -36,30 +36,32 @@ From the interface you can:
 - sync either mode against normalized statement transactions, review the calculated CAD exchange rate, and save manual mapping overrides;
 - correct extracted invoice fields, document manual CAD amounts, resolve duplicates, and split charges/refunds/personal portions;
 - review statement coverage against the trip dates and expected cards/accounts;
-- configure trip metadata, policy controls, and versioned accounting/tax assumptions;
+- enter the traveller plus optional dates/purpose, choose the default receipt payer,
+  and review the employee share on each receipt;
 - choose receipt extraction once—Best quality with a locally stored OpenAI API key or Basic/offline—and reuse that choice for reconciliation and Excel;
 - review a blocking issue queue, per-expense CAD/FX results, and the Arvine accounting preview, then explicitly finalize the current claim;
-- generate a versioned Arvine report, the shared manifest, and an IVADO claim
-  adapter when the trip is sponsored, without overwriting earlier manual work;
+- generate a compact Arvine report, the shared manifest, and a three-tab IVADO
+  workbook when the trip is sponsored, without overwriting earlier manual work;
 - open the result in Excel, reveal it in Finder, or download it from the local page;
-- approve a reviewed version, export a hashed consolidation ZIP, and archive or restore completed trips.
+- lock a reviewed version, export a hashed consolidation ZIP, and archive or restore completed trips.
 
 ### Reimbursement report bundle
 
 The UI compiles one canonical reviewed dataset and uses it for every output:
 
 - `expense_review_<trip>_arvine_<timestamp>.xlsx` is always the primary
-  reimbursement/accounting report. It contains `Report`, `Expense Lines`,
-  `Receipt Lines`, `Accounting Rows`, `Settlement`, and formula-driven
-  `Checks` sheets.
-- `trip-reimbursement-manifest.v2.ndjson` is the machine-readable shared
+  reimbursement/accounting report. It contains one readable `Expense Report`
+  and the five derived `Accounting Rows` used by the accounting handoff.
+- `trip-reimbursement-manifest.v3.ndjson` is the minimal machine-readable shared
   contract consumed by `arvine-accounting-expenses`.
 - `expense_review_<trip>_ivado_<timestamp>.xlsx` is added only for
-  `ivado_sponsored` trips. It is a contract-backed claim adapter and visibly
-  carries the configured template version and claimant instruction.
+  `ivado_sponsored` trips. It contains exactly `Expense Report`, consolidated
+  `Card Statements`, and `Receipt Items`. The first tab mirrors IVADO's
+  expense-entry columns; the last tab keeps every extracted item visible,
+  including alcohol removed from the IVADO amount.
 
-The approval record hashes the entire generated bundle, not only one workbook.
-The approved ZIP includes source receipts/statements, review state, every
+The lock record hashes the entire generated bundle, not only one workbook.
+The exported ZIP includes source receipts/statements, review state, every
 generated artifact, and `approval-manifest.json`. The manifest enforces these
 controls within a CAD 0.02 tolerance:
 
@@ -68,9 +70,11 @@ controls within a CAD 0.02 tolerance:
 - receipt detail totals = report totals;
 - accounting components = employee reimbursement.
 
-Until the current official IVADO template and claimant identity are confirmed,
-the app presents a warning and marks the adapter metadata as unconfirmed rather
-than silently claiming official-template compliance.
+Contract 3.0 contains only receipt/output facts, payer and employee-share
+decisions, the Arvine/IVADO CAD amounts, receipt items, and the five accounting
+amounts actually consumed downstream. Approver, legal identifiers, settlement
+references, policy profiles, and template-confirmation fields are not part of
+the handoff.
 
 Closing the launcher Terminal window stops the local interface. No files are uploaded anywhere except when Best quality sends receipt content to the OpenAI API.
 

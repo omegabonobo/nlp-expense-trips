@@ -347,9 +347,9 @@ class UITests(unittest.TestCase):
         self.assertTrue(workbook_path.exists())
         self.assertEqual(
             load_workbook(workbook_path, read_only=True).sheetnames,
-            ["Report", "Expense Lines", "Receipt Lines", "Accounting Rows", "Settlement", "Checks"],
+            ["Expense Report", "Accounting Rows"],
         )
-        manifest_path = trip / "trip-reimbursement-manifest.v2.ndjson"
+        manifest_path = trip / "trip-reimbursement-manifest.v3.ndjson"
         records = [
             json.loads(line)
             for line in manifest_path.read_text(encoding="utf-8").splitlines()
@@ -383,7 +383,7 @@ class UITests(unittest.TestCase):
         with zipfile.ZipFile(package_path) as archive:
             names = set(archive.namelist())
             self.assertIn(job["output_name"], names)
-            self.assertIn("trip-reimbursement-manifest.v2.ndjson", names)
+            self.assertIn("trip-reimbursement-manifest.v3.ndjson", names)
             self.assertIn("approval-manifest.json", names)
 
     def test_sponsored_bundle_adds_ivado_adapter_from_the_same_contract(self):
@@ -431,11 +431,25 @@ class UITests(unittest.TestCase):
         self.assertTrue(ivado.is_file())
         self.assertEqual(
             load_workbook(ivado, read_only=True).sheetnames,
-            ["IVADO Claim", "Claim Lines", "Exclusions"],
+            ["Expense Report", "Card Statements", "Receipt Items"],
         )
+        ivado_workbook = load_workbook(ivado, data_only=False)
+        expense_report = ivado_workbook["Expense Report"]
+        self.assertEqual(expense_report["H9"].value, 95)
+        self.assertEqual(expense_report["N9"].value, 95)
+        receipt_items = ivado_workbook["Receipt Items"]
+        alcohol_row = next(
+            row
+            for row in receipt_items.iter_rows(min_row=2, values_only=True)
+            if row[6] == "Wine"
+        )
+        self.assertEqual(alcohol_row[10], "Yes")
+        self.assertEqual(alcohol_row[12], "No")
+        self.assertEqual(alcohol_row[13], 20)
+        self.assertEqual(alcohol_row[14], 20)
         records = [
             json.loads(line)
-            for line in (trip / "trip-reimbursement-manifest.v2.ndjson")
+            for line in (trip / "trip-reimbursement-manifest.v3.ndjson")
             .read_text(encoding="utf-8")
             .splitlines()
             if line.strip()
@@ -520,6 +534,11 @@ class UITests(unittest.TestCase):
         self.assertIn("Extract and review receipts", html)
         self.assertIn("French 75", html)
         self.assertIn("recognized cocktail", html)
+        self.assertIn("Employees sharing bill", html)
+        self.assertIn('class="people-review-form"', html)
+        self.assertNotIn('name="approver"', html)
+        self.assertNotIn("Policy controls", html)
+        self.assertNotIn("Settlement and IVADO handoff", html)
 
         current = self.client.get(f"/api/trips/{trip.name}").get_json()["trip"]["line_item_review"]
         cocktail = next(

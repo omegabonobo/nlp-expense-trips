@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from datetime import date
 from hashlib import sha256
 from pathlib import Path
 
@@ -12,12 +13,12 @@ from nlp_expenses.accounting import trip_accounting_profile
 from nlp_expenses.consolidation import consolidation_view
 
 
-CONTRACT_VERSION = "2.0.0"
-CONTRACT_FILENAME = "trip-reimbursement-manifest.v2.ndjson"
+CONTRACT_VERSION = "3.0.0"
+CONTRACT_FILENAME = "trip-reimbursement-manifest.v3.ndjson"
 CONTRACT_SCHEMA = (
     Path(__file__).resolve().parents[1]
     / "contracts"
-    / "trip-reimbursement-manifest.v2.schema.json"
+    / "trip-reimbursement-manifest.v3.schema.json"
 )
 CONTROL_TOLERANCE_CAD = 0.02
 
@@ -50,9 +51,8 @@ def build_trip_manifest_records(
     receipts = [
         receipt_manifest_record(
             trip_dir,
-            report_id,
-            claim_program,
             expense,
+            claim_program,
         )
         for expense in view.get("expenses", [])
     ]
@@ -71,17 +71,27 @@ def build_trip_manifest_records(
 
 def receipt_manifest_record(
     trip_dir: Path,
-    report_id: str,
-    claim_program: str,
     expense: dict,
+    claim_program: str,
 ) -> dict:
     total = money(expense.get("amount"))
     total_cad = money(expense.get("total_cad"))
     if total is None or total_cad is None:
         raise ValueError(f"{expense.get('source_file')}: receipt totals are incomplete.")
     source_file = str(expense.get("source_file") or "")
+    receipt_included_in_arvine = bool(expense.get("included_in_arvine", True))
+    receipt_included_in_ivado = (
+        claim_program == "ivado_sponsored"
+        and bool(expense.get("included_in_ivado", True))
+        and receipt_included_in_arvine
+    )
     line_items = [
-        line_manifest_record(item, claim_program, position)
+        line_manifest_record(
+            item,
+            position,
+            receipt_included_in_arvine,
+            receipt_included_in_ivado,
+        )
         for position, item in enumerate(expense.get("line_items", []), start=1)
         if isinstance(item, dict)
     ]
@@ -90,11 +100,13 @@ def receipt_manifest_record(
         "kind": "receipt",
         "id": stable_receipt_id(trip_dir.name, source_file),
         "trip_id": trip_dir.name,
-        "parent_report_id": report_id,
-        "claim_program": claim_program,
         "document_date": expense.get("date"),
         "vendor": expense.get("vendor"),
         "description": expense.get("description") or expense.get("vendor") or source_file,
+        "expense_type": expense.get("expense_type") or "other",
+        "source_file": source_file,
+        "country": str(expense.get("country") or ""),
+        "province": str(expense.get("province") or ""),
         "currency": str(expense.get("currency") or "").upper(),
         "subtotal": money(expense.get("subtotal")),
         "gst": money(expense.get("gst_hst")),
@@ -102,35 +114,39 @@ def receipt_manifest_record(
         "total": total,
         "total_cad": total_cad,
         "paid_by": expense.get("paid_by"),
+        "number_of_people": max(1, int(expense.get("number_of_people") or 1)),
+        "included_in_arvine": receipt_included_in_arvine,
+        "included_in_ivado": receipt_included_in_ivado,
         "arvine_reimbursable_cad": money(expense.get("arvine_reimbursable_cad")) or 0.0,
         "ivado_claimable_cad": money(expense.get("ivado_claimable_cad")) or 0.0,
         "ivado_excluded_cad": money(expense.get("ivado_excluded_cad")) or 0.0,
         "line_items": line_items,
-        "source_url": (Path("expenses_receipts") / source_file).as_posix(),
-        "source_file": source_file,
-        "expense_type": expense.get("expense_type") or "other",
-        "business_purpose": expense.get("business_purpose") or "",
-        "attendees": expense.get("attendees_client") or "",
-        "gst_number": expense.get("gst_hst_number") or "",
-        "qst_number": expense.get("qst_number") or "",
-        "statement_total_cad": money(expense.get("cad_amount_used")),
-        "fx_rate": expense.get("fx_rate"),
-        "fx_basis_status": expense.get("fx_basis_status"),
-        "included_in_arvine": bool(expense.get("included_in_arvine", True)),
-        "included_in_ivado": bool(expense.get("included_in_ivado", True)),
+        "fx_rate": money(expense.get("fx_rate")),
         "ivado_exclusion_reason": (
             expense.get("ivado_exclusion_reason")
             if claim_program == "ivado_sponsored"
+            and expense.get("included_in_arvine", True)
+            and not expense.get("included_in_ivado", True)
             else None
         ),
-        "number_of_people": int(expense.get("number_of_people") or 1),
     }
     return record
 
 
-def line_manifest_record(item: dict, claim_program: str, position: int) -> dict:
-    included_in_arvine = bool(item.get("included_in_arvine", True))
-    included_in_ivado = bool(item.get("included_in_ivado", True)) and included_in_arvine
+def line_manifest_record(
+    item: dict,
+    position: int,
+    receipt_included_in_arvine: bool = True,
+    receipt_included_in_ivado: bool = True,
+) -> dict:
+    included_in_arvine = (
+        bool(item.get("included_in_arvine", True)) and receipt_included_in_arvine
+    )
+    included_in_ivado = (
+        bool(item.get("included_in_ivado", True))
+        and included_in_arvine
+        and receipt_included_in_ivado
+    )
     reason = item.get("ivado_exclusion_reason")
     if included_in_ivado:
         reason = None
@@ -152,8 +168,8 @@ def line_manifest_record(item: dict, claim_program: str, position: int) -> dict:
         "amount": money(item.get("amount")) or 0.0,
         "is_alcohol": bool(item.get("is_alcohol")),
         "included_in_arvine": included_in_arvine,
-        "included_in_ivado": included_in_ivado if claim_program == "ivado_sponsored" else False,
-        "ivado_exclusion_reason": reason if claim_program == "ivado_sponsored" else None,
+        "included_in_ivado": included_in_ivado,
+        "ivado_exclusion_reason": reason,
         "review_note": str(item.get("inclusion_note") or item.get("review_note") or ""),
     }
 
@@ -173,60 +189,30 @@ def trip_report_manifest_record(
     )
     employee_total = money(summary.get("employee_reimbursement_total_cad")) or 0.0
     ivado_total = money(summary.get("ivado_claim_total_cad")) or 0.0
-    settlement = metadata.get("settlement", {})
-    legs = [
-        settlement_leg(
-            f"{report_id}-EMPLOYEE",
-            "employee_reimbursement",
-            metadata.get("company"),
-            metadata.get("traveller"),
-            employee_total,
-            settlement.get("employee_reimbursement", {}),
-        )
+    receipt_dates = [
+        str(expense.get("date"))
+        for expense in view.get("expenses", [])
+        if expense.get("date")
     ]
-    sponsor = None
-    if claim_program == "ivado_sponsored":
-        sponsor = legal_entity(
-            metadata.get("sponsor"),
-            metadata.get("sponsor_identifier"),
-        )
-        legs.append(
-            settlement_leg(
-                f"{report_id}-SPONSOR",
-                "sponsor_reimbursement",
-                metadata.get("sponsor"),
-                metadata.get("company"),
-                ivado_total,
-                settlement.get("sponsor_reimbursement", {}),
-            )
-        )
+    report_date = (
+        metadata.get("report_date")
+        or metadata.get("end_date")
+        or (max(receipt_dates) if receipt_dates else date.today().isoformat())
+    )
     record = {
         "contract_version": CONTRACT_VERSION,
         "kind": "trip_report",
         "report_id": report_id,
         "trip_id": trip_dir.name,
-        "report_date": metadata.get("report_date") or metadata.get("end_date"),
+        "report_date": report_date,
         "claim_program": claim_program,
         "description": metadata.get("business_purpose") or trip_dir.name,
-        "employee": legal_entity(
-            metadata.get("traveller"),
-            metadata.get("traveller_identifier"),
-        ),
-        "company": legal_entity(
-            metadata.get("company"),
-            metadata.get("company_identifier"),
-        ),
-        "sponsor": sponsor,
+        "traveller": metadata.get("traveller"),
         "employee_reimbursement_total_cad": employee_total,
         "corporate_paid_total_cad": money(summary.get("corporate_paid_total_cad")) or 0.0,
         "ivado_claim_total_cad": ivado_total,
         "ivado_excluded_total_cad": money(summary.get("ivado_excluded_total_cad")) or 0.0,
         "accounting_summary": accounting_summary,
-        "settlement_legs": legs,
-        "source_url": f"trip/{trip_dir.name}",
-        "ivado_template_version": metadata.get("ivado_template_version") or "unconfirmed",
-        "ivado_claimant_instruction": metadata.get("ivado_claimant_instruction") or "",
-        "ivado_claimant_confirmed": bool(metadata.get("ivado_claimant_confirmed")),
     }
     return record
 
@@ -245,37 +231,6 @@ def contract_accounting_summary(profile: dict, accounting: dict) -> dict:
         "gst_receivable_cad": amounts.get(mapping["gst_hst_receivable"], 0.0),
         "qst_receivable_cad": amounts.get(mapping["qst_receivable"], 0.0),
     }
-
-
-def settlement_leg(
-    leg_id: str,
-    leg_type: str,
-    payer: object,
-    payee: object,
-    amount_cad: float,
-    state: object,
-) -> dict:
-    state = state if isinstance(state, dict) else {}
-    leg = {
-        "leg_id": leg_id,
-        "leg_type": leg_type,
-        "payer": legal_entity(payer),
-        "payee": legal_entity(payee),
-        "amount_cad": amount_cad,
-        "status": state.get("status") or "planned",
-    }
-    if state.get("payment_date"):
-        leg["payment_date"] = state["payment_date"]
-    if state.get("payment_reference"):
-        leg["payment_reference"] = state["payment_reference"]
-    return leg
-
-
-def legal_entity(name: object, identifier: object = None) -> dict:
-    entity = {"legal_name": " ".join(str(name or "").split())}
-    if identifier:
-        entity["identifier"] = " ".join(str(identifier).split())
-    return entity
 
 
 def validate_manifest_records(records: list[dict]) -> None:

@@ -18,8 +18,8 @@ from nlp_expenses.trips import ensure_trip
 from nlp_expenses.workbook import build_ivado_claim_workbook
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SCHEMA_PATH = REPO_ROOT / "contracts" / "trip-reimbursement-manifest.v2.schema.json"
-EXAMPLE_PATH = REPO_ROOT / "examples" / "ivado-trip-manifest-v2.ndjson"
+SCHEMA_PATH = REPO_ROOT / "contracts" / "trip-reimbursement-manifest.v3.schema.json"
+EXAMPLE_PATH = REPO_ROOT / "examples" / "ivado-trip-manifest-v3.ndjson"
 
 
 class InterprojectContractTests(unittest.TestCase):
@@ -64,10 +64,86 @@ class InterprojectContractTests(unittest.TestCase):
 
             build_ivado_claim_workbook(trip, records, output)
             workbook = load_workbook(output, data_only=False)
-            exclusion = workbook["Exclusions"]
-            self.assertEqual(exclusion["D2"].value, "Personal detour")
-            self.assertEqual(exclusion["E2"].value, 75.0)
-            self.assertEqual(exclusion["F2"].value, "non_business")
+            items = workbook["Receipt Items"]
+            self.assertEqual(items["G2"].value, "Personal detour")
+            self.assertEqual(items["O2"].value, 75.0)
+            self.assertEqual(items["P2"].value, "non_business")
+
+    def test_ivado_workbook_applies_employee_share_and_keeps_removed_alcohol(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trip = Path(tmp)
+            output = trip / "ivado.xlsx"
+            records = [
+                {
+                    "kind": "receipt",
+                    "id": "RCPT-SHARED",
+                    "document_date": "2026-07-21",
+                    "vendor": "Restaurant",
+                    "description": "Shared dinner",
+                    "expense_type": "meal",
+                    "source_file": "shared.pdf",
+                    "country": "Canada",
+                    "province": "QC",
+                    "currency": "CAD",
+                    "total": 300.0,
+                    "total_cad": 100.0,
+                    "number_of_people": 3,
+                    "paid_by": "employee_personal",
+                    "included_in_arvine": True,
+                    "included_in_ivado": True,
+                    "arvine_reimbursable_cad": 100.0,
+                    "ivado_claimable_cad": 90.0,
+                    "ivado_excluded_cad": 10.0,
+                    "fx_rate": 1.0,
+                    "line_items": [
+                        {
+                            "line_id": "food",
+                            "description": "Food",
+                            "amount": 270.0,
+                            "is_alcohol": False,
+                            "included_in_arvine": True,
+                            "included_in_ivado": True,
+                        },
+                        {
+                            "line_id": "wine",
+                            "description": "Wine",
+                            "amount": 30.0,
+                            "is_alcohol": True,
+                            "included_in_arvine": True,
+                            "included_in_ivado": False,
+                            "ivado_exclusion_reason": "alcohol",
+                        },
+                    ],
+                },
+                {
+                    "kind": "trip_report",
+                    "claim_program": "ivado_sponsored",
+                    "report_id": "TRIP-QA",
+                    "trip_id": "qa",
+                    "report_date": "2026-07-22",
+                    "traveller": "QA Traveller",
+                    "description": "QA trip",
+                    "ivado_claim_total_cad": 90.0,
+                    "ivado_excluded_total_cad": 10.0,
+                },
+            ]
+
+            build_ivado_claim_workbook(trip, records, output)
+            workbook = load_workbook(output, data_only=False)
+            report = workbook["Expense Report"]
+            self.assertEqual(report["H9"].value, 90.0)
+            self.assertEqual(report["N9"].value, 90.0)
+            items = workbook["Receipt Items"]
+            wine = next(
+                row
+                for row in items.iter_rows(min_row=2, values_only=True)
+                if row[6] == "Wine"
+            )
+            self.assertEqual(wine[4], 3)
+            self.assertEqual(wine[8], 10.0)
+            self.assertEqual(wine[10], "Yes")
+            self.assertEqual(wine[13], 10.0)
+            self.assertEqual(wine[14], 10.0)
 
     def test_contract_declares_independent_program_and_payer_enums(self):
         schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -136,15 +212,10 @@ class InterprojectContractTests(unittest.TestCase):
                 {
                     "claim_program": "ivado_sponsored",
                     "traveller": "Florent Voumard",
-                    "company": "Arvine Labs Inc.",
-                    "sponsor": "IVADO Labs",
                     "start_date": "2026-07-20",
                     "end_date": "2026-07-22",
                     "business_purpose": "Montreal business trip",
-                    "approver": "Reviewer",
-                    "payment_method": "Employee reimbursement",
                     "default_paid_by": "employee_personal",
-                    "payer_confirmed": True,
                 },
             )
             view = {
@@ -216,7 +287,11 @@ class InterprojectContractTests(unittest.TestCase):
             self.assertEqual([record["kind"] for record in records], ["receipt", "trip_report"])
             self.assertEqual(records[0]["arvine_reimbursable_cad"], 115.0)
             self.assertEqual(records[0]["ivado_claimable_cad"], 95.0)
-            self.assertEqual(len(records[1]["settlement_legs"]), 2)
+            self.assertEqual(records[0]["number_of_people"], 1)
+            self.assertEqual(records[1]["traveller"], "Florent Voumard")
+            self.assertNotIn("settlement_legs", records[1])
+            self.assertNotIn("company", records[1])
+            self.assertNotIn("sponsor", records[1])
 
             output = write_trip_manifest(root, trip, view=view)
             written = [
