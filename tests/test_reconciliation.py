@@ -9,6 +9,7 @@ from unittest.mock import patch
 from openpyxl import load_workbook
 
 from nlp_expenses.generator import generate_review
+from nlp_expenses.line_items import line_item_review_view
 from nlp_expenses.models import Expense
 from nlp_expenses.statement_normalizer import set_statement_date_convention
 from nlp_expenses.reconciliation import (
@@ -36,6 +37,92 @@ def write_generic_statement(path: Path) -> None:
 
 
 class ReconciliationTests(unittest.TestCase):
+    def test_nested_receipt_folders_are_recursive_and_duplicate_basenames_stay_distinct(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202607_nested", mode="arvine")
+            hotel_file = trip / "expenses_receipts" / "meta ads" / "2026-06" / "invoice.pdf"
+            taxi_file = trip / "expenses_receipts" / "travel" / "invoice.pdf"
+            hotel_file.parent.mkdir(parents=True)
+            taxi_file.parent.mkdir(parents=True)
+            hotel_file.write_bytes(b"hotel")
+            taxi_file.write_bytes(b"taxi")
+            write_generic_statement(trip / "card_statements" / "card.csv")
+
+            def parsed(path: Path, **_kwargs) -> Expense:
+                if "meta ads" in path.parts:
+                    return Expense(
+                        source_file=path,
+                        expense_id="",
+                        date="2026-07-01",
+                        supplier_name="Foreign Hotel",
+                        expense_type="hotel",
+                        amount=100,
+                        currency="USD",
+                    )
+                return Expense(
+                    source_file=path,
+                    expense_id="",
+                    date="2026-07-02",
+                    supplier_name="Airport Taxi",
+                    expense_type="transport",
+                    amount=50,
+                    currency="USD",
+                )
+
+            with patch("nlp_expenses.generator.parse_arvine_receipt", side_effect=parsed):
+                view = sync_reconciliation(trip, root, llm_mode="off")
+
+            expected_files = {
+                "meta ads/2026-06/invoice.pdf",
+                "travel/invoice.pdf",
+            }
+            self.assertEqual(
+                {expense["source_file"] for expense in view["expenses"]},
+                expected_files,
+            )
+            self.assertEqual(
+                {receipt["source_file"] for receipt in line_item_review_view(trip)["receipts"]},
+                expected_files,
+            )
+            self.assertEqual(view["summary"]["matched_invoice_count"], 2)
+
+            hotel_transaction = next(
+                item for item in view["transactions"] if item["description"] == "FOREIGN HOTEL"
+            )
+            manually_mapped = set_manual_match(
+                trip,
+                hotel_transaction["group_id"],
+                expense_file="travel/invoice.pdf",
+            )
+            changed = next(
+                item
+                for item in manually_mapped["transactions"]
+                if item["group_id"] == hotel_transaction["group_id"]
+            )
+            self.assertEqual(changed["expense_file"], "travel/invoice.pdf")
+
+            output = trip / "nested-receipts.xlsx"
+            with patch("nlp_expenses.generator.parse_arvine_receipt", side_effect=parsed):
+                generate_review(
+                    trip,
+                    root,
+                    llm_mode="off",
+                    statements_complete=True,
+                    output_path=output,
+                )
+            workbook = load_workbook(output, data_only=False)
+            detail = workbook["expense_detail"]
+            self.assertEqual(
+                {detail.cell(row, 32).value for row in range(2, detail.max_row + 1)},
+                expected_files,
+            )
+
+            later_folder = trip / "expenses_receipts" / "meta ads" / "2026-07"
+            later_folder.mkdir(parents=True)
+            (later_folder / "another.pdf").write_bytes(b"new")
+            self.assertTrue(reconciliation_view(trip)["stale"])
+
     def test_sync_manual_override_fx_rate_and_workbook_reuse(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

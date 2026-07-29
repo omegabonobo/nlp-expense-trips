@@ -30,12 +30,15 @@ from nlp_expenses.trip_manifest import CONTRACT_FILENAME
 from nlp_expenses.trips import (
     TRIP_MODES,
     ensure_trip,
+    list_receipt_files,
     list_trips,
     load_trip_config,
+    relative_source_name,
     save_trip_mode,
     trip_mode,
     trip_receipts_dir,
     trip_statements_dir,
+    validate_source_name,
     validate_trip_name,
 )
 
@@ -135,7 +138,7 @@ def trip_summaries(root: Path, include_archived: bool = False) -> list[dict]:
                 "mode": trip_mode(trip),
                 "claim_program": trip_metadata(trip).get("claim_program") or "",
                 "archived": archived,
-                "receipt_count": len(list_source_files(trip_receipts_dir(trip))),
+                "receipt_count": len(list_receipt_files(trip_receipts_dir(trip))),
                 "statement_count": len(list_source_files(trip_statements_dir(trip))),
             }
         )
@@ -145,7 +148,8 @@ def trip_summaries(root: Path, include_archived: bool = False) -> list[dict]:
 def trip_details(root: Path, name: str) -> dict:
     trip = resolve_trip(root, name)
     selected_mode = trip_mode(trip)
-    receipts = list_source_files(trip_receipts_dir(trip))
+    receipts_folder = trip_receipts_dir(trip)
+    receipts = list_receipt_files(receipts_folder)
     statements = list_source_files(trip_statements_dir(trip))
     statement_reports: dict[str, dict] = {}
     if selected_mode == "arvine":
@@ -172,7 +176,7 @@ def trip_details(root: Path, name: str) -> dict:
         "receipts_path": str(trip_receipts_dir(trip)),
         "statements_path": str(trip_statements_dir(trip)),
         "file_state": source_file_state(receipts, statements),
-        "receipts": [file_details(path) for path in receipts],
+        "receipts": [file_details(path, receipts_folder) for path in receipts],
         "statements": [
             {**file_details(path), "validation": statement_reports.get(path.name)} for path in statements
         ],
@@ -190,7 +194,7 @@ def trip_details(root: Path, name: str) -> dict:
 def trip_file_state(root: Path, name: str) -> dict:
     trip = resolve_trip(root, name)
     return source_file_state(
-        list_source_files(trip_receipts_dir(trip)),
+        list_receipt_files(trip_receipts_dir(trip)),
         list_source_files(trip_statements_dir(trip)),
     )
 
@@ -207,7 +211,7 @@ def source_file_state(receipts: list[Path], statements: list[Path]) -> dict:
             except FileNotFoundError:
                 continue
             counts[kind] += 1
-            entries.append(f"{kind}\0{path.name}\0{stat.st_size}\0{stat.st_mtime_ns}")
+            entries.append(f"{kind}\0{path.resolve().as_posix()}\0{stat.st_size}\0{stat.st_mtime_ns}")
     digest = hashlib.sha256("\n".join(entries).encode("utf-8")).hexdigest()
     return {"signature": digest, **counts}
 
@@ -244,9 +248,13 @@ def store_upload(root: Path, trip_name: str, kind: str, filename: str, stream: B
             temporary = validation_path
             validate_receipt_content(temporary)
         incoming_hash = file_hash(temporary)
-        for existing in list_source_files(destination):
+        existing_files = list_receipt_files(destination) if kind == "receipts" else list_source_files(destination)
+        for existing in existing_files:
             if existing.stat().st_size == temporary.stat().st_size and file_hash(existing) == incoming_hash:
-                return UploadResult(name=existing.name, status="duplicate")
+                existing_name = (
+                    relative_source_name(destination, existing) if kind == "receipts" else existing.name
+                )
+                return UploadResult(name=existing_name, status="duplicate")
 
         target = unique_destination(destination, cleaned)
         os.replace(temporary, target)
@@ -258,7 +266,7 @@ def store_upload(root: Path, trip_name: str, kind: str, filename: str, stream: B
 def remove_source_file(root: Path, trip_name: str, kind: str, filename: str) -> None:
     trip = resolve_trip(root, trip_name)
     folder = source_folder(trip, kind).resolve()
-    target = safe_child(folder, filename)
+    target = safe_source_child(folder, filename) if kind == "receipts" else safe_child(folder, filename)
     if not target.is_file():
         raise FileNotFoundError(f"{filename} was not found.")
     target.unlink()
@@ -343,10 +351,10 @@ def trip_label(name: str) -> str:
     return f"{slug.replace('-', ' ').replace('_', ' ').title()} · {month_label}"
 
 
-def file_details(path: Path) -> dict:
+def file_details(path: Path, source_root: Path | None = None) -> dict:
     stat = path.stat()
     return {
-        "name": path.name,
+        "name": relative_source_name(source_root, path) if source_root else path.name,
         "size": stat.st_size,
         "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
     }
@@ -372,6 +380,16 @@ def safe_child(folder: Path, filename: str) -> Path:
     target = (folder / filename).resolve()
     if target.parent != folder.resolve():
         raise ValueError("File path is outside the selected trip folder.")
+    return target
+
+
+def safe_source_child(folder: Path, relative_name: str) -> Path:
+    normalized = validate_source_name(relative_name)
+    target = (folder / normalized).resolve()
+    try:
+        target.relative_to(folder.resolve())
+    except ValueError as exc:
+        raise ValueError("File path is outside the selected trip folder.") from exc
     return target
 
 

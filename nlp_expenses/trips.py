@@ -50,6 +50,56 @@ def trip_statements_dir(trip_dir: Path) -> Path:
     return trip_dir / STATEMENTS_DIR
 
 
+def list_receipt_files(receipts_dir: Path) -> list[Path]:
+    """List every visible receipt below the receipt root, preserving folders."""
+
+    if not receipts_dir.exists():
+        return []
+    files = []
+    for path in receipts_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(receipts_dir)
+        if any(part.startswith(".") for part in relative.parts):
+            continue
+        files.append(path)
+    return sorted(files, key=lambda path: relative_source_name(receipts_dir, path).casefold())
+
+
+def relative_source_name(folder: Path, path: Path) -> str:
+    """Return a stable POSIX path relative to a receipt/statement root."""
+
+    resolved_folder = folder.resolve()
+    resolved_path = path.resolve()
+    try:
+        relative = resolved_path.relative_to(resolved_folder)
+    except ValueError as exc:
+        raise ValueError("Source file is outside its selected folder.") from exc
+    return relative.as_posix()
+
+
+def source_file_key(path: Path) -> str:
+    """Return the persisted identity for an extracted receipt.
+
+    Extraction stores nested receipt paths relative to ``expenses_receipts``.
+    Absolute paths still occur in direct library calls and legacy tests; those
+    retain their historical basename identity.
+    """
+
+    return path.name if path.is_absolute() else path.as_posix()
+
+
+def validate_source_name(value: str) -> str:
+    """Validate and normalize a user-facing relative source path."""
+
+    if not value:
+        raise ValueError("Invalid receipt filename.")
+    path = Path(value)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise ValueError("Invalid receipt filename.")
+    return path.as_posix()
+
+
 def trip_mode(trip_dir: Path) -> str:
     data = load_trip_config(trip_dir)
     mode = str(data.get("mode", "ivado")).lower()

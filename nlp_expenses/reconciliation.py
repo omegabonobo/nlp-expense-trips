@@ -38,8 +38,11 @@ from nlp_expenses.trip_metadata import (
     trip_policy_warnings,
 )
 from nlp_expenses.trips import (
+    list_receipt_files,
     load_trip_config,
+    relative_source_name,
     save_trip_config,
+    source_file_key,
     trip_mode,
     trip_receipts_dir,
     trip_statements_dir,
@@ -135,7 +138,7 @@ def sync_reconciliation(
     apply_invoice_overrides(expenses, invoice_overrides)
     apply_manual_cad_overrides(expenses, manual_cad_overrides)
     manual_cad_overrides = {
-        expense.source_file.name: {
+        source_file_key(expense.source_file): {
             "amount": expense.manual_cad_override,
             "note": expense.manual_cad_note,
         }
@@ -146,7 +149,7 @@ def sync_reconciliation(
     emit_progress(progress_callback, "matching", 0, 1, "Matching invoices to statement transactions")
     match_normalized_transactions(expenses, normalization.transactions)
 
-    expense_files = {expense.source_file.name for expense in expenses}
+    expense_files = {source_file_key(expense.source_file) for expense in expenses}
     transaction_groups = {transaction.transaction_group_id for transaction in normalization.transactions}
     preserved_manual_matches = (
         deserialize_manual_matches(previous_state)
@@ -793,7 +796,7 @@ def restore_group_before_decision(group: dict) -> None:
 
 def apply_invoice_overrides(expenses: list[Expense], overrides: dict[str, dict]) -> None:
     for expense in expenses:
-        values = overrides.get(expense.source_file.name, {})
+        values = overrides.get(source_file_key(expense.source_file), {})
         for field, attribute in INVOICE_FIELD_MAP.items():
             if field in values:
                 setattr(expense, attribute, values[field])
@@ -801,7 +804,7 @@ def apply_invoice_overrides(expenses: list[Expense], overrides: dict[str, dict])
 
 def apply_manual_cad_overrides(expenses: list[Expense], overrides: dict[str, dict]) -> None:
     for expense in expenses:
-        values = overrides.get(expense.source_file.name, {})
+        values = overrides.get(source_file_key(expense.source_file), {})
         amount = values.get("amount")
         if isinstance(amount, (int, float)):
             expense.manual_cad_override = float(amount)
@@ -1321,8 +1324,8 @@ def aggregate_transaction_groups(
                 "cad_amount": cad_amount,
                 "cad_completeness": completeness,
                 "match_eligible": bool(eligible),
-                "expense_file": expense.source_file.name if expense else None,
-                "suggested_expense_file": suggested.source_file.name if suggested else None,
+                "expense_file": source_file_key(expense.source_file) if expense else None,
+                "suggested_expense_file": source_file_key(suggested.source_file) if suggested else None,
                 "match_status": status,
                 "match_confidence": max((leg.match_confidence for leg in legs), default=0.0),
                 "auto_match_confidence": max((leg.match_confidence for leg in legs), default=0.0),
@@ -1361,7 +1364,7 @@ def aggregate_transaction_groups(
 
 def serialize_expense(expense: Expense) -> dict:
     return {
-        "source_file": expense.source_file.name,
+        "source_file": source_file_key(expense.source_file),
         "expense_id": expense.expense_id,
         "date": expense.date,
         "vendor": expense.supplier_name,
@@ -1473,7 +1476,7 @@ def ivado_statement_transactions_from_reconciliation(
     state = load_reconciliation_state(trip_dir)
     if not state or not reconciliation_is_fresh(trip_dir, state):
         return []
-    expense_ids = {expense.source_file.name: expense.expense_id for expense in expenses}
+    expense_ids = {source_file_key(expense.source_file): expense.expense_id for expense in expenses}
     transactions = []
     for group in state.get("transactions", []):
         source_files = group.get("source_files") or []
@@ -1615,12 +1618,18 @@ def append_reconciliation_note(existing: str, note: str) -> str:
 def reconciliation_input_fingerprint(trip_dir: Path) -> str:
     digest = hashlib.sha256()
     digest.update(trip_mode(trip_dir).encode("utf-8"))
-    for folder in (trip_receipts_dir(trip_dir), trip_statements_dir(trip_dir)):
-        if not folder.exists():
-            continue
-        for path in sorted(item for item in folder.iterdir() if item.is_file() and not item.name.startswith(".")):
+    receipts_folder = trip_receipts_dir(trip_dir)
+    for path in list_receipt_files(receipts_folder):
+        stat = path.stat()
+        source_name = relative_source_name(receipts_folder, path)
+        digest.update(f"{receipts_folder.name}/{source_name}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8"))
+    statements_folder = trip_statements_dir(trip_dir)
+    if statements_folder.exists():
+        for path in sorted(
+            item for item in statements_folder.iterdir() if item.is_file() and not item.name.startswith(".")
+        ):
             stat = path.stat()
-            digest.update(f"{folder.name}/{path.name}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8"))
+            digest.update(f"{statements_folder.name}/{path.name}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8"))
     date_settings = trip_dir / STATEMENT_SETTINGS_FILE
     if date_settings.is_file():
         digest.update(date_settings.read_bytes())

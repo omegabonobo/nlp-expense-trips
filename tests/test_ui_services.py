@@ -18,6 +18,7 @@ from nlp_expenses.ui_services import (
     resolve_trip,
     reveal_in_finder,
     store_upload,
+    trip_details,
     trip_file_state,
     versioned_output_path,
 )
@@ -136,6 +137,34 @@ class UIServiceTests(unittest.TestCase):
             statement_added = trip_file_state(root, trip.name)
             self.assertEqual(statement_added["statements"], 1)
             self.assertNotEqual(statement_added["signature"], changed["signature"])
+
+    def test_nested_receipts_are_listed_counted_and_removable_by_relative_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202607_montreal", mode="arvine")
+            nested = trip / "expenses_receipts" / "meta ads" / "2026-06"
+            nested.mkdir(parents=True)
+            receipt = nested / "invoice.pdf"
+            receipt.write_bytes(b"nested")
+            hidden_folder = trip / "expenses_receipts" / ".organizer"
+            hidden_folder.mkdir()
+            (hidden_folder / "ignored.pdf").write_bytes(b"hidden")
+
+            state = trip_file_state(root, trip.name)
+            details = trip_details(root, trip.name)
+            self.assertEqual(state["receipts"], 1)
+            self.assertEqual(
+                [item["name"] for item in details["receipts"]],
+                ["meta ads/2026-06/invoice.pdf"],
+            )
+
+            remove_source_file(
+                root,
+                trip.name,
+                "receipts",
+                "meta ads/2026-06/invoice.pdf",
+            )
+            self.assertFalse(receipt.exists())
 
     def test_macos_actions_only_receive_safe_trip_targets(self):
         with tempfile.TemporaryDirectory() as tmp:

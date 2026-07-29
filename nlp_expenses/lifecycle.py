@@ -11,6 +11,7 @@ from pathlib import Path
 from nlp_expenses.accounting import trip_accounting_profile
 from nlp_expenses.trip_metadata import required_metadata_gaps, trip_metadata
 from nlp_expenses.trips import (
+    list_receipt_files,
     load_trip_config,
     save_trip_config,
     trip_mode,
@@ -41,14 +42,10 @@ def json_sha256(value: object) -> str:
 
 def review_input_snapshot(root: Path, trip_dir: Path) -> dict:
     artifacts = []
-    for kind, folder in (
-        ("receipt", trip_receipts_dir(trip_dir)),
-        ("statement", trip_statements_dir(trip_dir)),
-    ):
-        if not folder.exists():
-            continue
-        for path in sorted(item for item in folder.iterdir() if item.is_file() and not item.name.startswith(".")):
-            artifacts.append(artifact_entry(trip_dir, path, kind))
+    for path in list_receipt_files(trip_receipts_dir(trip_dir)):
+        artifacts.append(artifact_entry(trip_dir, path, "receipt"))
+    for path in list_visible_files(trip_statements_dir(trip_dir)):
+        artifacts.append(artifact_entry(trip_dir, path, "statement"))
     for filename, kind in (
         (RECONCILIATION_FILE, "reconciliation"),
         (LINE_ITEM_REVIEW_FILE, "line_item_review"),
@@ -252,7 +249,7 @@ def trip_lifecycle(root: Path, trip_dir: Path) -> dict:
     elif current_approval:
         status = "approved"
         reason = "Approved sources, review decisions, profile and workbook are unchanged."
-    elif not list_visible_files(trip_receipts_dir(trip_dir)):
+    elif not list_receipt_files(trip_receipts_dir(trip_dir)):
         status = "collecting"
         reason = "Add receipt or invoice scans."
     elif current_generation_record(root, trip_dir):

@@ -6,6 +6,7 @@ from difflib import SequenceMatcher
 import re
 
 from nlp_expenses.models import Expense, NormalizedTransaction, StatementTransaction
+from nlp_expenses.trips import source_file_key
 
 
 def match_transactions(expenses: list[Expense], transactions: list[StatementTransaction]) -> None:
@@ -101,7 +102,7 @@ def apply_manual_matches(
     A present key with a ``None`` value is an explicit manual unmatch.
     """
 
-    expenses_by_file = {expense.source_file.name: expense for expense in expenses}
+    expenses_by_file = {source_file_key(expense.source_file): expense for expense in expenses}
     groups: dict[str, list[NormalizedTransaction]] = defaultdict(list)
     for transaction in transactions:
         groups[transaction.transaction_group_id].append(transaction)

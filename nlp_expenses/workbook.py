@@ -15,6 +15,7 @@ from openpyxl.utils import get_column_letter
 from nlp_expenses.matching import apply_manual_matches, match_normalized_transactions, match_transactions
 from nlp_expenses.models import Expense, NormalizedTransaction, StatementTransaction
 from nlp_expenses.trip_metadata import trip_metadata
+from nlp_expenses.trips import source_file_key
 
 
 EXPENSE_HEADERS = [
@@ -380,7 +381,7 @@ def write_arvine_detail_sheet(ws, expenses: list[Expense], accounting_profile: d
                 f'=IF($AA{row}="","",IF($F{row}="meal",$AA{row}-$AB{row},0))',
                 expense.business_purpose,
                 expense.attendees_client,
-                expense.source_file.name,
+                source_file_key(expense.source_file),
                 arvine_extraction_status(expense),
                 (
                     f'=IF(COUNTIF(\'card_statements\'!$T$2:$T${statement_end},$B{row})=0,"unmatched",'
@@ -443,7 +444,7 @@ def write_arvine_detail_sheet(ws, expenses: list[Expense], accounting_profile: d
             ],
         )
         source_cell = ws.cell(row, 32)
-        source_cell.hyperlink = f"expenses_receipts/{expense.source_file.name}"
+        source_cell.hyperlink = f"expenses_receipts/{source_file_key(expense.source_file)}"
         source_cell.style = "Hyperlink"
         source_cell.font = Font(color="FF0000", underline="single")
 
@@ -698,7 +699,7 @@ def write_arvine_statement_sheet(
     expenses: list[Expense] | None = None,
 ) -> None:
     allocations_by_group = allocations_by_group or {}
-    expenses_by_file = {expense.source_file.name: expense for expense in (expenses or [])}
+    expenses_by_file = {source_file_key(expense.source_file): expense for expense in (expenses or [])}
     ws.append(ARVINE_STATEMENT_HEADERS)
     previous_group = None
     group_fill = None
@@ -1024,7 +1025,7 @@ def write_expense_sheet(ws, expenses: list[Expense]) -> None:
                     f'IF(OR($W{idx}="statement_receipt_total",$W{idx}="statement_aggregated"),'
                     f'$K{idx}*{line_ratio_formula}/MAX(1,$I{idx}),$J{idx}*$L{idx})))'
                 ),
-                expense.source_file.name,
+                source_file_key(expense.source_file),
                 extraction_status(expense),
                 expense.review_note,
                 expense.included,
@@ -1113,7 +1114,7 @@ def write_line_sheet(ws, expenses: list[Expense]) -> None:
                     item.inclusion_overridden,
                     item.alcohol_overridden,
                     item.inclusion_note,
-                    expense.source_file.name,
+                    source_file_key(expense.source_file),
                     item.confidence,
                     item.review_note,
                 ]

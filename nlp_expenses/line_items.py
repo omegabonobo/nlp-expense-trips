@@ -10,7 +10,14 @@ from datetime import date, datetime
 from pathlib import Path
 
 from nlp_expenses.models import Expense, LineItem
-from nlp_expenses.trips import trip_mode, trip_receipts_dir
+from nlp_expenses.trips import (
+    list_receipt_files,
+    relative_source_name,
+    source_file_key,
+    trip_mode,
+    trip_receipts_dir,
+    validate_source_name,
+)
 
 
 LINE_ITEM_REVIEW_FILE = ".nlp-expenses-line-items.json"
@@ -113,10 +120,11 @@ def save_line_item_review(
     }
     receipts = []
     for expense in expenses:
+        source_file = source_file_key(expense.source_file)
         occurrences: dict[str, int] = {}
         lines = []
         extracted_lines = []
-        stored_receipt = previous_receipts.get(expense.source_file.name)
+        stored_receipt = previous_receipts.get(source_file)
         stored_lines = [
             item
             for item in (stored_receipt.get("line_items", []) if stored_receipt else [])
@@ -134,10 +142,10 @@ def save_line_item_review(
             for item in removed_lines
         }
         for item in expense.line_items:
-            line_id = stable_line_id(expense.source_file.name, item, occurrences)
+            line_id = stable_line_id(source_file, item, occurrences)
             automatic = serialize_line_item(item, line_id, selected_mode)
             extracted_lines.append(dict(automatic))
-            stored = previous_items.get((expense.source_file.name, line_id))
+            stored = previous_items.get((source_file, line_id))
             if not stored:
                 stored = fuzzy_matching_line(
                     automatic,
@@ -171,8 +179,8 @@ def save_line_item_review(
                 lines.append(dict(stored))
         extracted = serialize_expense_fields(expense)
         receipt = {
-            "receipt_id": stable_receipt_id(trip_dir.name, expense.source_file.name),
-            "source_file": expense.source_file.name,
+            "receipt_id": stable_receipt_id(trip_dir.name, source_file),
+            "source_file": source_file,
             "review_mode": selected_mode,
             "extraction_confidence": expense.confidence,
             "line_items": lines,
@@ -498,7 +506,7 @@ def apply_line_item_review(
         return False
     by_file = {receipt["source_file"]: receipt for receipt in view["receipts"]}
     for expense in expenses:
-        receipt = by_file.get(expense.source_file.name)
+        receipt = by_file.get(source_file_key(expense.source_file))
         if not receipt:
             continue
         selected_mode = trip_mode(trip_dir)
@@ -1085,8 +1093,8 @@ def line_item_input_fingerprint(trip_dir: Path) -> str:
     digest.update(trip_mode(trip_dir).encode("utf-8"))
     folder = trip_receipts_dir(trip_dir)
     if folder.exists():
-        for path in sorted(item for item in folder.iterdir() if item.is_file() and not item.name.startswith(".")):
-            digest.update(path.name.encode("utf-8"))
+        for path in list_receipt_files(folder):
+            digest.update(relative_source_name(folder, path).encode("utf-8"))
             with path.open("rb") as handle:
                 for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                     digest.update(chunk)
@@ -1132,8 +1140,7 @@ def require_current_state(trip_dir: Path) -> dict:
 
 
 def find_receipt(state: dict, source_file: str) -> dict:
-    if not source_file or source_file != Path(source_file).name:
-        raise ValueError("Invalid receipt filename.")
+    source_file = validate_source_name(source_file)
     receipt = next((value for value in state.get("receipts", []) if value.get("source_file") == source_file), None)
     if not receipt:
         raise FileNotFoundError("The selected receipt is no longer available.")

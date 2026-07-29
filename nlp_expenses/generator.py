@@ -16,7 +16,14 @@ from nlp_expenses.statement_normalizer import (
     preflight_statement_files,
 )
 from nlp_expenses.trip_metadata import apply_trip_metadata_defaults
-from nlp_expenses.trips import TRIP_MODES, trip_mode, trip_receipts_dir, trip_statements_dir
+from nlp_expenses.trips import (
+    TRIP_MODES,
+    list_receipt_files,
+    relative_source_name,
+    trip_mode,
+    trip_receipts_dir,
+    trip_statements_dir,
+)
 from nlp_expenses.workbook import (
     build_arvine_workbook,
     build_ivado_claim_workbook,
@@ -64,24 +71,26 @@ def extract_trip_expenses(
     allow_openai_prompt: bool = True,
 ) -> list[Expense]:
     _api_key, model, use_llm, force_llm = resolve_run_settings(root, llm_mode, allow_openai_prompt)
-    receipt_files = sorted(
-        path for path in receipts_dir.iterdir() if path.is_file() and path.suffix.lower() in SUPPORTED_RECEIPTS
-    )
+    receipt_files = [
+        path for path in list_receipt_files(receipts_dir) if path.suffix.lower() in SUPPORTED_RECEIPTS
+    ]
     receipt_parser = parse_arvine_receipt if selected_mode == "arvine" else parse_receipt
     expenses: list[Expense] = []
     for index, path in enumerate(receipt_files, start=1):
+        source_name = relative_source_name(receipts_dir, path)
         if progress_callback:
             progress_callback(
                 GenerationProgress(
                     stage="receipts",
                     current=index,
                     total=len(receipt_files),
-                    message=f"Processing receipt {index} of {len(receipt_files)}: {path.name}",
+                    message=f"Processing receipt {index} of {len(receipt_files)}: {source_name}",
                 )
             )
         expense = receipt_parser(path, use_llm=use_llm, model=model, force_llm=force_llm)
+        expense.source_file = Path(source_name)
         if use_llm and force_llm and "OpenAI" not in expense.review_note:
-            message = f"{path.name}: OpenAI extraction was unavailable; local extraction was used."
+            message = f"{source_name}: OpenAI extraction was unavailable; local extraction was used."
             expense.review_note = append_note(expense.review_note, message)
             if warning_callback:
                 warning_callback(message)

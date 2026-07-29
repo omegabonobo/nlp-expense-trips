@@ -29,6 +29,8 @@ From the interface you can:
 - create or select a business trip;
 - see and reveal the exact receipt, statement, and output folders in Finder;
 - upload receipt scans and bank/card exports directly;
+- organize receipts in any depth of subfolders under `expenses_receipts`; the
+  app processes them recursively and keeps their relative paths distinct;
 - automatically refresh when receipt or statement files are added, changed, or
   removed directly in Finder, with a manual **Refresh files** fallback;
 - edit receipt fields, payer, Arvine/IVADO eligibility, person count, and extracted lines; add/remove manual lines; reactivate or deactivate any item; and correct its alcohol classification;

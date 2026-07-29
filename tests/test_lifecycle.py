@@ -42,6 +42,9 @@ class LifecycleTests(unittest.TestCase):
         )
         receipt = trip / "expenses_receipts" / "receipt.pdf"
         receipt.write_bytes(b"receipt version one")
+        nested_receipt = trip / "expenses_receipts" / "meta ads" / "2026-06" / "invoice.pdf"
+        nested_receipt.parent.mkdir(parents=True)
+        nested_receipt.write_bytes(b"nested receipt version one")
         expense = Expense(
             source_file=receipt,
             expense_id="EXP-1",
@@ -81,8 +84,14 @@ class LifecycleTests(unittest.TestCase):
                     hashlib.sha256(archive.read(manifest["workbook"]["path"])).hexdigest(),
                     manifest["workbook"]["sha256"],
                 )
+                self.assertIn(
+                    "expenses_receipts/meta ads/2026-06/invoice.pdf",
+                    archive.namelist(),
+                )
 
-            (trip / "expenses_receipts" / "receipt.pdf").write_bytes(b"receipt version two")
+            (trip / "expenses_receipts" / "meta ads" / "2026-06" / "invoice.pdf").write_bytes(
+                b"nested receipt version two"
+            )
             lifecycle = trip_lifecycle(root, trip)
             self.assertFalse(lifecycle["approval_current"])
             self.assertEqual(lifecycle["status"], "reconciling")
