@@ -60,6 +60,7 @@ def parse_receipt(path: Path, use_llm: bool = False, model: str = "gpt-5.2", for
         vision = llm_parse_receipt(path, raw_text, parsed, model, include_images=True)
         if vision and (force_llm or receipt_quality_score(vision) >= receipt_quality_score(parsed)):
             parsed = merge_llm_receipt(path, raw_text, vision, "OpenAI vision fallback")
+    apply_missing_date_fallback(parsed, path, raw_text)
     if method == "empty":
         parsed.review_note = append_note(parsed.review_note, "No extractable text/OCR output; review manually.")
     return parsed
@@ -67,7 +68,8 @@ def parse_receipt(path: Path, use_llm: bool = False, model: str = "gpt-5.2", for
 
 def heuristic_parse_receipt(path: Path, raw_text: str) -> Expense:
     lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
-    date = find_invoice_date(raw_text) or find_filename_date(path.name) or find_date(raw_text)
+    document_date, filename_date = receipt_date_candidates(path, raw_text)
+    date = document_date or filename_date
     supplier = find_supplier(lines, path)
     amount, currency = find_total(raw_text)
     expense_type = classify_expense(raw_text, supplier, path.name)
@@ -78,6 +80,17 @@ def heuristic_parse_receipt(path: Path, raw_text: str) -> Expense:
     corrected = corrected_amount(amount, line_items)
     confidence = score_confidence(date, supplier, amount, raw_text)
     note = ""
+    if filename_date and not document_date:
+        note = append_note(
+            note,
+            f"Date {filename_date} inferred from the source filename because no date was found in the receipt content; review.",
+        )
+        confidence = min(confidence, 0.70)
+    elif document_date and filename_date and document_date != filename_date:
+        note = append_note(
+            note,
+            f"Source filename suggests date {filename_date}, but receipt content shows {document_date}; kept the receipt date.",
+        )
     if currency == "AUD" and "$" in raw_text and not re.search(r"\b(AUD|AUSTRALIAN|AUSTRALIA|MELBOURNE|VICTORIA|VIC)\b", raw_text, re.I):
         note = append_note(note, "Currency inferred as AUD from $; review if receipt is not Australian.")
         confidence = min(confidence, 0.68)
@@ -155,7 +168,65 @@ def find_invoice_date(text: str) -> str | None:
 
 
 def find_filename_date(filename: str) -> str | None:
-    return find_date(filename)
+    stem = Path(filename).stem
+    candidates: list[str] = []
+    year_first = re.compile(r"(?<!\d)(20\d{2})[._\-\s]?(\d{1,2})[._\-\s]?(\d{1,2})(?!\d)")
+    for match in year_first.finditer(stem):
+        year, month, day = (int(value) for value in match.groups())
+        try:
+            candidates.append(datetime(year, month, day).strftime("%Y-%m-%d"))
+        except ValueError:
+            continue
+
+    ending_year_patterns = [
+        re.compile(r"(?<!\d)(\d{1,2})[._\-\s](\d{1,2})[._\-\s](20\d{2})(?!\d)"),
+        re.compile(r"(?<!\d)(\d{2})(\d{2})(20\d{2})(?!\d)"),
+    ]
+    for pattern in ending_year_patterns:
+        for match in pattern.finditer(stem):
+            first, second, year = (int(value) for value in match.groups())
+            # Accept D-M-Y or M-D-Y only when the numbers identify one
+            # unambiguous calendar date. Ambiguous names require user review.
+            for month, day in ((second, first), (first, second)):
+                try:
+                    candidates.append(datetime(year, month, day).strftime("%Y-%m-%d"))
+                except ValueError:
+                    continue
+
+    textual_date = find_date(re.sub(r"[_]+", " ", stem))
+    if textual_date:
+        candidates.append(textual_date)
+    unique_candidates = list(dict.fromkeys(candidates))
+    return unique_candidates[0] if len(unique_candidates) == 1 else None
+
+
+def receipt_date_candidates(path: Path, raw_text: str) -> tuple[str | None, str | None]:
+    """Return receipt-content evidence first and the filename fallback second."""
+
+    document_date = find_invoice_date(raw_text) or find_date(raw_text)
+    return document_date, find_filename_date(path.name)
+
+
+def apply_missing_date_fallback(expense: Expense, path: Path, raw_text: str) -> None:
+    """Fill a missing structured date without overriding receipt content."""
+
+    if expense.date:
+        return
+    document_date, filename_date = receipt_date_candidates(path, raw_text)
+    if document_date:
+        expense.date = document_date
+        expense.review_note = append_note(
+            expense.review_note,
+            "Structured extraction returned no date; used the date found in the receipt content.",
+        )
+        return
+    if filename_date:
+        expense.date = filename_date
+        expense.confidence = min(expense.confidence, 0.70)
+        expense.review_note = append_note(
+            expense.review_note,
+            f"Date {filename_date} inferred from the source filename because no date was found in the receipt content; review.",
+        )
 
 
 def find_supplier(lines: list[str], path: Path) -> str:
@@ -725,7 +796,9 @@ def llm_parse_receipt(path: Path, raw_text: str, heuristic: Expense, model: str,
                         "Extract a tax-included trip expense receipt. Use ISO date yyyy-mm-dd. "
                         "Use all provided context: source filename, unfiltered OCR/native text, and heuristic fields. "
                         "When images are provided, inspect the image directly and use it to repair missing or poor OCR. "
-                        "If OCR conflicts with a clear Google Drive scan filename date like Scanned_YYYYMMDD, prefer the filename date. "
+                        "Treat a date visible in the receipt or invoice as authoritative. "
+                        "Use a date from the source filename only when no reliable date is present in the receipt content; "
+                        "never override a clear receipt date because the filename differs. "
                         "For supplier_name, prefer the merchant/restaurant/hotel/airline name over generic words like Tax Invoice, Table Account, or a file name. "
                         "For expense_type, use values like meal-breakfast, meal-lunch, meal-dinner, hotel, flight, transport, other. "
                         "For flights, hotels, transport, and other non-meal expenses, return an empty line_items array. "
@@ -806,9 +879,12 @@ def line_item_from_llm(item: dict, extraction_confidence: float, include_images:
 
 
 def build_llm_content(path: Path, raw_text: str, heuristic: Expense, include_images: bool = False) -> list[dict]:
+    document_date, filename_date = receipt_date_candidates(path, raw_text)
     text = (
         f"Source filename: {path.name}\n"
         f"Heuristic date: {heuristic.date}\n"
+        f"Receipt-content date candidate: {document_date}\n"
+        f"Filename date fallback candidate: {filename_date}\n"
         f"Heuristic supplier_name: {heuristic.supplier_name}\n"
         f"Heuristic expense_type: {heuristic.expense_type}\n"
         f"Heuristic amount/currency: {heuristic.amount} {heuristic.currency}\n\n"

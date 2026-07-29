@@ -9,10 +9,12 @@ from nlp_expenses.models import Expense, LineItem
 
 from .receipts import (
     SUPPORTED_CURRENCIES,
+    apply_missing_date_fallback,
     append_note,
     heuristic_parse_receipt,
     line_item_from_llm,
     money_matches_in_line,
+    receipt_date_candidates,
     receipt_image_inputs,
 )
 from .text import extract_text
@@ -41,6 +43,7 @@ def parse_arvine_receipt(
         llm = llm_parse_arvine_receipt(path, raw_text, parsed, model, include_images)
         if llm and (force_llm or arvine_quality_score(llm) >= arvine_quality_score(parsed)):
             parsed = llm
+    apply_missing_date_fallback(parsed, path, raw_text)
     if method == "empty":
         parsed.review_note = append_note(parsed.review_note, "No extractable text/OCR output; review manually.")
     normalize_arvine_line_items(parsed)
@@ -273,6 +276,7 @@ def llm_parse_arvine_receipt(
         "properties": fields,
         "required": list(fields),
     }
+    document_date, filename_date = receipt_date_candidates(path, raw_text)
     content = [
         {
             "type": "input_text",
@@ -280,6 +284,8 @@ def llm_parse_arvine_receipt(
                 f"Source filename: {path.name}\n"
                 f"Heuristic date/vendor/type/total: {heuristic.date}; {heuristic.supplier_name}; "
                 f"{heuristic.expense_type}; {heuristic.amount} {heuristic.currency}\n\n"
+                f"Receipt-content date candidate: {document_date}\n"
+                f"Filename date fallback candidate: {filename_date}\n\n"
                 "Unfiltered OCR/native text:\n"
                 f"{raw_text[:30000]}"
             ),
@@ -296,6 +302,8 @@ def llm_parse_arvine_receipt(
                     "content": (
                         "Extract one business-expense receipt for Canadian bookkeeping. "
                         "Use ISO date yyyy-mm-dd and one expense_type from flight, hotel, transport, meal, other. "
+                        "Treat a date visible in the receipt or invoice as authoritative. Use a source-filename date "
+                        "only when no reliable date is present in the receipt content, and never override a clear receipt date. "
                         "For meal receipts, extract purchased food and drink line items and mark alcoholic drinks. "
                         "Do not treat non-alcoholic, alcohol-free, 0.0%, mocktail, virgin, ginger beer, root beer, "
                         "beer-battered food, cooking wine, or wine vinegar as alcoholic. "

@@ -145,6 +145,9 @@ business purpose, justified manual CAD, and review notes.
 - Receipt, line, included, and excluded totals remain visible together.
 - Descriptions and amounts can be corrected; manual lines can be added or
   removed before finalization.
+- Receipt content is authoritative for the expense date. When it contains no
+  usable date, common dates embedded in the filename are used as a lower-confidence,
+  explicitly reviewable fallback; ambiguous filename dates are left unresolved.
 - Receipt changes make the stored review stale and require a new scan.
 
 For partial Arvine meals, the workbook retains the full card charge for FX

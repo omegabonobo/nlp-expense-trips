@@ -12,7 +12,9 @@ from openpyxl import load_workbook
 from nlp_expenses.config import ask_openai_for_run
 from nlp_expenses.extraction.alcohol import detect_alcohol, is_alcohol
 from nlp_expenses.extraction.receipts import (
+    apply_missing_date_fallback,
     find_date,
+    find_filename_date,
     find_invoice_date,
     heuristic_parse_receipt,
     line_item_from_llm,
@@ -54,6 +56,7 @@ class CoreTests(unittest.TestCase):
 
     def test_filename_date_and_simple_expense_ids(self):
         self.assertEqual(find_date("Scanned_20260530 - Receipt.pdf"), "2026-05-30")
+        self.assertEqual(find_filename_date("Scanned_20260530 - Receipt.pdf"), "2026-05-30")
         expenses = [
             Expense(source_file=Path("a.pdf"), expense_id="", date="2026-05-30"),
             Expense(source_file=Path("b.pdf"), expense_id="", date=None),
@@ -61,6 +64,57 @@ class CoreTests(unittest.TestCase):
         assign_simple_expense_ids(expenses)
         self.assertEqual(expenses[0].expense_id, "20260530_#1")
         self.assertEqual(expenses[1].expense_id, "yyyymmdd_#2")
+
+    def test_filename_date_fallback_supports_conservative_common_formats(self):
+        cases = {
+            "receipt_20260530.pdf": "2026-05-30",
+            "receipt_2026-05-30.pdf": "2026-05-30",
+            "receipt_2026_05_30.jpg": "2026-05-30",
+            "receipt_2026.05.30.heic": "2026-05-30",
+            "receipt_30-05-2026.png": "2026-05-30",
+            "receipt_05-30-2026.png": "2026-05-30",
+            "receipt_30052026.png": "2026-05-30",
+            "receipt_05302026.png": "2026-05-30",
+            "receipt_May_30_2026.pdf": "2026-05-30",
+        }
+        for filename, expected in cases.items():
+            with self.subTest(filename=filename):
+                self.assertEqual(find_filename_date(filename), expected)
+        self.assertIsNone(find_filename_date("receipt_2026-13-40.pdf"))
+        self.assertIsNone(find_filename_date("receipt_05-06-2026.pdf"))
+        self.assertIsNone(find_filename_date("receipt_20260530_to_20260531.pdf"))
+
+    def test_receipt_content_date_wins_and_filename_is_only_a_reviewable_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            receipt_with_date = Path(tmp) / "receipt_20260530.pdf"
+            parsed = heuristic_parse_receipt(
+                receipt_with_date,
+                "Cafe Montreal\nPurchase Date June 2, 2026\nTotal CAD 12.00",
+            )
+            self.assertEqual(parsed.date, "2026-06-02")
+            self.assertIn("kept the receipt date", parsed.review_note)
+
+            receipt_without_date = Path(tmp) / "receipt_2026_05_30.pdf"
+            fallback = heuristic_parse_receipt(
+                receipt_without_date,
+                "Cafe Montreal\nCappuccino CAD 5.00\nTotal CAD 5.00",
+            )
+            self.assertEqual(fallback.date, "2026-05-30")
+            self.assertIn("inferred from the source filename", fallback.review_note)
+            self.assertLessEqual(fallback.confidence, 0.70)
+
+    def test_missing_structured_date_falls_back_after_openai_extraction(self):
+        expense = Expense(
+            source_file=Path("receipt_20260530.pdf"),
+            expense_id="",
+            date=None,
+            confidence=0.92,
+            review_note="Structured with OpenAI receipt extraction.",
+        )
+        apply_missing_date_fallback(expense, expense.source_file, "Cafe Montreal\nTotal CAD 5.00")
+        self.assertEqual(expense.date, "2026-05-30")
+        self.assertIn("inferred from the source filename", expense.review_note)
+        self.assertLessEqual(expense.confidence, 0.70)
 
     def test_asking_for_api_key_forces_llm_over_high_confidence_heuristics(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -178,7 +232,7 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(receipt_total_items[0].amount, 20598982.0)
             self.assertTrue(any(item.description == "Alcohol adjustment - manual" and item.is_alcohol for item in expense.line_items))
 
-    def test_juni_scanned_receipt_uses_filename_date_and_restaurant_supplier(self):
+    def test_juni_scanned_receipt_keeps_receipt_date_and_restaurant_supplier(self):
         with tempfile.TemporaryDirectory() as tmp:
             file_path = Path(tmp) / "Scanned_20260530 - Receipt - May 30 2026 - 9-27 PM.pdf"
             file_path.write_bytes(b"dummy")
@@ -198,7 +252,8 @@ class CoreTests(unittest.TestCase):
                 ]
             )
             expense = heuristic_parse_receipt(file_path, text)
-            self.assertEqual(expense.date, "2026-05-30")
+            self.assertEqual(expense.date, "2026-08-30")
+            self.assertIn("kept the receipt date", expense.review_note)
             self.assertEqual(expense.supplier_name, "Juni Restaurant")
             self.assertEqual(expense.expense_type, "meal-dinner")
             self.assertTrue(any(item.is_alcohol for item in expense.line_items))
