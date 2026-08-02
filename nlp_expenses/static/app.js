@@ -709,18 +709,36 @@ function reviewedReceipt(sourceFile) {
   return state.selected?.line_item_review?.receipts?.find(item => item.source_file === sourceFile);
 }
 
+function syncExpenseIvadoReasonControl() {
+  const form = document.getElementById("expense-review-form");
+  const included = form?.elements.included_in_ivado;
+  const reason = form?.elements.ivado_exclusion_reason;
+  if (!included || !reason) return;
+  reason.disabled = included.checked;
+  if (included.checked) reason.value = "";
+}
+
 document.querySelectorAll(".edit-expense").forEach(button => button.addEventListener("click", () => {
   const receipt = reviewedReceipt(button.dataset.sourceFile);
   if (!receipt) return;
   const form = document.getElementById("expense-review-form");
   clearExpenseErrors();
   form.elements.source_file.value = receipt.source_file;
-  form.elements.included_in_arvine.checked = receipt.included_in_arvine !== false;
-  form.elements.included_in_ivado.checked = receipt.included_in_ivado !== false;
-  for (const field of expenseFields) form.elements[field].value = receipt[field] ?? "";
+  if (form.elements.included_in_ivado) {
+    form.elements.included_in_ivado.checked = receipt.included_in_ivado !== false;
+  }
+  for (const field of expenseFields) {
+    if (form.elements[field]) form.elements[field].value = receipt[field] ?? "";
+  }
+  syncExpenseIvadoReasonControl();
   document.getElementById("expense-dialog-title").textContent = receipt.vendor || receipt.source_file;
   openDialog("expense-dialog");
 }));
+
+document.querySelector("#expense-review-form [name='included_in_ivado']")?.addEventListener(
+  "change",
+  syncExpenseIvadoReasonControl
+);
 
 document.querySelectorAll(".people-review-form").forEach(form => {
   form.addEventListener("submit", async event => {
@@ -754,9 +772,14 @@ document.getElementById("expense-review-form")?.addEventListener("submit", async
   event.preventDefault();
   const form = event.target;
   const data = new FormData(form);
-  const fields = Object.fromEntries(expenseFields.map(field => [field, data.get(field)]));
-  fields.included_in_arvine = data.has("included_in_arvine");
-  fields.included_in_ivado = data.has("included_in_ivado");
+  const fields = Object.fromEntries(
+    expenseFields
+      .filter(field => form.elements[field])
+      .map(field => [field, data.get(field)])
+  );
+  if (form.elements.included_in_ivado) {
+    fields.included_in_ivado = data.has("included_in_ivado");
+  }
   clearExpenseErrors();
   try {
     await saveExpenseFields(data.get("source_file"), fields);
@@ -770,11 +793,14 @@ document.getElementById("restore-expense-button")?.addEventListener("click", asy
   const receipt = reviewedReceipt(form.elements.source_file.value);
   if (!receipt?.extracted || !window.confirm("Restore the extracted expense fields? Line-item choices will remain.")) return;
   const fields = Object.fromEntries(
-    expenseFields.map(field => [field, receipt.extracted[field]])
+    expenseFields
+      .filter(field => form.elements[field])
+      .map(field => [field, receipt.extracted[field]])
   );
   fields.paid_by = receipt.auto_paid_by ?? receipt.paid_by ?? "employee_personal";
-  fields.included_in_arvine = receipt.extracted.included_in_arvine ?? true;
-  fields.included_in_ivado = receipt.extracted.included_in_ivado ?? true;
+  if (form.elements.included_in_ivado) {
+    fields.included_in_ivado = receipt.extracted.included_in_ivado ?? true;
+  }
   clearExpenseErrors();
   try {
     await saveExpenseFields(receipt.source_file, fields);

@@ -533,7 +533,7 @@ class UITests(unittest.TestCase):
             terminal = self.wait_for_job(started.get_json()["job"]["id"])
         self.assertEqual(terminal["status"], "succeeded")
 
-    def test_line_item_review_is_visible_and_can_be_reactivated(self):
+    def test_line_item_review_excludes_alcohol_until_reclassified(self):
         trip = ensure_trip(self.root, "202607_line-review", mode="ivado")
         receipt = trip / "expenses_receipts" / "meal.pdf"
         receipt.write_bytes(b"fixture")
@@ -580,7 +580,7 @@ class UITests(unittest.TestCase):
             json={
                 "source_file": receipt.name,
                 "line_id": cocktail["line_id"],
-                "fields": {"included": True},
+                "fields": {"is_alcohol": False},
             },
             headers=self.headers,
         )
@@ -591,8 +591,8 @@ class UITests(unittest.TestCase):
             if item["description"] == "French 75"
         )
         self.assertTrue(cocktail["included"])
-        self.assertTrue(cocktail["is_alcohol"])
-        self.assertTrue(cocktail["inclusion_overridden"])
+        self.assertFalse(cocktail["is_alcohol"])
+        self.assertTrue(cocktail["alcohol_overridden"])
 
         reset = self.client.post(
             f"/api/trips/{trip.name}/line-items/reset",
@@ -606,6 +606,39 @@ class UITests(unittest.TestCase):
             if item["description"] == "French 75"
         )
         self.assertFalse(cocktail["included"])
+
+    def test_arvine_line_review_hides_alcohol_and_ivado_controls(self):
+        trip = ensure_trip(self.root, "202607_arvine-lines", mode="arvine")
+        receipt = trip / "expenses_receipts" / "meal.pdf"
+        receipt.write_bytes(b"fixture")
+        save_line_item_review(
+            trip,
+            [
+                Expense(
+                    source_file=receipt,
+                    expense_id="",
+                    date="2026-07-01",
+                    supplier_name="Bistro",
+                    expense_type="meal",
+                    amount=30,
+                    currency="CAD",
+                    line_items=[
+                        LineItem(
+                            description="Wine",
+                            amount=30,
+                            is_alcohol=True,
+                            alcohol_confidence=0.99,
+                        )
+                    ],
+                )
+            ],
+        )
+
+        html = self.client.get(f"/?trip={trip.name}").get_data(as_text=True)
+        self.assertIn("Alcohol classification and exclusions do not apply.", html)
+        self.assertNotIn('class="line-item-alcohol"', html)
+        self.assertNotIn('class="line-item-ivado"', html)
+        self.assertNotIn('name="included_in_ivado"', html)
 
     def test_app_first_expense_line_and_finalization_endpoints(self):
         trip = ensure_trip(self.root, "202607_app-first-api", mode="ivado")

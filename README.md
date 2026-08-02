@@ -271,7 +271,8 @@ Arvine creates four sheets:
 - `expense_detail`: one row per receipt, tax fields, statement match, manual CAD override, deductible/recoverable calculations, and review statuses.
 - `expense_summary`: editable report metadata, the five-line CAD journal, and balance/completeness checks.
 - `card_statements`: provider-neutral normalized transactions, funding legs, audit rows, and editable `expense_id` / `match_status` fields.
-- `expense_line_items`: visible meal lines, alcohol evidence, and editable classification/inclusion choices that feed the proportional claim formulas.
+- `expense_line_items`: visible meal lines and IVADO classification/removal
+  evidence. Arvine always retains the full reviewed receipt.
 
 The Canadian tax-documentation review flags follow the current $100 and $500 invoice-information thresholds described by the [Canada Revenue Agency](https://www.canada.ca/en/revenue-agency/services/tax/businesses/topics/gst-hst-businesses/calculate-prepare-report/input-tax-credit.html) and [Revenu Québec](https://www.revenuquebec.ca/en/businesses/consumption-taxes/gsthst-and-qst/collecting-gst-and-qst/preparing-invoices/). These checks assist review; they are not tax advice and do not determine whether a purchase is taxable or eligible.
 
@@ -297,10 +298,12 @@ exported into `card_statements`. If it shows `0.00`, no matching statement value
 was finalized. Post-export Excel edits remain possible, but they do not
 round-trip into the app.
 
-`is_alcohol` records the classification; `included` controls the calculation.
-This means an alcoholic line can be reactivated without relabelling it as
-non-alcoholic. The automatically created `Alcohol adjustment - manual` line
-remains available when OCR/OpenAI missed or grouped the drink lines.
+For IVADO, `is_alcohol = true` always means the line is removed from the sponsor
+claim with reason `alcohol`. To include a false positive, correct the line to
+non-alcoholic. Arvine does not use alcohol classification or line exclusions:
+every uploaded receipt remains fully included. The automatically created
+`Alcohol adjustment - manual` line remains available in IVADO when OCR/OpenAI
+missed or grouped the drink lines.
 
 ## Optional OpenAI fallback
 

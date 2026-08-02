@@ -21,8 +21,7 @@ from nlp_expenses.trips import (
 
 
 LINE_ITEM_REVIEW_FILE = ".nlp-expenses-line-items.json"
-LINE_ITEM_REVIEW_VERSION = 2
-AUTO_DEACTIVATE_CONFIDENCE = 0.90
+LINE_ITEM_REVIEW_VERSION = 3
 PAID_BY_VALUES = {"employee_personal", "arvine_corporate_bmo"}
 IVADO_EXCLUSION_REASONS = {
     "alcohol",
@@ -189,7 +188,7 @@ def save_line_item_review(
             "field_overrides": {},
         }
         receipt.update(extracted)
-        receipt["included_in_arvine"] = bool(extracted.get("included", True))
+        receipt["included_in_arvine"] = True
         receipt["included_in_ivado"] = bool(extracted.get("included", True))
         receipt["paid_by"] = default_paid_by
         receipt["auto_paid_by"] = default_paid_by
@@ -263,6 +262,17 @@ def set_expense_review(trip_dir: Path, source_file: str, fields: dict) -> dict:
     if unknown:
         raise ValueError(f"Unsupported expense fields: {', '.join(sorted(unknown))}.")
     normalized = validate_expense_fields(fields, receipt)
+    if normalized.get("included_in_arvine") is False:
+        raise ValueError(
+            "Arvine includes every uploaded receipt. Remove the receipt file if it does not belong to the trip."
+        )
+    if (
+        state.get("mode") == "arvine"
+        and normalized.get("included") is False
+    ):
+        raise ValueError(
+            "Arvine includes every uploaded receipt. Remove the receipt file if it does not belong to the trip."
+        )
     extracted = receipt.get("extracted") if isinstance(receipt.get("extracted"), dict) else {}
     overrides = receipt.setdefault("field_overrides", {})
     for field, value in normalized.items():
@@ -276,10 +286,9 @@ def set_expense_review(trip_dir: Path, source_file: str, fields: dict) -> dict:
             overrides[field] = value
         else:
             overrides.pop(field, None)
-    if not receipt.get("included_in_arvine", True):
-        receipt["included_in_ivado"] = False
-        receipt["ivado_exclusion_reason"] = None
-    elif receipt.get("included_in_ivado", True):
+    receipt["included_in_arvine"] = True
+    overrides.pop("included_in_arvine", None)
+    if receipt.get("included_in_ivado", True):
         receipt["ivado_exclusion_reason"] = None
     elif not receipt.get("ivado_exclusion_reason"):
         receipt["ivado_exclusion_reason"] = "other"
@@ -315,6 +324,7 @@ def add_line_item(
         raise ValueError("Line-item amount cannot be negative.")
     if not isinstance(included, bool) or not isinstance(is_alcohol, bool):
         raise ValueError("Line-item choices must be true or false.")
+    is_alcohol = is_alcohol if state.get("mode") == "ivado" else False
     line_id = f"LI-manual-{uuid.uuid4().hex[:16]}"
     receipt.setdefault("line_items", []).append(
         {
@@ -323,12 +333,12 @@ def add_line_item(
             "amount": numeric_amount,
             "is_alcohol": is_alcohol,
             "included": included,
-            "included_in_arvine": included,
+            "included_in_arvine": True,
             "included_in_ivado": included and not is_alcohol,
             "ivado_exclusion_reason": "alcohol" if is_alcohol else None,
             "auto_is_alcohol": is_alcohol,
             "auto_included": included,
-            "auto_included_in_arvine": included,
+            "auto_included_in_arvine": True,
             "auto_included_in_ivado": included and not is_alcohol,
             "extracted_description": description[:160],
             "extracted_amount": numeric_amount,
@@ -401,28 +411,42 @@ def set_line_item_review(
         item["included"] = fields["included"]
         item["inclusion_overridden"] = item["included"] != item.get("auto_included")
         target = "included_in_ivado" if state.get("mode") == "ivado" else "included_in_arvine"
+        if target == "included_in_arvine" and not fields["included"]:
+            raise ValueError(
+                "Arvine includes every receipt line. Remove an incorrect extracted line instead."
+            )
+        if (
+            target == "included_in_ivado"
+            and fields["included"]
+            and item.get("is_alcohol")
+        ):
+            raise ValueError(
+                "Alcohol is excluded from IVADO. Mark the line as not alcohol before including it."
+            )
         item[target] = fields["included"]
     for field in ("included_in_arvine", "included_in_ivado"):
         if field in fields:
             if not isinstance(fields[field], bool):
                 raise ValueError(f"{field} must be true or false.")
+            if field == "included_in_arvine" and not fields[field]:
+                raise ValueError(
+                    "Arvine includes every receipt line. Remove an incorrect extracted line instead."
+                )
+            if (
+                field == "included_in_ivado"
+                and fields[field]
+                and item.get("is_alcohol")
+            ):
+                raise ValueError(
+                    "Alcohol is excluded from IVADO. Mark the line as not alcohol before including it."
+                )
             item[field] = fields[field]
             item[f"{field}_overridden"] = item[field] != item.get(f"auto_{field}", True)
-    if not item.get("included_in_arvine", True):
-        item["included_in_ivado"] = False
     if "ivado_exclusion_reason" in fields:
         reason = str(fields["ivado_exclusion_reason"] or "").strip() or None
         if reason not in IVADO_EXCLUSION_REASONS | {None}:
             raise ValueError("Choose a valid IVADO exclusion reason.")
         item["ivado_exclusion_reason"] = reason
-    if (
-        item.get("included_in_arvine", True)
-        and not item.get("included_in_ivado", True)
-        and not item.get("ivado_exclusion_reason")
-    ):
-        item["ivado_exclusion_reason"] = "alcohol" if item.get("is_alcohol") else "other"
-    if item.get("included_in_ivado", True):
-        item["ivado_exclusion_reason"] = None
     if "is_alcohol" in fields:
         if not isinstance(fields["is_alcohol"], bool):
             raise ValueError("Alcohol classification must be true or false.")
@@ -434,6 +458,7 @@ def set_line_item_review(
             item["alcohol_confidence"] = 1.0
         else:
             restore_automatic_alcohol(item)
+    normalize_line_program_decisions(item)
     if "description" in fields:
         description = " ".join(str(fields["description"] or "").split())
         if not description:
@@ -655,23 +680,25 @@ def recompute_receipt(receipt: dict, mode: str | None = None) -> None:
 
 
 def serialize_line_item(item: LineItem, line_id: str, mode: str) -> dict:
+    is_alcohol = bool(item.is_alcohol) if mode == "ivado" else False
+    alcohol_confidence = item.alcohol_confidence if mode == "ivado" else 0.0
+    alcohol_reason = item.alcohol_reason if mode == "ivado" else ""
+    alcohol_matched_term = item.alcohol_matched_term if mode == "ivado" else ""
     auto_included_in_arvine = True
-    auto_included_in_ivado = not (
-        item.is_alcohol and item.alcohol_confidence >= AUTO_DEACTIVATE_CONFIDENCE
-    )
+    auto_included_in_ivado = not is_alcohol
     auto_included = auto_included_in_ivado if mode == "ivado" else auto_included_in_arvine
     return {
         "line_id": line_id,
         "description": item.description,
         "amount": item.amount,
-        "is_alcohol": bool(item.is_alcohol),
+        "is_alcohol": is_alcohol,
         "included": auto_included,
         "included_in_arvine": auto_included_in_arvine,
         "included_in_ivado": auto_included_in_ivado,
         "ivado_exclusion_reason": (
             "alcohol" if auto_included_in_arvine and not auto_included_in_ivado else None
         ),
-        "auto_is_alcohol": bool(item.is_alcohol),
+        "auto_is_alcohol": is_alcohol,
         "auto_included": auto_included,
         "auto_included_in_arvine": auto_included_in_arvine,
         "auto_included_in_ivado": auto_included_in_ivado,
@@ -679,12 +706,12 @@ def serialize_line_item(item: LineItem, line_id: str, mode: str) -> dict:
         "extracted_amount": item.amount,
         "confidence": item.confidence,
         "review_note": item.review_note,
-        "alcohol_confidence": item.alcohol_confidence,
-        "alcohol_reason": item.alcohol_reason,
-        "alcohol_matched_term": item.alcohol_matched_term,
-        "auto_alcohol_confidence": item.alcohol_confidence,
-        "auto_alcohol_reason": item.alcohol_reason,
-        "auto_alcohol_matched_term": item.alcohol_matched_term,
+        "alcohol_confidence": alcohol_confidence,
+        "alcohol_reason": alcohol_reason,
+        "alcohol_matched_term": alcohol_matched_term,
+        "auto_alcohol_confidence": alcohol_confidence,
+        "auto_alcohol_reason": alcohol_reason,
+        "auto_alcohol_matched_term": alcohol_matched_term,
         "inclusion_overridden": False,
         "alcohol_overridden": False,
         "inclusion_note": "",
@@ -698,13 +725,13 @@ def preserve_line_decisions(automatic: dict, stored: dict) -> dict:
         automatic["included"] = bool(stored.get("included"))
         automatic["inclusion_overridden"] = True
         automatic["inclusion_note"] = str(stored.get("inclusion_note") or "")
-    for field in ("included_in_arvine", "included_in_ivado"):
-        if field in stored:
-            automatic[field] = bool(stored.get(field))
-            automatic[f"{field}_overridden"] = bool(
-                stored.get(f"{field}_overridden")
-                or automatic[field] != automatic.get(f"auto_{field}", True)
-            )
+    if "included_in_ivado" in stored:
+        automatic["included_in_ivado"] = bool(stored.get("included_in_ivado"))
+        automatic["included_in_ivado_overridden"] = bool(
+            stored.get("included_in_ivado_overridden")
+            or automatic["included_in_ivado"]
+            != automatic.get("auto_included_in_ivado", True)
+        )
     if "ivado_exclusion_reason" in stored:
         automatic["ivado_exclusion_reason"] = stored.get("ivado_exclusion_reason")
     if stored.get("alcohol_overridden"):
@@ -719,6 +746,7 @@ def preserve_line_decisions(automatic: dict, stored: dict) -> dict:
     if stored.get("manual"):
         automatic["manual"] = True
     automatic["updated_at"] = stored.get("updated_at")
+    normalize_line_program_decisions(automatic)
     return automatic
 
 
@@ -798,7 +826,7 @@ def serialize_expense_fields(expense: Expense) -> dict:
         "manual_cad_override": expense.manual_cad_override,
         "manual_cad_note": expense.manual_cad_note,
         "included": bool(expense.included),
-        "included_in_arvine": bool(expense.included),
+        "included_in_arvine": True,
         "included_in_ivado": bool(expense.included),
         "ivado_exclusion_reason": None,
         "paid_by": "employee_personal",
@@ -1042,41 +1070,49 @@ def synchronize_receipt_aliases(receipt: dict, mode: str) -> None:
 
 def migrate_line_contract_fields(item: dict, mode: str) -> None:
     legacy_included = bool(item.get("included", True))
-    if "included_in_arvine" not in item:
-        item["included_in_arvine"] = legacy_included if mode == "arvine" else True
+    if mode == "arvine":
+        item["is_alcohol"] = False
+        item["auto_is_alcohol"] = False
+        item["alcohol_overridden"] = False
+        for field in ("alcohol_confidence", "auto_alcohol_confidence"):
+            item[field] = 0.0
+        for field in (
+            "alcohol_reason",
+            "alcohol_matched_term",
+            "auto_alcohol_reason",
+            "auto_alcohol_matched_term",
+        ):
+            item[field] = ""
+    item["included_in_arvine"] = True
     if "included_in_ivado" not in item:
-        item["included_in_ivado"] = legacy_included if mode == "ivado" else not (
-            item.get("is_alcohol") and float(item.get("alcohol_confidence") or 0) >= AUTO_DEACTIVATE_CONFIDENCE
+        item["included_in_ivado"] = (
+            legacy_included if mode == "ivado" else not item.get("is_alcohol")
         )
-    if not item["included_in_arvine"]:
-        item["included_in_ivado"] = False
-    item.setdefault("auto_included_in_arvine", bool(item.get("auto_included", True)) if mode == "arvine" else True)
+    item["auto_included_in_arvine"] = True
     item.setdefault(
         "auto_included_in_ivado",
         bool(item.get("auto_included", True))
         if mode == "ivado"
-        else not (
-            item.get("is_alcohol")
-            and float(item.get("auto_alcohol_confidence", item.get("alcohol_confidence")) or 0)
-            >= AUTO_DEACTIVATE_CONFIDENCE
-        ),
+        else not item.get("is_alcohol"),
     )
-    if item["included_in_ivado"]:
-        item["ivado_exclusion_reason"] = None
-    elif item.get("included_in_arvine") and not item.get("ivado_exclusion_reason"):
-        item["ivado_exclusion_reason"] = "alcohol" if item.get("is_alcohol") else "other"
+    normalize_line_program_decisions(item)
+    active_field = "included_in_ivado" if mode == "ivado" else "included_in_arvine"
+    item["included"] = bool(item.get(active_field, True))
+    item["auto_included"] = bool(
+        item.get(
+            "auto_included_in_ivado" if mode == "ivado" else "auto_included_in_arvine",
+            True,
+        )
+    )
 
 
 def migrate_receipt_contract_fields(receipt: dict, mode: str) -> None:
     legacy_included = bool(receipt.get("included", True))
     receipt.setdefault("review_mode", mode)
     receipt.setdefault("receipt_id", stable_receipt_id("legacy", str(receipt.get("source_file") or "receipt")))
-    receipt.setdefault("included_in_arvine", legacy_included if mode == "arvine" else True)
+    receipt["included_in_arvine"] = True
     receipt.setdefault("included_in_ivado", legacy_included if mode == "ivado" else receipt["included_in_arvine"])
-    if not receipt["included_in_arvine"]:
-        receipt["included_in_ivado"] = False
-        receipt["ivado_exclusion_reason"] = None
-    elif receipt["included_in_ivado"]:
+    if receipt["included_in_ivado"]:
         receipt["ivado_exclusion_reason"] = None
     elif not receipt.get("ivado_exclusion_reason"):
         receipt["ivado_exclusion_reason"] = "other"
@@ -1086,6 +1122,30 @@ def migrate_receipt_contract_fields(receipt: dict, mode: str) -> None:
     for item in receipt.get("line_items", []):
         if isinstance(item, dict):
             migrate_line_contract_fields(item, mode)
+    receipt["included"] = bool(
+        receipt.get("included_in_ivado" if mode == "ivado" else "included_in_arvine", True)
+    )
+
+
+def normalize_line_program_decisions(item: dict) -> None:
+    """Keep Arvine inclusion independent from IVADO's alcohol policy."""
+
+    item["included_in_arvine"] = True
+    item["auto_included_in_arvine"] = True
+    item["included_in_arvine_overridden"] = False
+    if item.get("is_alcohol"):
+        item["included_in_ivado"] = False
+        item["auto_included_in_ivado"] = False
+        item["ivado_exclusion_reason"] = "alcohol"
+        item["included_in_ivado_overridden"] = False
+    elif item.get("ivado_exclusion_reason") == "alcohol":
+        item["included_in_ivado"] = True
+        item["ivado_exclusion_reason"] = None
+        item["included_in_ivado_overridden"] = False
+    elif item.get("included_in_ivado", True):
+        item["ivado_exclusion_reason"] = None
+    elif not item.get("ivado_exclusion_reason"):
+        item["ivado_exclusion_reason"] = "other"
 
 
 def line_item_input_fingerprint(trip_dir: Path) -> str:
@@ -1109,7 +1169,11 @@ def load_line_item_review_state(trip_dir: Path) -> dict | None:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if not isinstance(state, dict) or state.get("version") not in {1, LINE_ITEM_REVIEW_VERSION}:
+    if not isinstance(state, dict) or state.get("version") not in {
+        1,
+        2,
+        LINE_ITEM_REVIEW_VERSION,
+    }:
         return None
     mode = str(state.get("mode") or trip_mode(trip_dir))
     for receipt in state.get("receipts", []):

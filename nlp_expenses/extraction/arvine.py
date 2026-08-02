@@ -12,7 +12,6 @@ from .receipts import (
     apply_missing_date_fallback,
     append_note,
     heuristic_parse_receipt,
-    line_item_from_llm,
     money_matches_in_line,
     receipt_date_candidates,
     receipt_image_inputs,
@@ -130,6 +129,12 @@ def normalize_arvine_line_items(expense: Expense) -> None:
                     synthetic=True,
                 )
             )
+    for item in items:
+        item.is_alcohol = False
+        item.included = True
+        item.alcohol_confidence = 0.0
+        item.alcohol_reason = ""
+        item.alcohol_matched_term = ""
     expense.line_items = items
 
 
@@ -263,9 +268,8 @@ def llm_parse_arvine_receipt(
                 "properties": {
                     "description": {"type": "string"},
                     "amount": nullable_number,
-                    "is_alcohol": {"type": "boolean"},
                 },
-                "required": ["description", "amount", "is_alcohol"],
+                "required": ["description", "amount"],
             },
         },
         "confidence": {"type": "number"},
@@ -304,9 +308,7 @@ def llm_parse_arvine_receipt(
                         "Use ISO date yyyy-mm-dd and one expense_type from flight, hotel, transport, meal, other. "
                         "Treat a date visible in the receipt or invoice as authoritative. Use a source-filename date "
                         "only when no reliable date is present in the receipt content, and never override a clear receipt date. "
-                        "For meal receipts, extract purchased food and drink line items and mark alcoholic drinks. "
-                        "Do not treat non-alcoholic, alcohol-free, 0.0%, mocktail, virgin, ginger beer, root beer, "
-                        "beer-battered food, cooking wine, or wine vinegar as alcoholic. "
+                        "For meal receipts, extract purchased food and drink line items without classifying them. "
                         "For non-meal receipts return an empty line_items array. "
                         "GST/HST includes GST, HST, TPS, or TVH; QST includes QST or TVQ. Copy tax registration numbers "
                         "only when visible and do not invent missing tax, location, or registration data. Use ISO currency codes. "
@@ -331,7 +333,15 @@ def llm_parse_arvine_receipt(
         currency=(data.get("currency") or "").upper() or None,
         corrected_amount_in_currency=data.get("amount"),
         line_items=[
-            line_item_from_llm(item, float(data.get("confidence") or 0.75), include_images)
+            LineItem(
+                description=str(item.get("description") or ""),
+                amount=item.get("amount"),
+                included=True,
+                confidence=float(data.get("confidence") or 0.75),
+                review_note=(
+                    "Review OpenAI-extracted line item." if include_images else ""
+                ),
+            )
             for item in data.get("line_items", [])
         ],
         raw_text=raw_text,

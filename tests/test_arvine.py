@@ -71,10 +71,11 @@ class ArvineTests(unittest.TestCase):
                     "Bistro Exemple Montréal QC",
                     "Invoice date 2026-07-02",
                     "Dinner 100.00 CAD",
+                    "Shiraz 20.00",
                     "Subtotal 100.00",
                     "GST 5.00",
                     "QST 9.98",
-                    "Total CAD 114.98",
+                    "Total CAD 134.98",
                     "GST No 123456789 RT 0001",
                     "QST No 1234567890 TQ 0001",
                 ]
@@ -89,9 +90,18 @@ class ArvineTests(unittest.TestCase):
             self.assertEqual(expense.qst_number, "1234567890TQ0001")
             self.assertEqual(
                 [(item.description, item.amount) for item in expense.line_items],
-                [("Dinner", 100.0), ("GST/HST", 5.0), ("QST", 9.98)],
+                [
+                    ("Dinner", 100.0),
+                    ("Shiraz", 20.0),
+                    ("GST/HST", 5.0),
+                    ("QST", 9.98),
+                ],
             )
             self.assertTrue(all(item.included for item in expense.line_items))
+            self.assertTrue(all(not item.is_alcohol for item in expense.line_items))
+            self.assertTrue(
+                all(not item.alcohol_reason for item in expense.line_items)
+            )
             self.assertEqual(expense.corrected_amount_in_currency, expense.amount)
             self.assertEqual(expense.tax_documentation_status, "ok")
 

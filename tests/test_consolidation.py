@@ -100,7 +100,12 @@ class ConsolidationTests(unittest.TestCase):
                 for item in line_item_review_view(trip)["receipts"][0]["line_items"]
                 if item["description"] == "Shiraz"
             )
-            set_line_item_review(trip, receipt.name, cocktail["line_id"], {"included": True})
+            set_line_item_review(
+                trip,
+                receipt.name,
+                cocktail["line_id"],
+                {"is_alcohol": False},
+            )
             changed = consolidation_view(root, trip)
             self.assertFalse(changed["is_finalized"])
             self.assertAlmostEqual(changed["summary"]["claimable_cad"], 60.0)

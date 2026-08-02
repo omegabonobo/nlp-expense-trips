@@ -370,9 +370,18 @@
           {% if line_review.available %}
             <div class="line-review-summary">
               <div><strong>{{ line_review.summary.line_count }}</strong><span>visible lines</span></div>
-              <div><strong>{{ line_review.summary.alcohol_count }}</strong><span>marked alcohol</span></div>
-              <div><strong>{{ line_review.summary.excluded_count }}</strong><span>deactivated</span></div>
+              {% if trip.mode == 'ivado' %}
+                <div><strong>{{ line_review.summary.alcohol_count }}</strong><span>alcohol removed from IVADO</span></div>
+                <div><strong>{{ line_review.summary.excluded_count }}</strong><span>removed from IVADO</span></div>
+              {% endif %}
               <div class="{{ 'review' if line_review.summary.review_count else '' }}"><strong>{{ line_review.summary.review_count }}</strong><span>receipts need review</span></div>
+            </div>
+            <div class="notice info">
+              {% if trip.mode == 'ivado' %}
+                Arvine includes every uploaded receipt. Alcohol is identified only to remove it from the IVADO claim.
+              {% else %}
+                Arvine includes every uploaded receipt. Alcohol classification and exclusions do not apply.
+              {% endif %}
             </div>
 
             <div class="line-receipt-list">
@@ -384,8 +393,11 @@
                       <span>
                         {{ receipt.source_file }} · {{ receipt.expense_type or 'type missing' }} · {{ receipt.currency or '' }} ·
                         {{ receipt.number_of_people }} {{ 'person' if receipt.number_of_people == 1 else 'people' }} ·
-                        {{ 'excluded by Arvine' if not receipt.included_in_arvine else
-                           'IVADO excluded' if not receipt.included_in_ivado else 'included in both' }}
+                        {% if trip.mode == 'ivado' %}
+                          {{ 'removed from IVADO' if not receipt.included_in_ivado else 'included in Arvine and IVADO' }}
+                        {% else %}
+                          included in Arvine
+                        {% endif %}
                       </span>
                       {% if receipt.field_issues %}<small class="field-issue">{{ receipt.field_issues|join(' · ') }}</small>{% endif %}
                     </div>
@@ -411,27 +423,14 @@
                   </div>
                   <div class="line-item-table-wrap">
                     <table class="line-item-table">
-                      <thead><tr><th>Arvine</th><th>IVADO</th><th>Receipt line</th><th>Amount</th><th>Alcohol</th><th>IVADO reason / detection</th><th></th></tr></thead>
+                      {% if trip.mode == 'ivado' %}
+                        <thead><tr><th>Receipt line</th><th>Amount</th><th>Alcohol</th><th>IVADO claim</th><th>IVADO exclusion / detection</th><th></th></tr></thead>
+                      {% else %}
+                        <thead><tr><th>Receipt line</th><th>Amount</th><th></th></tr></thead>
+                      {% endif %}
                       <tbody>
                         {% for item in receipt.line_items %}
-                          <tr class="{{ 'excluded' if not item.included_in_arvine else '' }}">
-                            <td>
-                              <label class="include-switch" title="Included in Arvine reimbursement">
-                                <input type="checkbox" class="line-item-arvine"
-                                  data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
-                                  {{ 'checked' if item.included_in_arvine }} {{ 'disabled' if trip_busy or line_review.stale }}>
-                                <span>{{ 'Yes' if item.included_in_arvine else 'No' }}</span>
-                              </label>
-                            </td>
-                            <td>
-                              <label class="include-switch" title="Included in IVADO sponsor claim">
-                                <input type="checkbox" class="line-item-ivado"
-                                  data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
-                                  {{ 'checked' if item.included_in_ivado }}
-                                  {{ 'disabled' if trip_busy or line_review.stale or not item.included_in_arvine }}>
-                                <span>{{ 'Yes' if item.included_in_ivado else 'No' }}</span>
-                              </label>
-                            </td>
+                          <tr class="{{ 'excluded' if trip.mode == 'ivado' and not item.included_in_ivado else '' }}">
                             <td>
                               <input class="input compact-input line-item-description" value="{{ item.description }}"
                                 data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
@@ -443,27 +442,46 @@
                               value="{{ '%.2f'|format(item.amount) if item.amount is not none else '' }}"
                               data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
                               {{ 'disabled' if trip_busy or line_review.stale }}></td>
-                            <td>
-                              <label class="alcohol-check">
-                                <input type="checkbox" class="line-item-alcohol"
-                                  data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
-                                  {{ 'checked' if item.is_alcohol }} {{ 'disabled' if trip_busy or line_review.stale }}>
-                                <span>{{ 'Alcohol' if item.is_alcohol else 'No' }}</span>
-                              </label>
-                              {% if item.alcohol_overridden %}<small>Corrected by user</small>{% endif %}
-                            </td>
-                            <td>
-                              <select class="select compact-input line-item-ivado-reason"
-                                data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
-                                {{ 'disabled' if trip_busy or line_review.stale or item.included_in_ivado }}>
-                                <option value="">No exclusion</option>
-                                {% for value in ['alcohol', 'non_business', 'policy_cap', 'missing_documentation', 'other'] %}
-                                  <option value="{{ value }}" {{ 'selected' if item.ivado_exclusion_reason == value }}>{{ value|replace('_', ' ')|title }}</option>
-                                {% endfor %}
-                              </select>
-                              <span>{{ item.alcohol_reason or 'No alcohol evidence' }}</span>
-                              {% if item.alcohol_matched_term %}<small>Matched “{{ item.alcohol_matched_term }}” · {{ (item.alcohol_confidence * 100)|round|int }}%</small>{% endif %}
-                            </td>
+                            {% if trip.mode == 'ivado' %}
+                              <td>
+                                <label class="alcohol-check">
+                                  <input type="checkbox" class="line-item-alcohol"
+                                    data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                                    {{ 'checked' if item.is_alcohol }} {{ 'disabled' if trip_busy or line_review.stale }}>
+                                  <span>{{ 'Alcohol' if item.is_alcohol else 'No' }}</span>
+                                </label>
+                                {% if item.alcohol_overridden %}<small>Corrected by user</small>{% endif %}
+                              </td>
+                              <td>
+                                <label class="include-switch" title="Included in IVADO sponsor claim">
+                                  <input type="checkbox" class="line-item-ivado"
+                                    data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                                    {{ 'checked' if item.included_in_ivado }}
+                                    {{ 'disabled' if trip_busy or line_review.stale or item.is_alcohol }}>
+                                  <span>{{ 'Included' if item.included_in_ivado else 'Removed' }}</span>
+                                </label>
+                              </td>
+                              <td>
+                                {% if item.is_alcohol %}
+                                  <strong>Alcohol — automatic</strong>
+                                  <small>Mark this line as not alcohol to include it in IVADO.</small>
+                                {% elif item.included_in_ivado %}
+                                  <span>Included — no exclusion</span>
+                                  <small>Turn off IVADO claim to choose an exclusion reason.</small>
+                                {% else %}
+                                  <select class="select compact-input line-item-ivado-reason"
+                                    data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                                    {{ 'disabled' if trip_busy or line_review.stale }}>
+                                    {% for value in ['non_business', 'policy_cap', 'missing_documentation', 'other'] %}
+                                      <option value="{{ value }}" {{ 'selected' if item.ivado_exclusion_reason == value }}>{{ value|replace('_', ' ')|title }}</option>
+                                    {% endfor %}
+                                  </select>
+                                  <small>Editable because this non-alcohol line is removed from IVADO.</small>
+                                {% endif %}
+                                <span>{{ item.alcohol_reason or 'No alcohol evidence' }}</span>
+                                {% if item.alcohol_matched_term %}<small>Matched “{{ item.alcohol_matched_term }}” · {{ (item.alcohol_confidence * 100)|round|int }}%</small>{% endif %}
+                              </td>
+                            {% endif %}
                             <td class="line-actions">
                               <button class="button secondary small save-line-item"
                                 data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
@@ -474,7 +492,7 @@
                             </td>
                           </tr>
                         {% else %}
-                          <tr><td colspan="7" class="empty-line">No line items were extracted for this receipt. Add one manually.</td></tr>
+                          <tr><td colspan="{{ 6 if trip.mode == 'ivado' else 3 }}" class="empty-line">No line items were extracted for this receipt. Add one manually.</td></tr>
                         {% endfor %}
                       </tbody>
                     </table>
@@ -483,8 +501,10 @@
                     <span>Receipt {{ '%.2f'|format(receipt.receipt_total) if receipt.receipt_total is not none else '—' }}</span>
                     <span>Lines {{ '%.2f'|format(receipt.line_total) }}</span>
                     <span>Arvine {{ '%.2f'|format(receipt.arvine_included_total) }}</span>
-                    <span>IVADO {{ '%.2f'|format(receipt.ivado_included_total) }}</span>
-                    <span>IVADO excluded {{ '%.2f'|format(receipt.ivado_excluded_total) }}</span>
+                    {% if trip.mode == 'ivado' %}
+                      <span>IVADO {{ '%.2f'|format(receipt.ivado_included_total) }}</span>
+                      <span>IVADO removed {{ '%.2f'|format(receipt.ivado_excluded_total) }}</span>
+                    {% endif %}
                     {% if receipt.difference is not none and receipt.difference %}
                       <strong>Difference {{ '%+.2f'|format(receipt.difference) }}</strong>
                     {% endif %}
@@ -1289,23 +1309,23 @@
       <p class="help-text">These values are the source of truth for the final preview and exported workbook.</p>
       <input type="hidden" name="source_file">
       <div class="expense-claim-controls">
-        <label class="confirmation">
-          <input type="checkbox" name="included_in_arvine">
-          <span>Include this expense in Arvine reimbursement</span>
-        </label>
-        <label class="confirmation">
-          <input type="checkbox" name="included_in_ivado">
-          <span>Include this expense in the IVADO claim</span>
-        </label>
-        <label class="field-label">IVADO exclusion reason
-          <select class="select" name="ivado_exclusion_reason">
-            <option value="">No exclusion</option>
-            {% for value in ['alcohol', 'non_business', 'policy_cap', 'missing_documentation', 'other'] %}
-              <option value="{{ value }}">{{ value|replace('_', ' ')|title }}</option>
-            {% endfor %}
-          </select>
-          <small class="field-error" data-error-for="ivado_exclusion_reason"></small>
-        </label>
+        <div class="notice info">This uploaded receipt is always included in Arvine.</div>
+        {% if trip and trip.mode == 'ivado' %}
+          <label class="confirmation">
+            <input type="checkbox" name="included_in_ivado">
+            <span>Include this whole expense in the IVADO claim</span>
+          </label>
+          <label class="field-label">IVADO exclusion reason
+            <select class="select" name="ivado_exclusion_reason">
+              <option value="">No exclusion</option>
+              {% for value in ['non_business', 'policy_cap', 'missing_documentation', 'other'] %}
+                <option value="{{ value }}">{{ value|replace('_', ' ')|title }}</option>
+              {% endfor %}
+            </select>
+            <small>Used only when the whole expense is removed from IVADO. Alcohol is handled per receipt line.</small>
+            <small class="field-error" data-error-for="ivado_exclusion_reason"></small>
+          </label>
+        {% endif %}
         <label class="field-label">Paid by
           <select class="select" name="paid_by">
             <option value="employee_personal">Employee personal</option>

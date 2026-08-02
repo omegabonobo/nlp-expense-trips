@@ -11,8 +11,10 @@ from nlp_expenses.line_items import (
     apply_line_item_review,
     ensure_line_item_review_ready,
     line_item_review_view,
+    load_line_item_review_state,
     reset_receipt_review,
     save_line_item_review,
+    save_line_item_review_state,
     set_expense_review,
     set_line_item_review,
 )
@@ -151,7 +153,7 @@ class LineItemReviewTests(unittest.TestCase):
             self.assertEqual(summary["excluded_count"], 1)
             self.assertEqual(summary["line_count"], 5)
 
-    def test_ivado_deactivates_alcohol_and_user_can_reactivate_without_reclassifying(self):
+    def test_ivado_deactivates_alcohol_until_user_reclassifies_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             trip = ensure_trip(root, "202607_ivado", mode="ivado")
@@ -167,23 +169,31 @@ class LineItemReviewTests(unittest.TestCase):
             self.assertFalse(cocktail["included"])
             self.assertEqual(view["summary"]["excluded_count"], 1)
 
+            with self.assertRaisesRegex(ValueError, "Mark the line as not alcohol"):
+                set_line_item_review(
+                    trip,
+                    receipt.name,
+                    cocktail["line_id"],
+                    {"included": True},
+                )
+
             updated = set_line_item_review(
                 trip,
                 receipt.name,
                 cocktail["line_id"],
-                {"included": True},
+                {"is_alcohol": False},
             )
             cocktail = next(
                 item for item in updated["receipts"][0]["line_items"] if item["description"] == "French 75"
             )
-            self.assertTrue(cocktail["is_alcohol"])
+            self.assertFalse(cocktail["is_alcohol"])
             self.assertTrue(cocktail["included"])
-            self.assertTrue(cocktail["inclusion_overridden"])
+            self.assertTrue(cocktail["alcohol_overridden"])
 
             fresh = meal_expense(receipt)
             self.assertTrue(apply_line_item_review(trip, [fresh], require_fresh=True))
             applied = next(item for item in fresh.line_items if item.description == "French 75")
-            self.assertTrue(applied.is_alcohol)
+            self.assertFalse(applied.is_alcohol)
             self.assertTrue(applied.included)
             self.assertEqual(fresh.corrected_amount_in_currency, 115.0)
 
@@ -194,7 +204,64 @@ class LineItemReviewTests(unittest.TestCase):
             self.assertFalse(cocktail["included"])
             self.assertFalse(cocktail["inclusion_overridden"])
 
-    def test_arvine_flags_alcohol_but_includes_it_until_user_excludes_it(self):
+    def test_ivado_excludes_every_alcohol_line_regardless_of_detection_confidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202607_ivado-low-confidence", mode="ivado")
+            receipt = trip / "expenses_receipts" / "meal.pdf"
+            receipt.write_bytes(b"meal")
+            expense = meal_expense(receipt)
+            expense.line_items = [
+                LineItem(description="Dinner", amount=95.0),
+                LineItem(
+                    description="St-Ambroise",
+                    amount=20.0,
+                    is_alcohol=True,
+                    included=True,
+                    alcohol_confidence=0.74,
+                    alcohol_reason="OpenAI classified the line as alcohol",
+                ),
+            ]
+
+            save_line_item_review(trip, [expense])
+            reviewed = line_item_review_view(trip)["receipts"][0]
+            beer = next(item for item in reviewed["line_items"] if item["is_alcohol"])
+            self.assertTrue(beer["included_in_arvine"])
+            self.assertFalse(beer["included_in_ivado"])
+            self.assertEqual(beer["ivado_exclusion_reason"], "alcohol")
+            self.assertEqual(reviewed["arvine_included_total"], 115.0)
+            self.assertEqual(reviewed["ivado_included_total"], 95.0)
+
+    def test_legacy_review_repairs_arvine_and_low_confidence_alcohol_flags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202607_legacy-program-flags", mode="ivado")
+            receipt = trip / "expenses_receipts" / "meal.pdf"
+            receipt.write_bytes(b"meal")
+            expense = meal_expense(receipt)
+            expense.line_items[1].alcohol_confidence = 0.74
+            save_line_item_review(trip, [expense])
+            state = load_line_item_review_state(trip)
+            state["version"] = 2
+            stored_receipt = state["receipts"][0]
+            stored_receipt["included_in_arvine"] = False
+            stored_alcohol = next(
+                item for item in stored_receipt["line_items"] if item["is_alcohol"]
+            )
+            stored_alcohol["included"] = True
+            stored_alcohol["included_in_arvine"] = False
+            stored_alcohol["included_in_ivado"] = True
+            stored_alcohol["ivado_exclusion_reason"] = None
+            save_line_item_review_state(trip, state)
+
+            reviewed = line_item_review_view(trip)["receipts"][0]
+            alcohol = next(item for item in reviewed["line_items"] if item["is_alcohol"])
+            self.assertTrue(reviewed["included_in_arvine"])
+            self.assertTrue(alcohol["included_in_arvine"])
+            self.assertFalse(alcohol["included_in_ivado"])
+            self.assertEqual(alcohol["ivado_exclusion_reason"], "alcohol")
+
+    def test_arvine_clears_alcohol_metadata_and_rejects_line_exclusion(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             trip = ensure_trip(root, "202607_arvine", mode="arvine")
@@ -206,24 +273,25 @@ class LineItemReviewTests(unittest.TestCase):
                 item for item in view["receipts"][0]["line_items"] if item["description"] == "French 75"
             )
             self.assertTrue(cocktail["included"])
-            self.assertTrue(cocktail["is_alcohol"])
+            self.assertFalse(cocktail["is_alcohol"])
+            self.assertEqual(cocktail["alcohol_reason"], "")
 
-            updated = set_line_item_review(
-                trip,
-                receipt.name,
-                cocktail["line_id"],
-                {"included": False, "note": "Not reimbursable"},
-            )
-            receipt_view = updated["receipts"][0]
-            self.assertAlmostEqual(receipt_view["claimable_ratio"], 95 / 115)
-            self.assertEqual(receipt_view["included_total"], 95.0)
-            self.assertFalse(receipt_view["blocking"])
+            with self.assertRaisesRegex(ValueError, "Arvine includes every receipt line"):
+                set_line_item_review(
+                    trip,
+                    receipt.name,
+                    cocktail["line_id"],
+                    {"included": False, "note": "Not reimbursable"},
+                )
+            receipt_view = line_item_review_view(trip)["receipts"][0]
+            self.assertEqual(receipt_view["claimable_ratio"], 1.0)
+            self.assertEqual(receipt_view["included_total"], 115.0)
             ensure_line_item_review_ready(trip)
 
     def test_user_line_choice_survives_small_openai_wording_change(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            trip = ensure_trip(root, "202607_arvine-rescan", mode="arvine")
+            trip = ensure_trip(root, "202607_ivado-rescan", mode="ivado")
             receipt = trip / "expenses_receipts" / "meal.pdf"
             receipt.write_bytes(b"meal")
             first = meal_expense(receipt)
@@ -239,7 +307,12 @@ class LineItemReviewTests(unittest.TestCase):
             save_line_item_review(trip, [first], llm_mode="required")
             reviewed = line_item_review_view(trip)
             alcohol = next(item for item in reviewed["receipts"][0]["line_items"] if item["is_alcohol"])
-            set_line_item_review(trip, receipt.name, alcohol["line_id"], {"included": False})
+            set_line_item_review(
+                trip,
+                receipt.name,
+                alcohol["line_id"],
+                {"is_alcohol": False},
+            )
 
             second = meal_expense(receipt)
             second.line_items = [
@@ -253,9 +326,14 @@ class LineItemReviewTests(unittest.TestCase):
             ]
             save_line_item_review(trip, [second], llm_mode="required")
             rescanned = line_item_review_view(trip)
-            alcohol = next(item for item in rescanned["receipts"][0]["line_items"] if item["is_alcohol"])
-            self.assertFalse(alcohol["included"])
-            self.assertTrue(alcohol["inclusion_overridden"])
+            corrected = next(
+                item
+                for item in rescanned["receipts"][0]["line_items"]
+                if item["description"].startswith("Balter")
+            )
+            self.assertFalse(corrected["is_alcohol"])
+            self.assertTrue(corrected["included_in_ivado"])
+            self.assertTrue(corrected["alcohol_overridden"])
 
     def test_manually_added_line_survives_rescan(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -307,7 +385,7 @@ class LineItemReviewTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Resolve line-item totals"):
                 ensure_line_item_review_ready(trip)
 
-    def test_workbooks_use_inclusion_and_arvine_proportional_claim(self):
+    def test_workbooks_use_ivado_inclusion_and_arvine_full_claim(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             ivado = ensure_trip(root, "202607_ivado-book", mode="ivado")
@@ -330,7 +408,13 @@ class LineItemReviewTests(unittest.TestCase):
             cocktail = next(
                 item for item in view["receipts"][0]["line_items"] if item["description"] == "French 75"
             )
-            set_line_item_review(arvine, arvine_receipt.name, cocktail["line_id"], {"included": False})
+            with self.assertRaisesRegex(ValueError, "Arvine includes every receipt line"):
+                set_line_item_review(
+                    arvine,
+                    arvine_receipt.name,
+                    cocktail["line_id"],
+                    {"included": False},
+                )
             apply_line_item_review(arvine, [expense], require_fresh=True)
             statement = arvine / "card_statements" / "card.csv"
             statement.write_text("", encoding="utf-8")
