@@ -75,6 +75,11 @@ code { font-family: "SFMono-Regular", Consolas, monospace; color: #405149; overf
 .drop-zone:hover, .drop-zone.dragging { border-color: var(--green); background: var(--green-soft); }
 .drop-zone input { display: none; }
 .drop-zone span { color: var(--muted); font-size: 12px; }
+.statement-template-help { margin-top: 12px; padding: 10px 12px; border-radius: 10px; background: var(--surface-soft); color: var(--muted); font-size: 12px; line-height: 1.45; }
+.statement-template-help summary { color: var(--text); font-weight: 700; cursor: pointer; }
+.statement-template-help p { margin: 8px 0; }
+.statement-template-help code { display: block; margin: 8px 0; overflow-wrap: anywhere; color: var(--text); }
+.statement-template-help small { display: block; margin-top: 8px; }
 .count-badge, .mode-badge { padding: 5px 9px; border-radius: 999px; background: var(--green-soft); color: var(--green); font-size: 11px; font-weight: 800; }
 .file-list { margin-top: 14px; display: grid; gap: 8px; max-height: 360px; overflow-y: auto; }
 .file-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 10px; align-items: start; padding: 11px 5px; border-bottom: 1px solid #edf0ee; }

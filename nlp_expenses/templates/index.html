@@ -222,6 +222,24 @@
               <strong>Drop statements here</strong>
               <span>{{ 'CSV, XLS, or XLSX' if trip.mode == 'arvine' else 'CSV, XLS, XLSX, or PDF' }}</span>
             </label>
+            {% if trip.mode == 'arvine' %}
+              <details class="statement-template-help">
+                <summary>Bank format not recognized?</summary>
+                <p>
+                  Download the standard CSV, open it in Excel or Google Sheets, and paste your transactions under the headers.
+                  Required: transaction date, description, purchase amount, and purchase currency.
+                </p>
+                <code>transaction_date · description · purchase_amount · purchase_currency</code>
+                <a class="button secondary small"
+                  href="/static/standard-statement-template.csv"
+                  download="nlp-expenses-standard-statement.csv">Download standard CSV</a>
+                <small>
+                  Use YYYY-MM-DD dates and three-letter currencies. Positive amounts are purchases; negative amounts are refunds.
+                  CAD amount is optional and should contain the exact card settlement when available.
+                  Optional transaction types: purchase, refund, payment, cashback, cash, fee, transfer, or deposit.
+                </small>
+              </details>
+            {% endif %}
             <div class="file-list">
               {% for file in trip.statements %}
                 <div class="file-row statement-row">

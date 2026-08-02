@@ -254,6 +254,85 @@ class ArvineTests(unittest.TestCase):
             )
             self.assertEqual(by_type["purchase"].account_label, "BNC debit")
 
+    def test_standard_csv_normalizes_exact_cad_refunds_and_audit_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "standard-statement.csv"
+            write_csv(
+                path,
+                [
+                    "transaction_date",
+                    "description",
+                    "purchase_amount",
+                    "purchase_currency",
+                    "cad_amount",
+                    "transaction_type",
+                    "posted_date",
+                    "account",
+                    "cardholder",
+                    "category",
+                ],
+                [
+                    [
+                        "2026-07-02",
+                        "USD HOTEL",
+                        100,
+                        "USD",
+                        136,
+                        "purchase",
+                        "2026-07-03",
+                        "Visa ••••1234",
+                        "A Person",
+                        "Hotel",
+                    ],
+                    [
+                        "2026-07-04",
+                        "MERCHANT REFUND",
+                        -20,
+                        "CAD",
+                        "",
+                        "",
+                        "",
+                        "Visa ••••1234",
+                        "",
+                        "",
+                    ],
+                    [
+                        "2026-07-05",
+                        "CARD PAYMENT",
+                        500,
+                        "CAD",
+                        "",
+                        "payment",
+                        "",
+                        "Visa ••••1234",
+                        "",
+                        "",
+                    ],
+                ],
+            )
+            result = normalize_statement_files([path])
+            self.assertEqual(result.errors, [])
+            by_description = {
+                transaction.description: transaction
+                for transaction in result.transactions
+            }
+            hotel = by_description["USD HOTEL"]
+            self.assertEqual(hotel.provider, "standard")
+            self.assertEqual(hotel.purchase_amount, 100)
+            self.assertEqual(hotel.purchase_currency, "USD")
+            self.assertEqual(hotel.cad_amount, 136)
+            self.assertEqual(
+                hotel.cad_conversion_method,
+                "statement_exact_cad_settlement",
+            )
+            refund = by_description["MERCHANT REFUND"]
+            self.assertEqual(refund.transaction_type, "refund")
+            self.assertEqual(refund.purchase_amount, -20)
+            self.assertEqual(refund.cad_amount, -20)
+            payment = by_description["CARD PAYMENT"]
+            self.assertFalse(payment.match_eligible)
+            self.assertEqual(payment.cad_completeness, "not_applicable")
+
     def test_normalization_signs_audit_rows_and_wise_cad_completeness(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "wise.csv"

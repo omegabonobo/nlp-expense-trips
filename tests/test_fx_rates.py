@@ -88,7 +88,43 @@ class WeeklyCadFxTests(unittest.TestCase):
             self.assertEqual(transaction.cad_conversion_route, "USD→CAD")
             self.assertEqual(transaction.cad_conversion_week_start, "2026-07-06")
 
-    def test_reconciliation_uses_shared_fx_layer_for_non_wise_statement(self):
+    def test_standard_csv_uses_shared_fx_when_exact_cad_is_blank(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trip = Path(tmp)
+            statement = trip / "standard-statement.csv"
+            write_csv(
+                statement,
+                [
+                    "transaction_date",
+                    "description",
+                    "purchase_amount",
+                    "purchase_currency",
+                ],
+                [["2026-07-07", "STANDARD HOTEL", 100, "USD"]],
+            )
+
+            def fetch(_url: str) -> dict:
+                return {
+                    "observations": [
+                        {"d": "2026-07-06", "FXUSDCAD": {"v": "1.35"}},
+                        {"d": "2026-07-07", "FXUSDCAD": {"v": "1.37"}},
+                    ]
+                }
+
+            result = normalize_statement_files(
+                [statement],
+                fx_resolver=WeeklyCadFxResolver(trip, fetch_json=fetch),
+            )
+            transaction = result.transactions[0]
+            self.assertEqual(transaction.provider, "standard")
+            self.assertEqual(transaction.cad_amount, 136.0)
+            self.assertEqual(transaction.cad_completeness, "complete")
+            self.assertEqual(
+                transaction.cad_conversion_method,
+                "weekly_average_direct",
+            )
+
+    def test_reconciliation_uses_shared_fx_layer_for_standard_statement(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             trip = ensure_trip(root, "202607_new_card", mode="arvine")
@@ -96,7 +132,12 @@ class WeeklyCadFxTests(unittest.TestCase):
             receipt_path.write_bytes(b"hotel")
             write_csv(
                 trip / "card_statements" / "new-card.csv",
-                ["Date", "Description", "Amount", "Currency"],
+                [
+                    "transaction_date",
+                    "description",
+                    "purchase_amount",
+                    "purchase_currency",
+                ],
                 [["2026-07-07", "NEW CARD HOTEL", 100, "USD"]],
             )
             expense = Expense(
@@ -123,7 +164,7 @@ class WeeklyCadFxTests(unittest.TestCase):
             ):
                 view = sync_reconciliation(trip, root, llm_mode="off")
             transaction = view["transactions"][0]
-            self.assertEqual(transaction["provider"], "generic")
+            self.assertEqual(transaction["provider"], "standard")
             self.assertEqual(transaction["cad_amount"], 136.0)
             self.assertEqual(transaction["cad_completeness"], "complete")
             self.assertEqual(

@@ -105,9 +105,22 @@ class UITests(unittest.TestCase):
             "Public weekly FX data is fetched only when no exact CAD amount exists",
             html,
         )
+        self.assertIn("Download standard CSV", html)
+        self.assertIn("/static/standard-statement-template.csv", html)
         self.assertNotIn('name="quality"', html)
         self.assertRegex(html, r'<input type="radio" name="receipt-quality" value="best"[^>]*disabled')
         self.assertIn(str((self.root / ".env").resolve()), html)
+
+    def test_standard_statement_template_is_downloadable(self):
+        response = self.client.get("/static/standard-statement-template.csv")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.get_data(as_text=True).strip(),
+            (
+                "transaction_date,description,purchase_amount,purchase_currency,"
+                "cad_amount,transaction_type,posted_date,account,cardholder,category"
+            ),
+        )
 
     def test_best_quality_controls_are_enabled_when_key_is_configured(self):
         trip = ensure_trip(self.root, "202607_montreal", mode="arvine")

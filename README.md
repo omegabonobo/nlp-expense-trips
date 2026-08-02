@@ -259,6 +259,13 @@ shared weekly FX layer converts the target currency to CAD and caches the
 source evidence. Wise's exported exchange-rate field is not used for that
 fallback.
 
+If a bank export is not recognized, download the standard CSV template from the
+Statements card. Its required columns are `transaction_date`, `description`,
+`purchase_amount`, and `purchase_currency`. Dates use `YYYY-MM-DD`; positive
+amounts are purchases and negative amounts are refunds. Optional `cad_amount`
+holds an exact CAD settlement, while `transaction_type`, `posted_date`,
+`account`, `cardholder`, and `category` provide audit detail.
+
 Arvine creates four sheets:
 
 - `expense_detail`: one row per receipt, tax fields, statement match, manual CAD override, deductible/recoverable calculations, and review statuses.

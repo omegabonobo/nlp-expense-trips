@@ -34,4 +34,4 @@ where = ["."]
 include = ["nlp_expenses*"]
 
 [tool.setuptools.package-data]
-nlp_expenses = ["templates/*.html", "static/*.css", "static/*.js"]
+nlp_expenses = ["templates/*.html", "static/*.css", "static/*.js", "static/*.csv"]
