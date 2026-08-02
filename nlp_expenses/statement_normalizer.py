@@ -153,7 +153,11 @@ def read_tabular_rows(path: Path) -> list[list[object]]:
     if suffix == ".csv":
         text = path.read_text(encoding="utf-8-sig", errors="replace")
         delimiter = detect_delimiter(text)
-        return [list(row) for row in csv.reader(text.splitlines(), delimiter=delimiter)]
+        lines = [
+            unwrap_quoted_delimited_line(line, delimiter)
+            for line in text.splitlines()
+        ]
+        return [list(row) for row in csv.reader(lines, delimiter=delimiter)]
     if suffix == ".xlsx":
         workbook = load_workbook(path, data_only=True, read_only=True)
         return [list(row) for row in workbook.active.iter_rows(values_only=True)]
@@ -176,6 +180,20 @@ def detect_delimiter(text: str) -> str:
     return max(candidates, key=lambda delimiter: sum(line.count(delimiter) for line in lines))
 
 
+def unwrap_quoted_delimited_line(line: str, delimiter: str) -> str:
+    """Undo exports that quote an entire semicolon/tab-delimited record."""
+
+    if delimiter == "," or not (line.startswith('"') and line.endswith('"')):
+        return line
+    try:
+        outer_row = next(csv.reader([line], delimiter=","))
+    except (csv.Error, StopIteration):
+        return line
+    if len(outer_row) == 1 and delimiter in outer_row[0]:
+        return outer_row[0]
+    return line
+
+
 def detect_provider(rows: list[list[object]]) -> tuple[str, int]:
     for index, row in enumerate(rows[:40]):
         headers = {normalize_key(value) for value in row if str(value or "").strip()}
@@ -183,7 +201,10 @@ def detect_provider(rows: list[list[object]]) -> tuple[str, int]:
             return "amex", index
         if {"first_bank_card", "transaction_type", "date_posted", "transaction_amount", "description"} <= headers:
             return "bmo", index
-        if {"date", "card_number", "description", "category", "debit", "credit"} <= headers:
+        if (
+            {"date", "description", "category", "debit", "credit"} <= headers
+            and bool(headers & {"card_number", "balance"})
+        ):
             return "bnc", index
         if {
             "id",
@@ -501,9 +522,12 @@ def normalize_bnc(
             continue
         description = clean_text(row.get("description"))
         if debit > 0:
-            transaction_type = "purchase"
+            transaction_type = classify_bnc_debit(
+                description,
+                clean_text(row.get("category")),
+            )
             signed_amount = abs(debit)
-            match_eligible = True
+            match_eligible = transaction_type == "purchase"
         else:
             transaction_type = classify_credit(description)
             signed_amount = -abs(credit)
@@ -523,7 +547,10 @@ def normalize_bnc(
                 funding_leg_id=f"{group_id}:1",
                 transaction_date=parse_date(row.get("date"), date_convention),
                 posted_date=parse_date(row.get("date"), date_convention),
-                account_label=mask_account(row.get("card_number")),
+                account_label=(
+                    mask_account(row.get("card_number"))
+                    or ("BNC debit" if "balance" in row else "")
+                ),
                 description=description,
                 category=clean_text(row.get("category")),
                 transaction_type=transaction_type,
@@ -937,6 +964,10 @@ def parse_date(value: object, convention: str = "") -> str | None:
             "%Y-%m-%d",
             "%Y/%m/%d",
             "%Y%m%d",
+            "%d-%b-%y",
+            "%d-%B-%y",
+            "%d %b %y",
+            "%d %B %y",
             "%d %b %Y",
             "%d %B %Y",
             "%d %b. %Y",
@@ -1054,6 +1085,22 @@ def classify_credit(description: str) -> str:
     if re.search(r"transfer", description, re.I):
         return "transfer"
     return "refund"
+
+
+def classify_bnc_debit(description: str, category: str) -> str:
+    description_text = description.lower()
+    category_text = category.lower()
+    evidence = f"{description_text} {category_text}"
+    if re.search(r"credit card payment|mastercard payment|payment received", evidence):
+        return "payment"
+    if category_text == "cash" or re.search(r"\b(?:abm|atm)\s+withdrawal\b", description_text):
+        return "cash"
+    if category_text in {"fee", "fees", "bank fee"} or re.search(
+        r"\b(?:monthly|transaction|service|card purchase)\s+fees?\b",
+        description_text,
+    ):
+        return "fee"
+    return "purchase"
 
 
 def append_note(existing: str, note: str) -> str:

@@ -176,6 +176,84 @@ class ArvineTests(unittest.TestCase):
             self.assertEqual(transaction.cad_amount, 130)
             self.assertEqual(transaction.cad_completeness, "complete")
 
+    def test_amex_two_digit_month_name_dates_are_normalized(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "amex.csv"
+            write_csv(
+                path,
+                ["Date", "Date Processed", "Description", "Card Member", "Account #", "Amount"],
+                [["28-Jul-26", "29-Jul-26", "MONTREAL HOTEL", "A Person", "-41003", 125.5]],
+            )
+            result = normalize_statement_files([path])
+            self.assertEqual(result.errors, [])
+            self.assertEqual(result.transactions[0].transaction_date, "2026-07-28")
+            self.assertEqual(result.transactions[0].posted_date, "2026-07-29")
+
+    def test_bnc_whole_row_quoted_credit_card_export_is_unwrapped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bnc-card.csv"
+            path.write_text(
+                "\n".join(
+                    [
+                        '"Date;""card Number"";Description;Category;Debit;Credit"',
+                        '"2026-07-28;""************2739"";""Yul Hurleys"";Restaurants;""19.94"";""0"""',
+                        '"2026-07-14;""************2739"";""Payment received thank you!"";""Credit card payment"";""0"";""542.08"""',
+                        '"2026-07-10;""************2739"";""Cashback program"";Finances;""0"";""3.88"""',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            result = normalize_statement_files([path])
+            self.assertEqual(result.errors, [])
+            self.assertEqual(len(result.transactions), 3)
+            self.assertEqual(
+                [transaction.transaction_type for transaction in result.transactions],
+                ["cashback", "payment", "purchase"],
+            )
+            purchase = next(
+                transaction
+                for transaction in result.transactions
+                if transaction.transaction_type == "purchase"
+            )
+            self.assertEqual(purchase.account_label, "••••2739")
+            self.assertEqual(purchase.cad_amount, 19.94)
+
+    def test_bnc_debit_export_uses_bnc_adapter_and_audits_non_purchases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bnc-debit.csv"
+            path.write_text(
+                "\n".join(
+                    [
+                        "Date;Description;Category;Debit;Credit;Balance",
+                        '"2026-07-28;""Restaurant Burg"";Restaurants;""19.99"";""0"";""11782.56"""',
+                        '"2026-07-24;""Fixed monthly fees"";Fees;""3.95"";""0"";""11825.43"""',
+                        '"2026-07-15;""Mastercard payment"";""Credit card payment"";""542.08"";""0"";""11890.01"""',
+                        '"2026-07-09;""ABM withdrawal"";Cash;""100.0"";""0"";""12432.09"""',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            result = normalize_statement_files([path])
+            self.assertEqual(result.errors, [])
+            self.assertTrue(
+                all(transaction.provider == "bnc" for transaction in result.transactions)
+            )
+            by_type = {
+                transaction.transaction_type: transaction
+                for transaction in result.transactions
+            }
+            self.assertEqual(set(by_type), {"purchase", "fee", "payment", "cash"})
+            self.assertTrue(by_type["purchase"].match_eligible)
+            self.assertTrue(
+                all(
+                    not by_type[transaction_type].match_eligible
+                    for transaction_type in ("fee", "payment", "cash")
+                )
+            )
+            self.assertEqual(by_type["purchase"].account_label, "BNC debit")
+
     def test_normalization_signs_audit_rows_and_wise_cad_completeness(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "wise.csv"
