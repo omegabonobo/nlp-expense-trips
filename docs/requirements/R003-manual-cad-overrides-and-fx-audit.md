@@ -6,9 +6,9 @@
 ## Problem
 
 Some statement providers, especially multi-currency providers, do not expose a
-complete CAD settlement. The workbook supports a manual CAD override, but the
-frontend cannot finish the reconciliation or explain the source of that
-override.
+complete CAD settlement. Those transactions need a consistent weekly CAD
+conversion with a visible source, while manual CAD remains the fallback when no
+supported market rate is available.
 
 ## Required outcome
 
@@ -27,26 +27,45 @@ tool must retain an audit explanation and calculate the accounting FX rate.
    - statement transaction;
    - provider conversion confirmation;
    - other documented rate source.
-4. The UI must clearly distinguish:
+4. When no exact CAD amount exists, the provider-neutral normalization layer
+   converts the transaction's purchase amount and currency using the arithmetic
+   average of the published business-day CAD rates in the transaction's
+   Monday–Sunday week.
+5. Direct Bank of Canada currency/CAD observations are preferred. QAR uses the
+   official 3.64 QAR/USD peg and the Bank of Canada weekly USD/CAD average when
+   no direct official QAR/CAD series is available.
+6. Weekly rates are cached per trip with their week, observations, method,
+   conversion route, source URLs, and retrieval timestamp so regeneration is
+   deterministic and auditable.
+7. The UI must clearly distinguish:
    - exact statement CAD;
    - aggregated exact statement CAD;
+   - weekly externally converted CAD;
    - manual CAD;
    - unavailable CAD.
-5. FX rate equals CAD amount used divided by the corrected original total.
-6. Manual CAD must take precedence over statement CAD only after explicit user
+8. FX rate equals CAD amount used divided by the corrected original total.
+9. Manual CAD must take precedence over statement or externally converted CAD only after explicit user
    action.
-7. Removing the override restores the statement-derived amount.
-8. Workbook fields and review checks must reflect the source of the amount.
+10. Removing the override restores the normalized amount.
+11. Workbook fields and review checks must reflect the source of the amount.
 
 ## Acceptance criteria
 
 - An incomplete Wise transaction can be mapped, assigned a manual CAD value,
   and leave no CAD-completeness warning.
+- A Wise QAR purchase funded from a non-CAD balance uses the QAR target amount
+  and the cached weekly QAR/CAD conversion, never the Wise export's exchange-rate
+  field.
+- The same weekly conversion enriches a provider-neutral future-card import
+  whose settlement is not already in CAD.
+- A Wise row with `Status=REFUNDED` is negative even when its exported
+  `Direction` is `OUT`.
 - The override and note persist through resync and generation.
 - A zero or negative override is rejected for a normal purchase.
 - Refund/credit behavior follows R004.
 
 ## Non-goals
 
-- Downloading market FX rates automatically.
-- Treating an estimated market rate as a card-provider settlement.
+- Treating a weekly market conversion as an exact card-provider CAD settlement.
+- Using a provider-exported exchange-rate field when neither the purchase nor
+  settlement currency is CAD.

@@ -277,7 +277,8 @@
           </div>
           <p class="section-description">
             Choose the receipt-reading method once, then review the extracted fields and meal items. The same method is reused
-            for reconciliation and Excel; statement parsing, matching, and workbook creation always run locally.
+            for reconciliation and Excel; statement parsing, matching, and workbook creation run locally.
+            When a statement has no exact CAD amount, the app may fetch a public weekly exchange rate and caches the evidence in the trip folder.
           </p>
           <div class="receipt-extraction">
             <div>
@@ -507,7 +508,7 @@
                     else 'Basic / offline' if line_review.available
                     else 'Scan receipts first' }}
                 </strong>
-                <small>Card-statement parsing and matching run locally; there is no separate quality choice here.</small>
+                <small>Card-statement parsing and matching run locally. Public weekly FX data is fetched only when no exact CAD amount exists.</small>
               </div>
               <button class="button primary" id="sync-reconciliation-button"
                 {{ 'disabled' if trip_busy or not trip.receipts or not trip.statements or trip.statement_errors or line_review_required else '' }}>
@@ -724,11 +725,25 @@
                           </strong>
                           <span>
                             {% if transaction.cad_amount is not none %}
-                              {{ '%.2f'|format(transaction.cad_amount) }} CAD charged
+                              {{ '%.2f'|format(transaction.cad_amount) }} CAD
                             {% else %}
                               CAD {{ transaction.cad_completeness }}
                             {% endif %}
                           </span>
+                          {% if transaction.cad_conversion_rate is not none %}
+                            <small>
+                              {{ '%.8f'|format(transaction.cad_conversion_rate) }} CAD/{{ transaction.purchase_currency }}
+                              · {{ transaction.cad_conversion_route }}
+                            </small>
+                          {% endif %}
+                          {% if transaction.cad_conversion_week_start %}
+                            <small>
+                              Weekly rate {{ transaction.cad_conversion_week_start }}–{{ transaction.cad_conversion_week_end }}
+                            </small>
+                          {% endif %}
+                          {% if transaction.cad_conversion_source %}
+                            <small>{{ transaction.cad_conversion_source }}</small>
+                          {% endif %}
                         </td>
                         <td>
                           <select class="select mapping-select" data-group-id="{{ transaction.group_id }}" {{ 'disabled' if trip_busy or reconciliation.stale or not transaction.match_eligible or transaction.ignored or transaction.allocations else '' }}>

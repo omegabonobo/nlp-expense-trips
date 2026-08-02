@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from nlp_expenses.accounting import trip_accounting_profile
+from nlp_expenses.fx_rates import FX_CACHE_FILE
 from nlp_expenses.trip_metadata import required_metadata_gaps, trip_metadata
 from nlp_expenses.trips import (
     list_receipt_files,
@@ -50,6 +51,7 @@ def review_input_snapshot(root: Path, trip_dir: Path) -> dict:
         (RECONCILIATION_FILE, "reconciliation"),
         (LINE_ITEM_REVIEW_FILE, "line_item_review"),
         (STATEMENT_SETTINGS_FILE, "statement_settings"),
+        (FX_CACHE_FILE, "fx_rates"),
     ):
         path = trip_dir / filename
         if path.is_file():
@@ -324,7 +326,14 @@ def export_approved_package(root: Path, trip_dir: Path) -> Path:
                 safe_trip_child(trip_dir, entry["path"])
                 for entry in manifest["review_inputs"]["artifacts"]
                 if entry.get("kind")
-                in {"receipt", "statement", "reconciliation", "line_item_review", "statement_settings"}
+                in {
+                    "receipt",
+                    "statement",
+                    "reconciliation",
+                    "line_item_review",
+                    "statement_settings",
+                    "fx_rates",
+                }
             ]
             generated_entries = manifest.get("generated_artifacts") or [manifest["workbook"]]
             paths.extend(

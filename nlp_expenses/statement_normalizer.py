@@ -13,6 +13,7 @@ from typing import Callable
 
 from openpyxl import load_workbook
 
+from nlp_expenses.fx_rates import FxRateUnavailable, WeeklyCadFxResolver
 from nlp_expenses.models import NormalizationResult, NormalizedTransaction, StatementFileReport
 
 
@@ -83,7 +84,10 @@ def preflight_statement_files(paths: list[Path]) -> list[StatementFileReport]:
     return reports
 
 
-def normalize_statement_files(paths: list[Path]) -> NormalizationResult:
+def normalize_statement_files(
+    paths: list[Path],
+    fx_resolver: WeeklyCadFxResolver | None = None,
+) -> NormalizationResult:
     result = NormalizationResult()
     for path in paths:
         report = StatementFileReport(source_file=path)
@@ -128,6 +132,9 @@ def normalize_statement_files(paths: list[Path]) -> NormalizationResult:
         return result
 
     result.transactions = deduplicate_transactions(result.transactions, result)
+    annotate_exact_cad_conversions(result.transactions)
+    if fx_resolver:
+        apply_weekly_cad_rates(result.transactions, fx_resolver, result)
     assign_cad_completeness(result.transactions)
     result.transactions.sort(
         key=lambda tx: (
@@ -553,20 +560,29 @@ def normalize_wise(
             continue
         status = clean_text(row.get("status")).lower()
         direction = clean_text(row.get("direction")).lower()
-        sign = -1.0 if direction == "in" else 1.0
+        is_refund = status == "refunded" or direction == "in"
+        sign = -1.0 if is_refund else 1.0
         category = clean_text(row.get("category"))
         is_cash = category.lower() == "cash"
-        if direction == "in":
+        if is_refund:
             transaction_type = "refund"
         elif is_cash:
             transaction_type = "cash"
         else:
             transaction_type = "purchase"
-        match_eligible = status != "cancelled" and transaction_type in {"purchase", "refund"}
         source_currency = currency_code(row.get("source_currency"))
         target_currency = currency_code(row.get("target_currency"))
         settlement_amount = sign * ((source_amount or 0.0) + source_fee) if source_amount is not None else None
         purchase_amount = sign * target_amount if target_amount is not None else None
+        has_transaction_amount = any(
+            amount not in (None, 0, -0.0)
+            for amount in (purchase_amount, settlement_amount)
+        )
+        match_eligible = (
+            status != "cancelled"
+            and transaction_type in {"purchase", "refund"}
+            and has_transaction_amount
+        )
         if source_currency == "CAD" and settlement_amount is not None:
             cad_amount = settlement_amount
         elif target_currency == "CAD" and purchase_amount is not None:
@@ -580,8 +596,17 @@ def normalize_wise(
             source_fee,
             target_currency,
             target_amount,
+            status,
             direction,
         )
+        review_note = ""
+        if status == "cancelled":
+            review_note = "Cancelled Wise activity is retained for audit."
+        elif status == "refunded" and direction != "in":
+            review_note = (
+                "Wise status is REFUNDED; amounts are normalized as a negative refund "
+                "even though the exported direction is not IN."
+            )
         transactions.append(
             NormalizedTransaction(
                 source_file=path,
@@ -607,7 +632,7 @@ def normalize_wise(
                 cad_completeness="incomplete" if match_eligible else "not_applicable",
                 match_status="unmatched" if match_eligible else "ignored",
                 normalization_status="review" if status not in {"completed", "refunded", "cancelled"} else "ok",
-                review_note="Cancelled Wise activity is retained for audit." if status == "cancelled" else "",
+                review_note=review_note,
             )
         )
     return transactions
@@ -781,8 +806,93 @@ def assign_cad_completeness(transactions: list[NormalizedTransaction]) -> None:
             if leg.match_eligible and status in {"partial", "incomplete"}:
                 leg.review_note = append_note(
                     leg.review_note,
-                    "No complete exact CAD settlement amount is available; use a manual CAD override after matching.",
+                    "No complete CAD amount is available; use a manual CAD override after matching.",
                 )
+
+
+def annotate_exact_cad_conversions(transactions: list[NormalizedTransaction]) -> None:
+    """Record why a transaction already has an exact CAD amount."""
+
+    for transaction in transactions:
+        if transaction.cad_amount is None or not transaction.match_eligible:
+            continue
+        basis_amount = transaction.purchase_amount
+        basis_currency = transaction.purchase_currency
+        if basis_amount not in (None, 0) and basis_currency:
+            transaction.cad_conversion_rate = round(
+                abs(float(transaction.cad_amount)) / abs(float(basis_amount)),
+                10,
+            )
+            transaction.cad_conversion_route = (
+                "CAD→CAD" if basis_currency == "CAD" else f"{basis_currency}→CAD"
+            )
+        elif transaction.settlement_currency == "CAD":
+            transaction.cad_conversion_rate = 1.0
+            transaction.cad_conversion_route = "CAD→CAD"
+        if transaction.purchase_currency == "CAD":
+            transaction.cad_conversion_method = "statement_purchase_cad"
+            transaction.cad_conversion_source = (
+                f"{transaction.provider.upper()} statement purchase amount in CAD"
+            )
+        elif transaction.settlement_currency == "CAD":
+            transaction.cad_conversion_method = "statement_exact_cad_settlement"
+            transaction.cad_conversion_source = (
+                f"{transaction.provider.upper()} statement exact CAD settlement"
+            )
+
+
+def apply_weekly_cad_rates(
+    transactions: list[NormalizedTransaction],
+    fx_resolver: WeeklyCadFxResolver,
+    result: NormalizationResult,
+) -> None:
+    """Enrich any provider's unresolved foreign purchase with a weekly CAD rate."""
+
+    warned: set[tuple[str, str, str]] = set()
+    reports_by_path = {report.source_file: report for report in result.files}
+    for transaction in transactions:
+        if not transaction.match_eligible or transaction.cad_amount is not None:
+            continue
+        if (
+            transaction.purchase_amount is None
+            or not transaction.purchase_currency
+            or not transaction.transaction_date
+        ):
+            continue
+        try:
+            rate = fx_resolver.resolve(
+                transaction.purchase_currency,
+                transaction.transaction_date,
+            )
+        except FxRateUnavailable as exc:
+            key = (
+                transaction.purchase_currency,
+                transaction.transaction_date,
+                str(exc),
+            )
+            note = f"Weekly CAD conversion unavailable: {exc}"
+            transaction.review_note = append_note(transaction.review_note, note)
+            if key not in warned:
+                warned.add(key)
+                warning = (
+                    f"{transaction.source_file.name} row {transaction.source_row}: {note}"
+                )
+                result.warnings.append(warning)
+                report = reports_by_path.get(transaction.source_file)
+                if report:
+                    report.warnings.append(warning)
+            continue
+        transaction.cad_amount = round(
+            float(transaction.purchase_amount) * rate.cad_per_unit,
+            2,
+        )
+        transaction.cad_conversion_rate = rate.cad_per_unit
+        transaction.cad_conversion_week_start = rate.week_start
+        transaction.cad_conversion_week_end = rate.week_end
+        transaction.cad_conversion_method = rate.method
+        transaction.cad_conversion_route = rate.route
+        transaction.cad_conversion_source = rate.source
+        transaction.cad_conversion_source_urls = list(rate.source_urls)
 
 
 def normalize_key(value: object) -> str:

@@ -7,6 +7,7 @@ from nlp_expenses.config import ask_openai_for_run, get_openai_settings, prompt_
 from nlp_expenses.extraction.arvine import parse_arvine_receipt
 from nlp_expenses.extraction.receipts import parse_receipt
 from nlp_expenses.extraction.text import supported_receipt_extensions
+from nlp_expenses.fx_rates import WeeklyCadFxResolver
 from nlp_expenses.line_items import apply_line_item_review
 from nlp_expenses.models import Expense, GenerationProgress
 from nlp_expenses.statement_normalizer import (
@@ -154,7 +155,10 @@ def generate_review(
             answer = (confirm_input or input)(prompt).strip().lower()
             if answer not in {"y", "yes"}:
                 return None
-        normalization = normalize_statement_files(statement_files)
+        normalization = normalize_statement_files(
+            statement_files,
+            fx_resolver=WeeklyCadFxResolver(trip_dir),
+        )
         if normalization.errors:
             raise StatementNormalizationError("\n".join(normalization.errors))
         for message in normalization.warnings:

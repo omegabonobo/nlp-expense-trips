@@ -95,6 +95,13 @@ class NormalizedTransaction:
     settlement_amount: float | None = None
     settlement_currency: str | None = None
     cad_amount: float | None = None
+    cad_conversion_rate: float | None = None
+    cad_conversion_week_start: str | None = None
+    cad_conversion_week_end: str | None = None
+    cad_conversion_method: str = ""
+    cad_conversion_route: str = ""
+    cad_conversion_source: str = ""
+    cad_conversion_source_urls: list[str] = field(default_factory=list)
     cad_completeness: str = "incomplete"
     expense_id: str = ""
     suggested_expense_id: str = ""

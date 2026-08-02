@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from openpyxl import load_workbook
 
+from nlp_expenses.fx_rates import FxRateUnavailable
 from nlp_expenses.generator import generate_review
 from nlp_expenses.line_items import line_item_review_view
 from nlp_expenses.models import Expense
@@ -491,7 +492,13 @@ class ReconciliationTests(unittest.TestCase):
                 amount=75,
                 currency="USD",
             )
-            with patch("nlp_expenses.generator.parse_arvine_receipt", return_value=expense):
+            with (
+                patch(
+                    "nlp_expenses.fx_rates.WeeklyCadFxResolver.resolve",
+                    side_effect=FxRateUnavailable("No cached or published weekly rate."),
+                ),
+                patch("nlp_expenses.generator.parse_arvine_receipt", return_value=expense),
+            ):
                 initial = sync_reconciliation(trip, root, llm_mode="off")
             self.assertEqual(initial["summary"]["needs_review_count"], 1)
             self.assertEqual(initial["transactions"][0]["cad_completeness"], "partial")

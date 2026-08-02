@@ -35,7 +35,7 @@ From the interface you can:
   removed directly in Finder, with a manual **Refresh files** fallback;
 - edit receipt fields, payer, Arvine/IVADO eligibility, person count, and extracted lines; add/remove manual lines; reactivate or deactivate any item; and correct its alcohol classification;
 - validate Arvine statement files before generation;
-- sync either mode against normalized statement transactions, review the calculated CAD exchange rate, and save manual mapping overrides;
+- sync either mode against provider-neutral statement transactions, apply cached weekly CAD rates when an exact CAD amount is absent, review the conversion source, and save manual mapping overrides;
 - correct extracted invoice fields, document manual CAD amounts, resolve duplicates, and split charges/refunds/personal portions;
 - review statement coverage against the trip dates and expected cards/accounts;
 - enter the traveller plus optional dates/purpose, choose the default receipt payer,
@@ -251,7 +251,13 @@ Before receipt processing, Arvine validates every statement and asks once whethe
 .venv/bin/python -m nlp_expenses generate trips/202607_montreal --mode arvine --statements-complete --llm off
 ```
 
-An unsupported or malformed file stops generation and names the affected file. Wise general-history exports import only `CARD_TRANSACTION` activity, retain split funding legs, and leave CAD blank when the exact complete CAD settlement is unavailable.
+An unsupported or malformed file stops generation and names the affected file.
+Wise general-history exports import only `CARD_TRANSACTION` activity and retain
+split funding legs. The purchase amount/currency comes from Wise's target
+fields. Exact CAD purchase or funding amounts take precedence; otherwise the
+shared weekly FX layer converts the target currency to CAD and caches the
+source evidence. Wise's exported exchange-rate field is not used for that
+fallback.
 
 Arvine creates four sheets:
 

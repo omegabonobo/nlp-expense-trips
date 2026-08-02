@@ -156,6 +156,13 @@ ARVINE_STATEMENT_HEADERS = [
     "source_row",
     "normalization_status",
     "review_note",
+    "cad_conversion_rate",
+    "cad_conversion_week_start",
+    "cad_conversion_week_end",
+    "cad_conversion_method",
+    "cad_conversion_route",
+    "cad_conversion_source",
+    "cad_conversion_source_urls",
 ]
 
 ARVINE_SUMMARY_HEADERS = [
@@ -736,6 +743,13 @@ def write_arvine_statement_sheet(
                 transaction.source_row,
                 transaction.normalization_status,
                 transaction.review_note,
+                transaction.cad_conversion_rate,
+                excel_date(transaction.cad_conversion_week_start),
+                excel_date(transaction.cad_conversion_week_end),
+                transaction.cad_conversion_method,
+                transaction.cad_conversion_route,
+                transaction.cad_conversion_source,
+                ", ".join(transaction.cad_conversion_source_urls),
             ],
         )
         for col in range(1, len(ARVINE_STATEMENT_HEADERS) + 1):
@@ -807,6 +821,13 @@ def write_arvine_statement_sheet(
                     representative.source_row,
                     status,
                     " ".join(part for part in note_parts if part),
+                    representative.cad_conversion_rate,
+                    excel_date(representative.cad_conversion_week_start),
+                    excel_date(representative.cad_conversion_week_end),
+                    representative.cad_conversion_method,
+                    representative.cad_conversion_route,
+                    representative.cad_conversion_source,
+                    ", ".join(representative.cad_conversion_source_urls),
                 ],
             )
             allocation_row = ws.max_row
@@ -829,16 +850,21 @@ def write_arvine_statement_sheet(
             ws.cell(row, col).number_format = "yyyy-mm-dd"
         for col in (14, 16, 18):
             ws.cell(row, col).number_format = '#,##0.00;[Red]-#,##0.00;"-"'
+        ws.cell(row, 28).number_format = "0.00000000"
+        for col in (29, 30):
+            ws.cell(row, col).number_format = "yyyy-mm-dd"
         ws.cell(row, 23).number_format = "0%"
         ws.cell(row, 27).alignment = Alignment(vertical="top", wrap_text=True)
-        if ws.cell(row, 27).value:
+        for col in (33, 34):
+            ws.cell(row, col).alignment = Alignment(vertical="top", wrap_text=True)
+        if any(ws.cell(row, col).value for col in (27, 33, 34)):
             ws.row_dimensions[row].height = 32
     if transactions or allocations_by_group:
         status_validation = DataValidation(type="list", formula1='"unmatched,suggested,auto,manual,matched,ignored,allocation,allocated_raw"')
         ws.add_data_validation(status_validation)
         status_validation.add(f"V2:V{end_row}")
     ws.conditional_formatting.add(
-        f"A2:AA{end_row}",
+        f"A2:AH{end_row}",
         FormulaRule(formula=['AND($M2=TRUE,$T2="")'], fill=PatternFill("solid", fgColor="FFF2CC")),
     )
     ws.conditional_formatting.add(
@@ -856,7 +882,13 @@ def write_arvine_statement_sheet(
     ws.protection.sheet = True
     ws.protection.autoFilter = False
     ws.protection.sort = False
-    set_widths(ws, [27, 31, 14, 14, 12, 14, 20, 32, 18, 16, 14, 12, 14, 17, 15, 18, 17, 15, 18, 22, 22, 16, 16, 28, 12, 20, 55])
+    set_widths(
+        ws,
+        [
+            27, 31, 14, 14, 12, 14, 20, 32, 18, 16, 14, 12, 14, 17, 15, 18, 17,
+            15, 18, 22, 22, 16, 16, 28, 12, 20, 55, 19, 14, 14, 28, 18, 48, 60,
+        ],
+    )
 
 
 def add_arvine_detail_validations(ws, end_row: int) -> None:
@@ -1367,6 +1399,13 @@ IVADO_STATEMENT_HEADERS = [
     "Matched Receipt",
     "Match Status",
     "Source Statement(s)",
+    "CAD Conversion Rate",
+    "Rate Week Start",
+    "Rate Week End",
+    "Conversion Method",
+    "Conversion Route",
+    "Rate Source",
+    "Rate Source URL(s)",
 ]
 
 IVADO_ITEM_HEADERS = [
@@ -1556,6 +1595,16 @@ def write_consolidated_statement_sheet(ws, trip_dir: Path) -> None:
                 transaction.get("expense_file"),
                 transaction.get("match_status"),
                 ", ".join(str(value) for value in source_files),
+                transaction.get("cad_conversion_rate"),
+                transaction.get("cad_conversion_week_start"),
+                transaction.get("cad_conversion_week_end"),
+                transaction.get("cad_conversion_method"),
+                transaction.get("cad_conversion_route"),
+                transaction.get("cad_conversion_source"),
+                ", ".join(
+                    str(value)
+                    for value in transaction.get("cad_conversion_source_urls", [])
+                ),
             ]
         )
         if source_files:
@@ -1817,6 +1866,9 @@ def style_ivado_workbook(workbook: Workbook) -> None:
         for column in money_columns:
             for cell in ws[get_column_letter(column)][1:]:
                 cell.number_format = '#,##0.00;[Red]-#,##0.00'
+        if ws_name == "Card Statements":
+            for cell in ws["K"][1:]:
+                cell.number_format = "0.00000000"
     workbook.calculation.fullCalcOnLoad = True
     workbook.calculation.forceFullCalc = True
     workbook.calculation.calcMode = "auto"

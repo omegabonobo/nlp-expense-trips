@@ -14,6 +14,7 @@ from nlp_expenses.generator import (
     assign_simple_expense_ids,
     extract_trip_expenses,
 )
+from nlp_expenses.fx_rates import WeeklyCadFxResolver
 from nlp_expenses.matching import apply_manual_matches, common_value, match_normalized_transactions, sum_values
 from nlp_expenses.extraction.statements import parse_statement_file
 from nlp_expenses.line_items import apply_line_item_review, save_line_item_review
@@ -98,7 +99,10 @@ def sync_reconciliation(
         errors = [error for report in reports for error in report.errors]
         if errors:
             raise StatementNormalizationError("\n".join(errors))
-        normalization = normalize_statement_files(statements)
+        normalization = normalize_statement_files(
+            statements,
+            fx_resolver=WeeklyCadFxResolver(trip_dir),
+        )
         if normalization.errors:
             raise StatementNormalizationError("\n".join(normalization.errors))
     else:
@@ -1289,6 +1293,38 @@ def aggregate_transaction_groups(
         purchase_amount = sum_values([leg.purchase_amount for leg in eligible]) if purchase_currency else None
         completeness = representative.cad_completeness
         cad_amount = sum_values([leg.cad_amount for leg in eligible]) if completeness == "complete" else None
+        rate_values = {
+            round(float(leg.cad_conversion_rate), 10)
+            for leg in eligible
+            if leg.cad_conversion_rate is not None
+        }
+        if len(rate_values) == 1:
+            cad_conversion_rate = next(iter(rate_values))
+        elif cad_amount is not None and purchase_amount not in (None, 0):
+            cad_conversion_rate = round(abs(cad_amount) / abs(purchase_amount), 10)
+        else:
+            cad_conversion_rate = None
+        conversion_methods = {
+            leg.cad_conversion_method for leg in eligible if leg.cad_conversion_method
+        }
+        conversion_routes = {
+            leg.cad_conversion_route for leg in eligible if leg.cad_conversion_route
+        }
+        conversion_sources = list(
+            dict.fromkeys(
+                leg.cad_conversion_source
+                for leg in eligible
+                if leg.cad_conversion_source
+            )
+        )
+        conversion_source_urls = list(
+            dict.fromkeys(
+                url
+                for leg in eligible
+                for url in leg.cad_conversion_source_urls
+                if url
+            )
+        )
         expense_id = common_value([leg.expense_id for leg in eligible])
         suggested_id = common_value([leg.suggested_expense_id for leg in eligible])
         expense = expenses_by_id.get(expense_id or "")
@@ -1323,6 +1359,29 @@ def aggregate_transaction_groups(
                 "purchase_currency": purchase_currency,
                 "cad_amount": cad_amount,
                 "cad_completeness": completeness,
+                "cad_conversion_rate": cad_conversion_rate,
+                "cad_conversion_week_start": common_value(
+                    [leg.cad_conversion_week_start for leg in eligible]
+                ),
+                "cad_conversion_week_end": common_value(
+                    [leg.cad_conversion_week_end for leg in eligible]
+                ),
+                "cad_conversion_method": (
+                    next(iter(conversion_methods))
+                    if len(conversion_methods) == 1
+                    else "mixed"
+                    if conversion_methods
+                    else ""
+                ),
+                "cad_conversion_route": (
+                    next(iter(conversion_routes))
+                    if len(conversion_routes) == 1
+                    else "mixed"
+                    if conversion_routes
+                    else ""
+                ),
+                "cad_conversion_source": "; ".join(conversion_sources),
+                "cad_conversion_source_urls": conversion_source_urls,
                 "match_eligible": bool(eligible),
                 "expense_file": source_file_key(expense.source_file) if expense else None,
                 "suggested_expense_file": source_file_key(suggested.source_file) if suggested else None,
@@ -1351,6 +1410,13 @@ def aggregate_transaction_groups(
                         "settlement_amount": leg.settlement_amount,
                         "settlement_currency": leg.settlement_currency,
                         "cad_amount": leg.cad_amount,
+                        "cad_conversion_rate": leg.cad_conversion_rate,
+                        "cad_conversion_week_start": leg.cad_conversion_week_start,
+                        "cad_conversion_week_end": leg.cad_conversion_week_end,
+                        "cad_conversion_method": leg.cad_conversion_method,
+                        "cad_conversion_route": leg.cad_conversion_route,
+                        "cad_conversion_source": leg.cad_conversion_source,
+                        "cad_conversion_source_urls": leg.cad_conversion_source_urls,
                         "normalization_status": leg.normalization_status,
                         "review_note": leg.review_note,
                     }

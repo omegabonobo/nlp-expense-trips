@@ -101,7 +101,10 @@ class UITests(unittest.TestCase):
         self.assertEqual(html.count('value="best"'), 1)
         self.assertIn("Receipt extraction method", html)
         self.assertIn("API charges may apply", html)
-        self.assertIn("there is no separate quality choice here", html)
+        self.assertIn(
+            "Public weekly FX data is fetched only when no exact CAD amount exists",
+            html,
+        )
         self.assertNotIn('name="quality"', html)
         self.assertRegex(html, r'<input type="radio" name="receipt-quality" value="best"[^>]*disabled')
         self.assertIn(str((self.root / ".env").resolve()), html)
@@ -437,6 +440,21 @@ class UITests(unittest.TestCase):
         expense_report = ivado_workbook["Expense Report"]
         self.assertEqual(expense_report["H9"].value, 95)
         self.assertEqual(expense_report["N9"].value, 95)
+        statement_headers = [
+            cell.value for cell in ivado_workbook["Card Statements"][1]
+        ]
+        self.assertEqual(
+            statement_headers[-7:],
+            [
+                "CAD Conversion Rate",
+                "Rate Week Start",
+                "Rate Week End",
+                "Conversion Method",
+                "Conversion Route",
+                "Rate Source",
+                "Rate Source URL(s)",
+            ],
+        )
         receipt_items = ivado_workbook["Receipt Items"]
         alcohol_row = next(
             row
