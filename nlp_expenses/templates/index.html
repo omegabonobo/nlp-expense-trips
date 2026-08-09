@@ -374,8 +374,8 @@
                 <div><strong>{{ line_review.summary.alcohol_count }}</strong><span>alcohol removed from IVADO</span></div>
                 <div><strong>{{ line_review.summary.excluded_count }}</strong><span>removed from IVADO</span></div>
               {% endif %}
-              <div class="{{ 'review' if line_review.summary.review_count else '' }}"><strong>{{ line_review.summary.review_count }}</strong><span>receipts need review</span></div>
-              <div><strong>{{ line_review.summary.ready_count }}</strong><span>receipts ready</span></div>
+              <div class="{{ 'review' if line_review.summary.review_count else '' }}"><strong id="receipt-review-count">{{ line_review.summary.review_count }}</strong><span>receipts need review</span></div>
+              <div><strong id="receipt-ready-count">{{ line_review.summary.ready_count }}</strong><span>receipts ready</span></div>
             </div>
             <div class="notice info">
               {% if trip.mode == 'ivado' %}
@@ -431,7 +431,7 @@
                           {{ 'disabled' if trip_busy or line_review.stale or receipt.field_issues or receipt.blocking }}>
                         <span>{{ 'Ready' if receipt.ready else 'Reviewed' }}</span>
                       </label>
-                      <span class="match-badge {{ receipt.status }}">{{ receipt.status|replace('_', ' ') }}</span>
+                      <span class="match-badge receipt-status-badge {{ receipt.status }}" data-source-file="{{ receipt.source_file }}">{{ receipt.status|replace('_', ' ') }}</span>
                       <button class="button secondary small edit-expense" data-source-file="{{ receipt.source_file }}"
                         {{ 'disabled' if trip_busy or line_review.stale }}>Edit expense</button>
                       <button class="button secondary small add-line-item" data-source-file="{{ receipt.source_file }}"
@@ -461,6 +461,7 @@
                             <td>
                               <input class="input compact-input line-item-description" value="{{ item.description }}"
                                 data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                                data-saved-value="{{ item.description }}" data-autosave-field="description"
                                 {{ 'disabled' if trip_busy or line_review.stale }}>
                               {% if item.synthetic %}<span class="synthetic-label">Generated review line</span>{% endif %}
                               {% if item.inclusion_overridden %}<small>User inclusion override</small>{% endif %}
@@ -468,6 +469,7 @@
                             <td><input class="input compact-input line-item-amount" type="number" min="0" step="0.01"
                               value="{{ '%.2f'|format(item.amount) if item.amount is not none else '' }}"
                               data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                              data-saved-value="{{ '%.2f'|format(item.amount) if item.amount is not none else '' }}" data-autosave-field="amount"
                               {{ 'disabled' if trip_busy or line_review.stale }}></td>
                             {% if trip.mode == 'ivado' %}
                               <td>
@@ -498,6 +500,7 @@
                                 {% else %}
                                   <select class="select compact-input line-item-ivado-reason"
                                     data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                                    data-saved-value="{{ item.ivado_exclusion_reason or '' }}" data-autosave-field="ivado_exclusion_reason"
                                     {{ 'disabled' if trip_busy or line_review.stale }}>
                                     {% for value in ['non_business', 'policy_cap', 'missing_documentation', 'other'] %}
                                       <option value="{{ value }}" {{ 'selected' if item.ivado_exclusion_reason == value }}>{{ value|replace('_', ' ')|title }}</option>
@@ -510,9 +513,8 @@
                               </td>
                             {% endif %}
                             <td class="line-actions">
-                              <button class="button secondary small save-line-item"
-                                data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
-                                {{ 'disabled' if trip_busy or line_review.stale }}>Save</button>
+                              <small class="line-save-status" data-source-file="{{ receipt.source_file }}"
+                                data-line-id="{{ item.line_id }}" aria-live="polite"></small>
                               <button class="icon-button remove-line-item"
                                 data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
                                 title="Remove line" {{ 'disabled' if trip_busy or line_review.stale }}>×</button>
@@ -524,17 +526,15 @@
                       </tbody>
                     </table>
                   </div>
-                  <div class="line-totals">
-                    <span>Receipt {{ '%.2f'|format(receipt.receipt_total) if receipt.receipt_total is not none else '—' }}</span>
-                    <span>Lines {{ '%.2f'|format(receipt.line_total) }}</span>
-                    <span>Arvine {{ '%.2f'|format(receipt.arvine_included_total) }}</span>
+                  <div class="line-totals" data-receipt-totals="{{ receipt.source_file }}">
+                    <span data-total-kind="receipt">Receipt {{ '%.2f'|format(receipt.receipt_total) if receipt.receipt_total is not none else '—' }}</span>
+                    <span data-total-kind="lines">Lines {{ '%.2f'|format(receipt.line_total) }}</span>
+                    <span data-total-kind="arvine">Arvine {{ '%.2f'|format(receipt.arvine_included_total) }}</span>
                     {% if trip.mode == 'ivado' %}
-                      <span>IVADO {{ '%.2f'|format(receipt.ivado_included_total) }}</span>
-                      <span>IVADO removed {{ '%.2f'|format(receipt.ivado_excluded_total) }}</span>
+                      <span data-total-kind="ivado">IVADO {{ '%.2f'|format(receipt.ivado_included_total) }}</span>
+                      <span data-total-kind="removed">IVADO removed {{ '%.2f'|format(receipt.ivado_excluded_total) }}</span>
                     {% endif %}
-                    {% if receipt.difference is not none and receipt.difference %}
-                      <strong>Difference {{ '%+.2f'|format(receipt.difference) }}</strong>
-                    {% endif %}
+                    <strong data-total-kind="difference" class="{{ 'hidden' if receipt.difference is none or not receipt.difference else '' }}">Difference {{ '%+.2f'|format(receipt.difference or 0) }}</strong>
                   </div>
                   {% if receipt.blocking %}
                     <div class="notice error">Excluded lines cannot be allocated safely until this receipt reconciles without an unreadable balancing line.</div>

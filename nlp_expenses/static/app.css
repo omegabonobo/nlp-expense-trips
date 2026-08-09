@@ -149,7 +149,11 @@ code { font-family: "SFMono-Regular", Consolas, monospace; color: #405149; overf
 .line-item-table td > span, .line-item-table td > small { margin-top: 4px; color: var(--muted); font-size: 9px; line-height: 1.35; }
 .compact-input { min-width: 120px; width: 100%; padding: 6px 7px; font-size: 10px; }
 .line-item-description { min-width: 210px; }
-.line-actions { display: flex; align-items: center; gap: 5px; }
+.line-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
+.line-save-status { min-width: 42px; color: var(--muted); font-size: 9px; text-align: right; white-space: nowrap; }
+.line-save-status.saving { color: var(--amber); }
+.line-save-status.saved { color: var(--green); }
+.line-save-status.error { color: var(--red); }
 .line-item-table tr.excluded { background: #f4f5f4; color: #737d77; }
 .line-item-table tr.excluded td:nth-child(2) strong { text-decoration: line-through; }
 .include-switch, .alcohol-check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 10px; font-weight: 750; }

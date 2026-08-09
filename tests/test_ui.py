@@ -667,6 +667,10 @@ class UITests(unittest.TestCase):
         self.assertIn('class="currency-review-form"', html)
         self.assertIn('class="receipt-reviewed"', html)
         self.assertIn('class="line-item-reviewed"', html)
+        self.assertIn('data-autosave-field="description"', html)
+        self.assertIn('data-autosave-field="amount"', html)
+        self.assertIn('class="line-save-status"', html)
+        self.assertNotIn('class="button secondary small save-line-item"', html)
         self.assertIn("Click outside this window or press Esc to close", html)
 
         preview = self.client.get(

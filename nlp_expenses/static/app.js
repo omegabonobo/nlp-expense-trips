@@ -3,6 +3,7 @@ const csrf = document.querySelector('meta[name="csrf-token"]').content;
 const selectedTrip = state.selected?.name;
 let sourceFileSignature = state.selected?.file_state?.signature || "";
 let sourceFilePollTimer = null;
+let lineItemSaveQueue = Promise.resolve();
 
 async function api(url, options = {}) {
   const headers = { ...(options.headers || {}) };
@@ -449,25 +450,112 @@ document.querySelectorAll(".currency-review-form").forEach(form => {
   });
 });
 
-document.querySelectorAll(".save-line-item").forEach(button => button.addEventListener("click", async () => {
-  const selector = `[data-source-file="${CSS.escape(button.dataset.sourceFile)}"][data-line-id="${CSS.escape(button.dataset.lineId)}"]`;
-  const description = document.querySelector(`.line-item-description${selector}`)?.value || "";
-  const amount = document.querySelector(`.line-item-amount${selector}`)?.value || "";
-  const ivadoExclusionReason = document.querySelector(`.line-item-ivado-reason${selector}`)?.value || "";
-  button.disabled = true;
-  try {
-    await api(`/api/trips/${encodeURIComponent(selectedTrip)}/line-items/item`, {
-      method: "POST",
-      body: JSON.stringify({
-        source_file: button.dataset.sourceFile,
-        line_id: button.dataset.lineId,
-        fields: { description, amount, ivado_exclusion_reason: ivadoExclusionReason }
-      })
-    });
-    toast("Receipt line saved.");
-    window.location.reload();
-  } catch (failure) { toast(failure.message, true); button.disabled = false; }
-}));
+function normalizedLineItemValue(input, field) {
+  if (field === "description") return String(input.value || "").trim().replace(/\s+/g, " ");
+  if (field === "amount") {
+    const value = Number(input.value);
+    return input.value !== "" && Number.isFinite(value) ? value.toFixed(2) : "";
+  }
+  return String(input.value || "");
+}
+
+function lineItemStatus(input, message, kind = "") {
+  const selector = `[data-source-file="${CSS.escape(input.dataset.sourceFile)}"][data-line-id="${CSS.escape(input.dataset.lineId)}"]`;
+  const status = document.querySelector(`.line-save-status${selector}`);
+  if (!status) return;
+  status.textContent = message;
+  status.className = `line-save-status${kind ? ` ${kind}` : ""}`;
+}
+
+function updateAutosavedReceipt(payload, sourceFile, lineId) {
+  const review = payload.line_item_review;
+  const receipt = review?.receipts?.find(value => value.source_file === sourceFile);
+  if (!receipt) return;
+  if (state.selected) state.selected.line_item_review = review;
+  if (payload.trip?.file_state?.signature) sourceFileSignature = payload.trip.file_state.signature;
+
+  const selector = `[data-source-file="${CSS.escape(sourceFile)}"]`;
+  const lineSelector = `${selector}[data-line-id="${CSS.escape(lineId)}"]`;
+  const lineReviewed = document.querySelector(`.line-item-reviewed${lineSelector}`);
+  if (lineReviewed) {
+    lineReviewed.checked = false;
+    lineReviewed.closest(".review-check")?.classList.remove("ready");
+    const label = lineReviewed.closest(".review-check")?.querySelector("span");
+    if (label) label.textContent = "Review";
+  }
+  const receiptReviewed = document.querySelector(`.receipt-reviewed${selector}`);
+  if (receiptReviewed) {
+    receiptReviewed.checked = false;
+    receiptReviewed.closest(".review-check")?.classList.remove("ready");
+    const label = receiptReviewed.closest(".review-check")?.querySelector("span");
+    if (label) label.textContent = "Reviewed";
+  }
+  const badge = document.querySelector(`.receipt-status-badge${selector}`);
+  if (badge) {
+    badge.classList.remove("ready", "review");
+    badge.classList.add(receipt.status);
+    badge.textContent = receipt.status.replaceAll("_", " ");
+  }
+
+  const totals = document.querySelector(`[data-receipt-totals="${CSS.escape(sourceFile)}"]`);
+  const setTotal = (kind, label, value) => {
+    const element = totals?.querySelector(`[data-total-kind="${kind}"]`);
+    if (element) element.textContent = `${label} ${value == null ? "—" : Number(value).toFixed(2)}`;
+  };
+  setTotal("receipt", "Receipt", receipt.receipt_total);
+  setTotal("lines", "Lines", receipt.line_total);
+  setTotal("arvine", "Arvine", receipt.arvine_included_total);
+  setTotal("ivado", "IVADO", receipt.ivado_included_total);
+  setTotal("removed", "IVADO removed", receipt.ivado_excluded_total);
+  const difference = totals?.querySelector('[data-total-kind="difference"]');
+  if (difference) {
+    const value = Number(receipt.difference || 0);
+    difference.textContent = `Difference ${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
+    difference.classList.toggle("hidden", !value);
+  }
+  const reviewCount = document.getElementById("receipt-review-count");
+  const readyCount = document.getElementById("receipt-ready-count");
+  if (reviewCount) reviewCount.textContent = review.summary.review_count;
+  if (readyCount) readyCount.textContent = review.summary.ready_count;
+}
+
+function autosaveLineItem(input) {
+  const field = input.dataset.autosaveField;
+  const value = normalizedLineItemValue(input, field);
+  if (value === input.dataset.savedValue) return;
+  if (field === "description" && !value) {
+    lineItemStatus(input, "Description required", "error");
+    return;
+  }
+  if (field === "amount" && (!value || Number(value) < 0)) {
+    lineItemStatus(input, "Invalid amount", "error");
+    return;
+  }
+  lineItemStatus(input, "Saving…", "saving");
+  lineItemSaveQueue = lineItemSaveQueue.catch(() => {}).then(async () => {
+    try {
+      const payload = await api(`/api/trips/${encodeURIComponent(selectedTrip)}/line-items/item`, {
+        method: "POST",
+        body: JSON.stringify({
+          source_file: input.dataset.sourceFile,
+          line_id: input.dataset.lineId,
+          fields: { [field]: value }
+        })
+      });
+      input.dataset.savedValue = value;
+      updateAutosavedReceipt(payload, input.dataset.sourceFile, input.dataset.lineId);
+      const latestValueWasSaved = normalizedLineItemValue(input, field) === value;
+      lineItemStatus(input, latestValueWasSaved ? "Saved" : "Saving…", latestValueWasSaved ? "saved" : "saving");
+    } catch (failure) {
+      lineItemStatus(input, "Not saved", "error");
+      toast(failure.message, true);
+    }
+  });
+}
+
+document.querySelectorAll("[data-autosave-field]").forEach(input => {
+  input.addEventListener(input.tagName === "SELECT" ? "change" : "blur", () => autosaveLineItem(input));
+});
 
 document.querySelectorAll(".add-line-item").forEach(button => button.addEventListener("click", async () => {
   const description = window.prompt("Description for the new receipt line:", "");
