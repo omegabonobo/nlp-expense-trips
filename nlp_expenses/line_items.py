@@ -21,7 +21,7 @@ from nlp_expenses.trips import (
 
 
 LINE_ITEM_REVIEW_FILE = ".nlp-expenses-line-items.json"
-LINE_ITEM_REVIEW_VERSION = 3
+LINE_ITEM_REVIEW_VERSION = 4
 PAID_BY_VALUES = {"employee_personal", "arvine_corporate_bmo"}
 IVADO_EXCLUSION_REASONS = {
     "alcohol",
@@ -55,6 +55,7 @@ EXPENSE_REVIEW_FIELDS = EXPENSE_TEXT_FIELDS | EXPENSE_NUMERIC_FIELDS | {
     "paid_by",
     "number_of_people",
     "manual_cad_override",
+    "reviewed",
 }
 
 
@@ -186,6 +187,8 @@ def save_line_item_review(
             "extracted_line_items": extracted_lines,
             "extracted": extracted,
             "field_overrides": {},
+            "reviewed": False,
+            "reviewed_at": None,
         }
         receipt.update(extracted)
         receipt["included_in_arvine"] = True
@@ -247,6 +250,8 @@ def line_item_review_view(trip_dir: Path, state: dict | None = None) -> dict:
                 1 for receipt in receipts if not receipt.get("included_in_arvine", True)
             ),
             "review_count": sum(1 for receipt in receipts if receipt.get("status") == "review"),
+            "ready_count": sum(1 for receipt in receipts if receipt.get("status") == "ready"),
+            "line_review_count": sum(1 for item in all_items if not item.get("reviewed")),
             "blocking_count": sum(1 for receipt in receipts if receipt.get("blocking")),
             "field_issue_count": sum(len(receipt.get("field_issues", [])) for receipt in receipts),
         },
@@ -262,6 +267,9 @@ def set_expense_review(trip_dir: Path, source_file: str, fields: dict) -> dict:
     if unknown:
         raise ValueError(f"Unsupported expense fields: {', '.join(sorted(unknown))}.")
     normalized = validate_expense_fields(fields, receipt)
+    if set(normalized) - {"reviewed"}:
+        receipt["reviewed"] = False
+        receipt["reviewed_at"] = None
     if normalized.get("included_in_arvine") is False:
         raise ValueError(
             "Arvine includes every uploaded receipt. Remove the receipt file if it does not belong to the trip."
@@ -277,11 +285,22 @@ def set_expense_review(trip_dir: Path, source_file: str, fields: dict) -> dict:
     overrides = receipt.setdefault("field_overrides", {})
     for field, value in normalized.items():
         receipt[field] = value
+        if field == "reviewed":
+            receipt["reviewed_at"] = (
+                datetime.now().isoformat(timespec="seconds") if value else None
+            )
+            if value:
+                for item in receipt.get("line_items", []):
+                    item["reviewed"] = True
+                    item["reviewed_at"] = receipt["reviewed_at"]
         if field == "included":
             target = "included_in_ivado" if state.get("mode") == "ivado" else "included_in_arvine"
             receipt[target] = value
         if field == "paid_by":
             receipt["paid_by_overridden"] = value != receipt.get("auto_paid_by", "employee_personal")
+        if field == "reviewed":
+            overrides.pop(field, None)
+            continue
         if values_differ(value, extracted.get(field)):
             overrides[field] = value
         else:
@@ -356,8 +375,12 @@ def add_line_item(
             "synthetic": False,
             "manual": True,
             "updated_at": datetime.now().isoformat(timespec="seconds"),
+            "reviewed": False,
+            "reviewed_at": None,
         }
     )
+    receipt["reviewed"] = False
+    receipt["reviewed_at"] = None
     synchronize_receipt_aliases(receipt, state.get("mode") or "arvine")
     recompute_receipt(receipt, state.get("mode") or "arvine")
     save_line_item_review_state(trip_dir, state)
@@ -376,6 +399,8 @@ def remove_line_item(trip_dir: Path, source_file: str, line_id: str) -> dict:
     removed = dict(items.pop(index))
     removed["removed_at"] = datetime.now().isoformat(timespec="seconds")
     receipt.setdefault("removed_line_items", []).append(removed)
+    receipt["reviewed"] = False
+    receipt["reviewed_at"] = None
     recompute_receipt(receipt, state.get("mode") or "arvine")
     save_line_item_review_state(trip_dir, state)
     return line_item_review_view(trip_dir, state)
@@ -401,10 +426,16 @@ def set_line_item_review(
         "description",
         "amount",
         "note",
+        "reviewed",
     }
     unknown = set(fields) - supported
     if unknown:
         raise ValueError(f"Unsupported line-item fields: {', '.join(sorted(unknown))}.")
+    if set(fields) - {"reviewed"}:
+        item["reviewed"] = False
+        item["reviewed_at"] = None
+        receipt["reviewed"] = False
+        receipt["reviewed_at"] = None
     if "included" in fields:
         if not isinstance(fields["included"], bool):
             raise ValueError("Included must be true or false.")
@@ -474,6 +505,16 @@ def set_line_item_review(
         item["amount"] = amount
     if "note" in fields:
         item["inclusion_note"] = str(fields["note"] or "").strip()[:500]
+    if "reviewed" in fields:
+        if not isinstance(fields["reviewed"], bool):
+            raise ValueError("Reviewed must be true or false.")
+        item["reviewed"] = fields["reviewed"]
+        item["reviewed_at"] = (
+            datetime.now().isoformat(timespec="seconds") if item["reviewed"] else None
+        )
+        if not item["reviewed"]:
+            receipt["reviewed"] = False
+            receipt["reviewed_at"] = None
     item["updated_at"] = datetime.now().isoformat(timespec="seconds")
     synchronize_receipt_aliases(receipt, state.get("mode") or "arvine")
     recompute_receipt(receipt, state.get("mode") or "arvine")
@@ -489,6 +530,8 @@ def reset_receipt_review(trip_dir: Path, source_file: str) -> dict:
     receipt["field_overrides"] = {}
     receipt["paid_by"] = receipt.get("auto_paid_by", "employee_personal")
     receipt["paid_by_overridden"] = False
+    receipt["reviewed"] = False
+    receipt["reviewed_at"] = None
     receipt["receipt_total"] = receipt.get("amount")
     baseline_lines = receipt.get("extracted_line_items")
     if isinstance(baseline_lines, list):
@@ -510,6 +553,8 @@ def reset_receipt_review(trip_dir: Path, source_file: str) -> dict:
         item["alcohol_overridden"] = False
         item["inclusion_note"] = ""
         item["updated_at"] = None
+        item["reviewed"] = False
+        item["reviewed_at"] = None
         restore_automatic_alcohol(item)
     synchronize_receipt_aliases(receipt, state.get("mode") or "arvine")
     recompute_receipt(receipt, state.get("mode") or "arvine")
@@ -569,7 +614,7 @@ def effective_review_note(receipt: dict) -> str:
 
     note = str(receipt.get("review_note") or "")
     overrides = receipt.get("field_overrides") if isinstance(receipt.get("field_overrides"), dict) else {}
-    if receipt.get("status") in {"ok", "not_applicable"}:
+    if receipt.get("status") in {"ready", "ok", "not_applicable"}:
         note = re.sub(
             r"Line items total .*?review line items/alcohol\.\s*",
             "",
@@ -616,6 +661,8 @@ def recompute_receipt(receipt: dict, mode: str | None = None) -> None:
     migrate_receipt_contract_fields(receipt, mode)
     items = [item for item in receipt.get("line_items", []) if isinstance(item, dict)]
     receipt["line_items"] = items
+    for item in items:
+        item["status"] = "ready" if item.get("reviewed") else "review"
     values = [float(item["amount"]) for item in items if isinstance(item.get("amount"), (int, float))]
     arvine_values = [
         float(item["amount"])
@@ -648,13 +695,17 @@ def recompute_receipt(receipt: dict, mode: str | None = None) -> None:
     has_gap = any(item.get("description") == "Unreconciled meal item - review" for item in items)
     reconciled = difference is not None and abs(difference) <= tolerance
     if not is_meal:
-        status = "not_applicable"
+        automatic_status = "not_applicable"
     elif not reconciled or has_gap:
-        status = "review"
+        automatic_status = "review"
     else:
-        status = "ok"
+        automatic_status = "ok"
     has_exclusions = excluded_total > 0.005
     blocking = bool(is_meal and has_exclusions and (not reconciled or has_gap))
+    field_issues = expense_field_issues(receipt)
+    all_lines_reviewed = all(bool(item.get("reviewed")) for item in items)
+    ready = bool(receipt.get("reviewed")) and all_lines_reviewed and not blocking and not field_issues
+    status = "ready" if ready else "review"
     claimable_ratio = (
         round(max(0.0, min(1.0, included_total / line_total)), 8)
         if has_exclusions and reconciled and line_total > 0
@@ -672,9 +723,12 @@ def recompute_receipt(receipt: dict, mode: str | None = None) -> None:
             "difference": difference,
             "reconciled": reconciled,
             "status": status,
+            "automatic_status": automatic_status,
+            "ready": ready,
+            "all_lines_reviewed": all_lines_reviewed,
             "blocking": blocking,
             "claimable_ratio": claimable_ratio,
-            "field_issues": expense_field_issues(receipt),
+            "field_issues": field_issues,
         }
     )
 
@@ -717,6 +771,8 @@ def serialize_line_item(item: LineItem, line_id: str, mode: str) -> dict:
         "inclusion_note": "",
         "synthetic": bool(item.synthetic),
         "updated_at": None,
+        "reviewed": False,
+        "reviewed_at": None,
     }
 
 
@@ -746,6 +802,8 @@ def preserve_line_decisions(automatic: dict, stored: dict) -> dict:
     if stored.get("manual"):
         automatic["manual"] = True
     automatic["updated_at"] = stored.get("updated_at")
+    automatic["reviewed"] = bool(stored.get("reviewed"))
+    automatic["reviewed_at"] = stored.get("reviewed_at")
     normalize_line_program_decisions(automatic)
     return automatic
 
@@ -840,10 +898,11 @@ def preserve_expense_decisions(automatic: dict, stored: dict) -> None:
     overrides = stored.get("field_overrides") if isinstance(stored.get("field_overrides"), dict) else {}
     if not overrides:
         # Migration path for review snapshots created before expense-level editing.
-        for field in EXPENSE_REVIEW_FIELDS:
+        for field in EXPENSE_REVIEW_FIELDS - {"reviewed"}:
             if field in stored and values_differ(stored.get(field), old_extracted.get(field, extracted.get(field))):
                 overrides[field] = stored.get(field)
     overrides = dict(overrides)
+    overrides.pop("reviewed", None)
     if not stored.get("paid_by_overridden"):
         overrides.pop("paid_by", None)
     for field, value in overrides.items():
@@ -857,6 +916,8 @@ def preserve_expense_decisions(automatic: dict, stored: dict) -> None:
         dict(item) for item in stored.get("removed_line_items", []) if isinstance(item, dict)
     ]
     automatic["updated_at"] = stored.get("updated_at")
+    automatic["reviewed"] = bool(stored.get("reviewed"))
+    automatic["reviewed_at"] = stored.get("reviewed_at")
 
 
 def validate_expense_fields(fields: dict, current: dict) -> dict:
@@ -923,6 +984,11 @@ def validate_expense_fields(fields: dict, current: dict) -> dict:
                     errors[field] = "The manual CAD amount must be greater than zero."
                 else:
                     normalized[field] = manual_cad
+        elif field == "reviewed":
+            if not isinstance(value, bool):
+                errors[field] = "Reviewed must be true or false."
+            else:
+                normalized[field] = value
     if "currency" in normalized:
         normalized["currency"] = normalized["currency"].upper()
         if normalized["currency"] and (
@@ -1070,6 +1136,8 @@ def synchronize_receipt_aliases(receipt: dict, mode: str) -> None:
 
 def migrate_line_contract_fields(item: dict, mode: str) -> None:
     legacy_included = bool(item.get("included", True))
+    item.setdefault("reviewed", False)
+    item.setdefault("reviewed_at", None)
     if mode == "arvine":
         item["is_alcohol"] = False
         item["auto_is_alcohol"] = False
@@ -1119,6 +1187,8 @@ def migrate_receipt_contract_fields(receipt: dict, mode: str) -> None:
     receipt.setdefault("paid_by", "employee_personal")
     receipt.setdefault("auto_paid_by", "employee_personal")
     receipt.setdefault("paid_by_overridden", False)
+    receipt.setdefault("reviewed", False)
+    receipt.setdefault("reviewed_at", None)
     for item in receipt.get("line_items", []):
         if isinstance(item, dict):
             migrate_line_contract_fields(item, mode)
@@ -1169,11 +1239,7 @@ def load_line_item_review_state(trip_dir: Path) -> dict | None:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if not isinstance(state, dict) or state.get("version") not in {
-        1,
-        2,
-        LINE_ITEM_REVIEW_VERSION,
-    }:
+    if not isinstance(state, dict) or state.get("version") not in {1, 2, 3, LINE_ITEM_REVIEW_VERSION}:
         return None
     mode = str(state.get("mode") or trip_mode(trip_dir))
     for receipt in state.get("receipts", []):
@@ -1262,6 +1328,8 @@ def empty_line_item_review() -> dict:
             "arvine_excluded_count": 0,
             "excluded_expense_count": 0,
             "review_count": 0,
+            "ready_count": 0,
+            "line_review_count": 0,
             "blocking_count": 0,
             "field_issue_count": 0,
         },

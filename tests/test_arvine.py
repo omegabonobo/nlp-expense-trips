@@ -549,6 +549,45 @@ class ArvineTests(unittest.TestCase):
         self.assertTrue(all(item.match_status == "auto" for item in transactions))
         self.assertTrue(all(item.cad_completeness == "partial" for item in transactions))
 
+    def test_matching_uses_shared_receipt_weekly_fx_cad_estimate(self):
+        expense = Expense(
+            source_file=Path("shared-dinner.pdf"),
+            expense_id="EXP-QAR",
+            date="2026-07-10",
+            supplier_name="Dinner",
+            expense_type="meal",
+            amount=364,
+            currency="QAR",
+            number_of_people=2,
+        )
+        transaction = NormalizedTransaction(
+            source_file=Path("new-card.csv"),
+            source_row=8,
+            provider="generic",
+            account_label="Corporate ••••4412",
+            transaction_group_id="GROUP-CAD",
+            funding_leg_id="GROUP-CAD:1",
+            transaction_date="2026-07-10",
+            description="DINNER CHARGE",
+            match_eligible=True,
+            purchase_amount=69.80,
+            purchase_currency="CAD",
+            settlement_amount=69.80,
+            settlement_currency="CAD",
+            cad_amount=69.80,
+            cad_completeness="complete",
+        )
+
+        match_normalized_transactions(
+            [expense],
+            [transaction],
+            estimated_cad_by_expense={"shared-dinner.pdf": 69.16},
+        )
+
+        self.assertEqual(transaction.expense_id, "EXP-QAR")
+        self.assertEqual(transaction.match_status, "auto")
+        self.assertGreaterEqual(transaction.match_confidence, 0.72)
+
     def test_arvine_workbook_has_review_sheets_formulas_and_editable_matching(self):
         with tempfile.TemporaryDirectory() as tmp:
             trip = Path(tmp) / "202607_montreal"

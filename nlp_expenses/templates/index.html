@@ -375,6 +375,7 @@
                 <div><strong>{{ line_review.summary.excluded_count }}</strong><span>removed from IVADO</span></div>
               {% endif %}
               <div class="{{ 'review' if line_review.summary.review_count else '' }}"><strong>{{ line_review.summary.review_count }}</strong><span>receipts need review</span></div>
+              <div><strong>{{ line_review.summary.ready_count }}</strong><span>receipts ready</span></div>
             </div>
             <div class="notice info">
               {% if trip.mode == 'ivado' %}
@@ -391,7 +392,8 @@
                     <div>
                       <strong>{{ receipt.vendor or receipt.source_file }}</strong>
                       <span>
-                        {{ receipt.source_file }} · {{ receipt.expense_type or 'type missing' }} · {{ receipt.currency or '' }} ·
+                        <button type="button" class="receipt-file-link receipt-preview" data-source-file="{{ receipt.source_file }}">{{ receipt.source_file }}</button>
+                        · {{ receipt.expense_type or 'type missing' }} · {{ receipt.currency or '' }} ·
                         {{ receipt.number_of_people }} {{ 'person' if receipt.number_of_people == 1 else 'people' }} ·
                         {% if trip.mode == 'ivado' %}
                           {{ 'removed from IVADO' if not receipt.included_in_ivado else 'included in Arvine and IVADO' }}
@@ -402,6 +404,16 @@
                       {% if receipt.field_issues %}<small class="field-issue">{{ receipt.field_issues|join(' · ') }}</small>{% endif %}
                     </div>
                     <div class="line-receipt-actions">
+                      <form class="currency-review-form" data-source-file="{{ receipt.source_file }}">
+                        <label>
+                          Currency
+                          <input class="input currency-review-input" name="currency" maxlength="3"
+                            value="{{ receipt.currency or '' }}" placeholder="CAD"
+                            {{ 'disabled' if trip_busy or line_review.stale }}>
+                        </label>
+                        <button class="button secondary small" type="submit"
+                          {{ 'disabled' if trip_busy or line_review.stale }}>Save</button>
+                      </form>
                       <form class="people-review-form" data-source-file="{{ receipt.source_file }}">
                         <label>
                           Employees sharing bill
@@ -412,7 +424,14 @@
                         <button class="button secondary small" type="submit"
                           {{ 'disabled' if trip_busy or line_review.stale }}>Save share</button>
                       </form>
-                      <span class="match-badge {{ 'review' if receipt.status == 'review' else 'ok' }}">{{ receipt.status|replace('_', ' ') }}</span>
+                      <label class="review-check receipt-review-check {{ 'ready' if receipt.ready }}"
+                        title="{{ 'Correct required receipt fields before marking ready.' if receipt.field_issues else 'Resolve the receipt total before marking ready.' if receipt.blocking else 'Mark this receipt and all its lines as reviewed.' }}">
+                        <input type="checkbox" class="receipt-reviewed" data-source-file="{{ receipt.source_file }}"
+                          {{ 'checked' if receipt.reviewed }}
+                          {{ 'disabled' if trip_busy or line_review.stale or receipt.field_issues or receipt.blocking }}>
+                        <span>{{ 'Ready' if receipt.ready else 'Reviewed' }}</span>
+                      </label>
+                      <span class="match-badge {{ receipt.status }}">{{ receipt.status|replace('_', ' ') }}</span>
                       <button class="button secondary small edit-expense" data-source-file="{{ receipt.source_file }}"
                         {{ 'disabled' if trip_busy or line_review.stale }}>Edit expense</button>
                       <button class="button secondary small add-line-item" data-source-file="{{ receipt.source_file }}"
@@ -424,13 +443,21 @@
                   <div class="line-item-table-wrap">
                     <table class="line-item-table">
                       {% if trip.mode == 'ivado' %}
-                        <thead><tr><th>Receipt line</th><th>Amount</th><th>Alcohol</th><th>IVADO claim</th><th>IVADO exclusion / detection</th><th></th></tr></thead>
+                        <thead><tr><th>Reviewed</th><th>Receipt line</th><th>Amount</th><th>Alcohol</th><th>IVADO claim</th><th>IVADO exclusion / detection</th><th></th></tr></thead>
                       {% else %}
-                        <thead><tr><th>Receipt line</th><th>Amount</th><th></th></tr></thead>
+                        <thead><tr><th>Reviewed</th><th>Receipt line</th><th>Amount</th><th></th></tr></thead>
                       {% endif %}
                       <tbody>
                         {% for item in receipt.line_items %}
                           <tr class="{{ 'excluded' if trip.mode == 'ivado' and not item.included_in_ivado else '' }}">
+                            <td>
+                              <label class="review-check {{ 'ready' if item.reviewed }}" title="Mark this receipt line as reviewed">
+                                <input type="checkbox" class="line-item-reviewed"
+                                  data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                                  {{ 'checked' if item.reviewed }} {{ 'disabled' if trip_busy or line_review.stale }}>
+                                <span>{{ 'Ready' if item.reviewed else 'Review' }}</span>
+                              </label>
+                            </td>
                             <td>
                               <input class="input compact-input line-item-description" value="{{ item.description }}"
                                 data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
@@ -492,7 +519,7 @@
                             </td>
                           </tr>
                         {% else %}
-                          <tr><td colspan="{{ 6 if trip.mode == 'ivado' else 3 }}" class="empty-line">No line items were extracted for this receipt. Add one manually.</td></tr>
+                          <tr><td colspan="{{ 7 if trip.mode == 'ivado' else 4 }}" class="empty-line">No line items were extracted for this receipt. Add one manually.</td></tr>
                         {% endfor %}
                       </tbody>
                     </table>
@@ -511,8 +538,10 @@
                   </div>
                   {% if receipt.blocking %}
                     <div class="notice error">Excluded lines cannot be allocated safely until this receipt reconciles without an unreadable balancing line.</div>
-                  {% elif receipt.status == 'review' %}
+                  {% elif receipt.automatic_status == 'review' %}
                     <div class="notice warning">Review the generated balancing line or receipt total. No exclusion is blocked unless claimable lines are deactivated.</div>
+                  {% elif receipt.status == 'review' %}
+                    <div class="notice info">Check the receipt fields and lines, then use the Reviewed checkmark to move this expense to Ready.</div>
                   {% endif %}
                 </article>
               {% endfor %}
@@ -668,6 +697,7 @@
                       <th>Original total</th>
                       <th>Extraction</th>
                       <th>CAD used and FX</th>
+                      <th>Card match</th>
                       <th></th>
                     </tr>
                   </thead>
@@ -677,7 +707,7 @@
                         <td>
                           <strong>{{ expense.vendor or expense.source_file }}</strong>
                           <span>{{ expense.date or 'date missing' }} · {{ expense.expense_type or 'type missing' }}</span>
-                          <small>{{ expense.source_file }}</small>
+                          <button type="button" class="receipt-file-link receipt-preview" data-source-file="{{ expense.source_file }}">{{ expense.source_file }}</button>
                         </td>
                         <td>
                           <strong>{{ '%.2f'|format(expense.amount) if expense.amount is not none else '?' }} {{ expense.currency or '' }}</strong>
@@ -703,6 +733,31 @@
                             <strong>Unavailable</strong>
                             <span>Map complete statement funding or add a manual CAD amount</span>
                           {% endif %}
+                        </td>
+                        <td class="receipt-match-cell">
+                          {% if expense.statement_matches %}
+                            <div class="current-matches">
+                              {% for match in expense.statement_matches %}
+                                <span>
+                                  {{ match.provider|upper }} {{ match.account_label }} · {{ match.transaction_date }} ·
+                                  {{ '%.2f'|format(match.purchase_amount) if match.purchase_amount is not none else '?' }} {{ match.purchase_currency or '' }}
+                                  {% if match.allocation_status in [none, 'none'] %}
+                                    <button type="button" class="receipt-unmatch" data-group-id="{{ match.group_id }}" title="Remove this match">×</button>
+                                  {% endif %}
+                                </span>
+                              {% endfor %}
+                            </div>
+                          {% else %}
+                            <small>No card transaction matched yet.</small>
+                          {% endif %}
+                          <button type="button" class="button secondary small open-receipt-matcher"
+                            data-source-file="{{ expense.source_file }}"
+                            {{ 'disabled' if trip_busy or reconciliation.stale }}>
+                            {{ 'Change card match' if expense.statement_matches else 'Match card transaction' }}
+                          </button>
+                          <small>
+                            {{ expense.match_suggestions|length }} prioritized transaction(s). Search every uploaded card in the matcher.
+                          </small>
                         </td>
                         <td>
                           <button class="button secondary edit-expense" data-source-file="{{ expense.source_file }}"
@@ -1495,6 +1550,39 @@
       </form>
     </dialog>
   {% endif %}
+
+  <dialog id="receipt-preview-dialog" class="modal receipt-preview-modal">
+    <div class="receipt-preview-shell">
+      <div class="modal-heading">
+        <div><p class="eyebrow">Receipt source</p><h2 id="receipt-preview-title">Receipt</h2></div>
+        <button type="button" class="icon-button close-dialog">×</button>
+      </div>
+      <iframe id="receipt-preview-frame" title="Receipt preview"></iframe>
+      <div class="modal-actions">
+        <span class="help-text">Click outside this window or press Esc to close.</span>
+        <a class="button secondary" id="receipt-preview-full" target="_blank" rel="noopener">Open full window</a>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="card-match-dialog" class="modal card-match-modal">
+    <div class="card-match-shell">
+      <div class="modal-heading">
+        <div><p class="eyebrow">Receipt card match</p><h2 id="card-match-title">Choose a transaction</h2></div>
+        <button type="button" class="icon-button close-dialog">×</button>
+      </div>
+      <p class="help-text" id="card-match-receipt"></p>
+      <div class="card-match-filters">
+        <label class="field-label">Search transactions<input class="input" id="card-match-search" placeholder="Merchant, date, amount…"></label>
+        <label class="field-label">Card / account<select class="select" id="card-match-account"><option value="">All cards and accounts</option></select></label>
+      </div>
+      <div id="card-match-results" class="card-match-results"></div>
+      <div class="modal-actions">
+        <span class="help-text">Likely matches appear first; every eligible uploaded-card transaction remains searchable.</span>
+        <button type="button" class="button secondary close-dialog">Cancel</button>
+      </div>
+    </div>
+  </dialog>
 
   <div id="toast" class="toast hidden"></div>
   <script src="{{ url_for('static', filename='app.js') }}"></script>

@@ -67,6 +67,7 @@ from nlp_expenses.ui_services import (
     delete_trip,
     open_workbook,
     remove_source_file,
+    resolve_receipt,
     resolve_trip,
     resolve_manifest,
     resolve_workbook,
@@ -611,6 +612,11 @@ def create_app(root: Path, access_token: str | None = None, job_manager: JobMana
     def download_workbook(trip_name: str):
         path = resolve_workbook(root, trip_name, request.args.get("filename", ""))
         return send_file(path, as_attachment=True, download_name=path.name)
+
+    @app.get("/api/trips/<trip_name>/receipt")
+    def view_receipt(trip_name: str):
+        path = resolve_receipt(root, trip_name, request.args.get("filename", ""))
+        return send_file(path, as_attachment=False, download_name=path.name, conditional=True)
 
     @app.get("/api/trips/<trip_name>/download-manifest")
     def download_manifest(trip_name: str):

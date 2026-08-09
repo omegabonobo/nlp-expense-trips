@@ -26,7 +26,11 @@ def match_transactions(expenses: list[Expense], transactions: list[StatementTran
     enrich_expenses_from_statements(expenses, transactions)
 
 
-def match_normalized_transactions(expenses: list[Expense], transactions: list[NormalizedTransaction]) -> None:
+def match_normalized_transactions(
+    expenses: list[Expense],
+    transactions: list[NormalizedTransaction],
+    estimated_cad_by_expense: dict[str, float] | None = None,
+) -> None:
     groups: dict[str, list[NormalizedTransaction]] = defaultdict(list)
     for transaction in transactions:
         groups[transaction.transaction_group_id].append(transaction)
@@ -52,6 +56,7 @@ def match_normalized_transactions(expenses: list[Expense], transactions: list[No
                 purchase_amount,
                 purchase_currency,
                 cad_amount,
+                (estimated_cad_by_expense or {}).get(source_file_key(expense.source_file)),
             )
             if score > best_score:
                 best_score = score
@@ -134,6 +139,7 @@ def normalized_match_score(
     purchase_amount: float | None,
     purchase_currency: str | None,
     cad_amount: float | None,
+    estimated_expense_cad: float | None = None,
 ) -> float:
     score = 0.0
     date_delta = days_between(expense.date, transaction_date)
@@ -142,16 +148,23 @@ def normalized_match_score(
             score += 0.3
         elif date_delta <= 3:
             score += max(0.0, 0.24 - 0.05 * date_delta)
-    if expense.amount is not None:
+    receipt_amount = shared_receipt_amount(expense)
+    if receipt_amount is not None:
         if (
             purchase_amount is not None
             and expense.currency == purchase_currency
-            and close_amount(expense.amount, abs(purchase_amount))
+            and close_amount(receipt_amount, abs(purchase_amount))
         ):
             score += 0.36
-        elif expense.currency == "CAD" and cad_amount is not None and close_amount(expense.amount, abs(cad_amount)):
+        elif expense.currency == "CAD" and cad_amount is not None and close_amount(receipt_amount, abs(cad_amount)):
             score += 0.36
-        elif cad_amount is not None and close_amount(expense.amount, abs(cad_amount)):
+        elif (
+            estimated_expense_cad is not None
+            and cad_amount is not None
+            and close_fx_amount(estimated_expense_cad, abs(cad_amount))
+        ):
+            score += 0.46
+        elif cad_amount is not None and close_amount(receipt_amount, abs(cad_amount)):
             score += 0.18
     supplier = (expense.supplier_name or "").lower()
     normalized_description = description.lower()
@@ -182,16 +195,17 @@ def match_score(expense: Expense, transaction: StatementTransaction) -> float:
             score += 0.3
         elif date_delta <= 3:
             score += max(0.0, 0.24 - 0.05 * date_delta)
-    if expense.amount is not None:
-        if transaction.foreign_amount is not None and close_amount(expense.amount, transaction.foreign_amount):
+    receipt_amount = shared_receipt_amount(expense)
+    if receipt_amount is not None:
+        if transaction.foreign_amount is not None and close_amount(receipt_amount, transaction.foreign_amount):
             score += 0.36
-        elif transaction.foreign_amount is not None and close_split_amount(expense.amount, transaction.foreign_amount):
+        elif transaction.foreign_amount is not None and close_split_amount(receipt_amount, transaction.foreign_amount):
             score += 0.28
-        elif expense.currency == "CAD" and transaction.amount_cad is not None and close_amount(expense.amount, transaction.amount_cad):
+        elif expense.currency == "CAD" and transaction.amount_cad is not None and close_amount(receipt_amount, transaction.amount_cad):
             score += 0.36
-        elif expense.currency == "CAD" and transaction.amount_cad is not None and close_split_amount(expense.amount, transaction.amount_cad):
+        elif expense.currency == "CAD" and transaction.amount_cad is not None and close_split_amount(receipt_amount, transaction.amount_cad):
             score += 0.28
-        elif transaction.amount_cad is not None and close_amount(expense.amount, transaction.amount_cad):
+        elif transaction.amount_cad is not None and close_amount(receipt_amount, transaction.amount_cad):
             score += 0.18
     supplier = (expense.supplier_name or "").lower()
     description = transaction.description.lower()
@@ -280,6 +294,19 @@ def append_note(existing: str, note: str) -> str:
 
 def close_amount(a: float, b: float) -> bool:
     return abs(a - b) <= max(0.03, abs(a) * 0.015)
+
+
+def close_fx_amount(a: float, b: float) -> bool:
+    """Allow normal card spread while comparing a weekly FX estimate to settled CAD."""
+
+    return abs(a - b) <= max(0.50, abs(a) * 0.06)
+
+
+def shared_receipt_amount(expense: Expense) -> float | None:
+    if expense.amount is None:
+        return None
+    people = max(1, int(expense.number_of_people or 1))
+    return round(abs(float(expense.amount)) / people, 6)
 
 
 def close_split_amount(receipt_amount: float, statement_amount: float) -> bool:

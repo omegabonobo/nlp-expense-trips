@@ -281,6 +281,16 @@ def remove_source_file(root: Path, trip_name: str, kind: str, filename: str) -> 
     target.unlink()
 
 
+def resolve_receipt(root: Path, trip_name: str, filename: str) -> Path:
+    """Resolve one receipt, including a nested receipt path, without escaping the trip."""
+
+    trip = resolve_trip(root, trip_name)
+    target = safe_source_child(trip_receipts_dir(trip), filename)
+    if not target.is_file() or target.suffix.lower() not in SUPPORTED_RECEIPTS:
+        raise FileNotFoundError("The receipt file was not found.")
+    return target
+
+
 def versioned_output_path(trip: Path, mode: str, now: datetime | None = None) -> Path:
     if mode not in TRIP_MODES:
         raise ValueError("Unknown trip mode.")

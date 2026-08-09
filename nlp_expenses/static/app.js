@@ -43,6 +43,22 @@ document.getElementById("open-delete-trip-button")?.addEventListener("click", ()
 });
 document.querySelectorAll(".close-dialog").forEach(button => button.addEventListener("click", () => button.closest("dialog").close()));
 
+const receiptPreviewDialog = document.getElementById("receipt-preview-dialog");
+document.querySelectorAll(".receipt-preview").forEach(button => button.addEventListener("click", () => {
+  const sourceFile = button.dataset.sourceFile;
+  const url = `/api/trips/${encodeURIComponent(selectedTrip)}/receipt?filename=${encodeURIComponent(sourceFile)}`;
+  document.getElementById("receipt-preview-title").textContent = sourceFile;
+  document.getElementById("receipt-preview-frame").src = url;
+  document.getElementById("receipt-preview-full").href = url;
+  receiptPreviewDialog.showModal();
+}));
+receiptPreviewDialog?.addEventListener("click", event => {
+  if (event.target === receiptPreviewDialog) receiptPreviewDialog.close();
+});
+receiptPreviewDialog?.addEventListener("close", () => {
+  document.getElementById("receipt-preview-frame").src = "about:blank";
+});
+
 document.getElementById("trip-select")?.addEventListener("change", event => {
   const archived = state.show_archived ? "&archived=1" : "";
   window.location.href = `/?trip=${encodeURIComponent(event.target.value)}${archived}`;
@@ -369,7 +385,13 @@ async function updateLineItem(input, field) {
         fields: { [field]: input.checked }
       })
     });
-    toast(field.startsWith("included") ? "Line inclusion saved." : "Alcohol classification saved.");
+    toast(
+      field === "reviewed"
+        ? (input.checked ? "Line marked ready." : "Line returned to review.")
+        : field.startsWith("included")
+          ? "Line inclusion saved."
+          : "Alcohol classification saved."
+    );
     window.location.reload();
   } catch (failure) {
     input.checked = !input.checked;
@@ -386,6 +408,45 @@ document.querySelectorAll(".line-item-ivado").forEach(input => {
 });
 document.querySelectorAll(".line-item-alcohol").forEach(input => {
   input.addEventListener("change", () => updateLineItem(input, "is_alcohol"));
+});
+document.querySelectorAll(".line-item-reviewed").forEach(input => {
+  input.addEventListener("change", () => updateLineItem(input, "reviewed"));
+});
+
+document.querySelectorAll(".receipt-reviewed").forEach(input => {
+  input.addEventListener("change", async () => {
+    input.disabled = true;
+    try {
+      await saveExpenseFields(input.dataset.sourceFile, { reviewed: input.checked });
+      toast(input.checked ? "Receipt and its lines marked ready." : "Receipt returned to review.");
+      window.location.reload();
+    } catch (failure) {
+      input.checked = !input.checked;
+      input.disabled = false;
+      toast(failure.message, true);
+    }
+  });
+});
+
+document.querySelectorAll(".currency-review-form").forEach(form => {
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    const input = form.querySelector(".currency-review-input");
+    const currency = String(input.value || "").trim().toUpperCase();
+    if (!/^[A-Z]{3}$/.test(currency)) {
+      toast("Use a three-letter currency code such as CAD or QAR.", true);
+      return;
+    }
+    input.disabled = true;
+    try {
+      await saveExpenseFields(form.dataset.sourceFile, { currency });
+      toast("Receipt currency saved. Resync statements to refresh matching.");
+      window.location.reload();
+    } catch (failure) {
+      input.disabled = false;
+      toast(failure.message, true);
+    }
+  });
 });
 
 document.querySelectorAll(".save-line-item").forEach(button => button.addEventListener("click", async () => {
@@ -473,6 +534,133 @@ document.querySelectorAll(".mapping-select").forEach(select => select.addEventLi
     toast("Invoice mapping saved. It will be used in the next Excel workbook.");
     window.location.reload();
   } catch (failure) { toast(failure.message, true); event.target.disabled = false; }
+}));
+
+let pendingReceiptMatchFile = null;
+
+function cardAccountKey(transaction) {
+  return `${transaction.provider || "card"}|${transaction.account_label || "Account"}`;
+}
+
+async function chooseReceiptMatch(groupId, button) {
+  button.disabled = true;
+  try {
+    await api(`/api/trips/${encodeURIComponent(selectedTrip)}/reconciliation/mapping`, {
+      method: "POST",
+      body: JSON.stringify({ group_id: groupId, expense_file: pendingReceiptMatchFile, use_auto: false })
+    });
+    toast("Card transaction matched to this receipt.");
+    window.location.reload();
+  } catch (failure) { toast(failure.message, true); button.disabled = false; }
+}
+
+function renderCardMatchResults() {
+  const expense = state.reconciliation?.expenses?.find(item => item.source_file === pendingReceiptMatchFile);
+  const results = document.getElementById("card-match-results");
+  if (!expense || !results) return;
+  const suggestionRank = new Map((expense.match_suggestions || []).map((item, index) => [item.group_id, { ...item, index }]));
+  const search = document.getElementById("card-match-search").value.trim().toLowerCase();
+  const account = document.getElementById("card-match-account").value;
+  const transactions = (state.reconciliation?.transactions || [])
+    .filter(item => item.match_eligible && !item.ignored && !(item.allocations || []).length)
+    .filter(item => !account || cardAccountKey(item) === account)
+    .filter(item => {
+      const haystack = [
+        item.transaction_date, item.provider, item.account_label, item.description,
+        item.purchase_amount, item.purchase_currency, item.cad_amount, "CAD"
+      ].join(" ").toLowerCase();
+      return !search || haystack.includes(search);
+    })
+    .sort((left, right) => {
+      const leftRank = suggestionRank.get(left.group_id)?.index ?? 9999;
+      const rightRank = suggestionRank.get(right.group_id)?.index ?? 9999;
+      return leftRank - rightRank || String(right.transaction_date || "").localeCompare(String(left.transaction_date || ""));
+    });
+
+  results.replaceChildren();
+  if (!transactions.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-line";
+    empty.textContent = "No eligible card transactions match this search.";
+    results.append(empty);
+    return;
+  }
+  for (const transaction of transactions) {
+    const row = document.createElement("div");
+    row.className = "card-match-option";
+    const details = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = transaction.description || "No description";
+    const source = document.createElement("span");
+    source.textContent = `${transaction.transaction_date || "date missing"} · ${(transaction.provider || "card").toUpperCase()} ${transaction.account_label || ""}`;
+    const amount = document.createElement("small");
+    const purchase = transaction.purchase_amount == null ? "?" : Number(transaction.purchase_amount).toFixed(2);
+    const cad = transaction.cad_amount == null ? "CAD unavailable" : `${Number(transaction.cad_amount).toFixed(2)} CAD`;
+    amount.textContent = `${purchase} ${transaction.purchase_currency || ""} · ${cad}`;
+    details.append(title, source, amount);
+    const action = document.createElement("button");
+    action.type = "button";
+    action.className = "button small";
+    const suggestion = suggestionRank.get(transaction.group_id);
+    const current = transaction.expense_file === expense.source_file;
+    action.textContent = current ? "Current match" : "Match";
+    action.classList.add(current ? "primary" : "secondary");
+    action.disabled = current;
+    if (!current) action.addEventListener("click", () => chooseReceiptMatch(transaction.group_id, action));
+    if (suggestion && !current) {
+      const badge = document.createElement("span");
+      badge.className = "match-badge suggested";
+      badge.textContent = `${Math.round(suggestion.score * 100)}% likely`;
+      details.append(badge);
+    } else if (transaction.expense_file && !current) {
+      const badge = document.createElement("span");
+      badge.className = "match-badge review";
+      badge.textContent = "Matched to another receipt";
+      details.append(badge);
+    }
+    row.append(details, action);
+    results.append(row);
+  }
+}
+
+document.querySelectorAll(".open-receipt-matcher").forEach(button => button.addEventListener("click", () => {
+  pendingReceiptMatchFile = button.dataset.sourceFile;
+  const expense = state.reconciliation.expenses.find(item => item.source_file === pendingReceiptMatchFile);
+  document.getElementById("card-match-title").textContent = expense.vendor || expense.source_file;
+  document.getElementById("card-match-receipt").textContent =
+    `${expense.amount ?? "?"} ${expense.currency || ""} · ${expense.date || "date missing"} · employee share 1/${expense.number_of_people || 1}`;
+  document.getElementById("card-match-search").value = "";
+  const account = document.getElementById("card-match-account");
+  account.replaceChildren(new Option("All cards and accounts", ""));
+  const accounts = new Map();
+  for (const transaction of state.reconciliation.transactions || []) {
+    if (transaction.match_eligible && !transaction.ignored) {
+      accounts.set(cardAccountKey(transaction), `${(transaction.provider || "card").toUpperCase()} ${transaction.account_label || "Account"}`);
+    }
+  }
+  for (const [value, label] of [...accounts].sort((a, b) => a[1].localeCompare(b[1]))) {
+    account.add(new Option(label, value));
+  }
+  renderCardMatchResults();
+  openDialog("card-match-dialog");
+}));
+
+document.getElementById("card-match-search")?.addEventListener("input", renderCardMatchResults);
+document.getElementById("card-match-account")?.addEventListener("change", renderCardMatchResults);
+document.getElementById("card-match-dialog")?.addEventListener("click", event => {
+  if (event.target === event.currentTarget) event.currentTarget.close();
+});
+
+document.querySelectorAll(".receipt-unmatch").forEach(button => button.addEventListener("click", async () => {
+  button.disabled = true;
+  try {
+    await api(`/api/trips/${encodeURIComponent(selectedTrip)}/reconciliation/mapping`, {
+      method: "POST",
+      body: JSON.stringify({ group_id: button.dataset.groupId, expense_file: null, use_auto: false })
+    });
+    toast("Card match removed.");
+    window.location.reload();
+  } catch (failure) { toast(failure.message, true); button.disabled = false; }
 }));
 
 let pendingTransactionDisposition = null;

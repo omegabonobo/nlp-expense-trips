@@ -645,6 +645,65 @@ class UITests(unittest.TestCase):
         )
         self.assertFalse(cocktail["included"])
 
+    def test_receipt_review_controls_currency_and_secure_inline_preview(self):
+        trip = ensure_trip(self.root, "202607_receipt-controls", mode="arvine")
+        receipt = trip / "expenses_receipts" / "meals" / "dinner.pdf"
+        receipt.parent.mkdir(parents=True)
+        receipt.write_bytes(b"%PDF-1.4\nfixture")
+        expense = Expense(
+            source_file=Path("meals/dinner.pdf"),
+            expense_id="",
+            date="2026-07-05",
+            supplier_name="Dinner",
+            expense_type="meal",
+            amount=40,
+            currency="EUR",
+            line_items=[LineItem(description="Dinner", amount=40)],
+        )
+        save_line_item_review(trip, [expense])
+
+        html = self.client.get(f"/?trip={trip.name}").get_data(as_text=True)
+        self.assertIn('class="receipt-file-link receipt-preview"', html)
+        self.assertIn('class="currency-review-form"', html)
+        self.assertIn('class="receipt-reviewed"', html)
+        self.assertIn('class="line-item-reviewed"', html)
+        self.assertIn("Click outside this window or press Esc to close", html)
+
+        preview = self.client.get(
+            f"/api/trips/{trip.name}/receipt",
+            query_string={"filename": "meals/dinner.pdf"},
+        )
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview.data, b"%PDF-1.4\nfixture")
+        self.assertIn("inline", preview.headers["Content-Disposition"])
+        preview.close()
+
+        escaped = self.client.get(
+            f"/api/trips/{trip.name}/receipt",
+            query_string={"filename": "../outside.pdf"},
+        )
+        self.assertEqual(escaped.status_code, 400)
+
+        corrected = self.client.post(
+            f"/api/trips/{trip.name}/line-items/expense",
+            json={"source_file": "meals/dinner.pdf", "fields": {"currency": "cad"}},
+            headers=self.headers,
+        )
+        self.assertEqual(corrected.status_code, 200)
+        reviewed = corrected.get_json()["line_item_review"]["receipts"][0]
+        self.assertEqual(reviewed["currency"], "CAD")
+        self.assertEqual(reviewed["status"], "review")
+
+        ready = self.client.post(
+            f"/api/trips/{trip.name}/line-items/expense",
+            json={"source_file": "meals/dinner.pdf", "fields": {"reviewed": True}},
+            headers=self.headers,
+        )
+        self.assertEqual(ready.status_code, 200)
+        reviewed = ready.get_json()["line_item_review"]["receipts"][0]
+        self.assertEqual(reviewed["status"], "ready")
+        self.assertTrue(reviewed["line_items"][0]["reviewed"])
+
     def test_arvine_line_review_hides_alcohol_and_ivado_controls(self):
         trip = ensure_trip(self.root, "202607_arvine-lines", mode="arvine")
         receipt = trip / "expenses_receipts" / "meal.pdf"
@@ -883,6 +942,15 @@ class UITests(unittest.TestCase):
         self.assertEqual(reconciliation["summary"]["matched_invoice_count"], 1)
         transaction = reconciliation["transactions"][0]
         self.assertAlmostEqual(transaction["fx_rate"], 1.3)
+        self.assertEqual(
+            reconciliation["expenses"][0]["statement_matches"][0]["group_id"],
+            transaction["group_id"],
+        )
+        self.assertTrue(reconciliation["expenses"][0]["match_suggestions"][0]["current"])
+        html = self.client.get(f"/?trip={trip.name}").get_data(as_text=True)
+        self.assertIn('class="button secondary small open-receipt-matcher"', html)
+        self.assertIn("All cards and accounts", html)
+        self.assertIn("every eligible uploaded-card transaction remains searchable", html)
 
         cleared = self.client.post(
             f"/api/trips/{trip.name}/reconciliation/mapping",

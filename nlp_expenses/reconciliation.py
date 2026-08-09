@@ -14,8 +14,16 @@ from nlp_expenses.generator import (
     assign_simple_expense_ids,
     extract_trip_expenses,
 )
-from nlp_expenses.fx_rates import WeeklyCadFxResolver
-from nlp_expenses.matching import apply_manual_matches, common_value, match_normalized_transactions, sum_values
+from nlp_expenses.fx_rates import FxRateUnavailable, WeeklyCadFxResolver
+from nlp_expenses.matching import (
+    apply_manual_matches,
+    close_amount,
+    close_fx_amount,
+    common_value,
+    days_between,
+    match_normalized_transactions,
+    sum_values,
+)
 from nlp_expenses.extraction.statements import parse_statement_file
 from nlp_expenses.line_items import apply_line_item_review, save_line_item_review
 from nlp_expenses.models import (
@@ -93,6 +101,7 @@ def sync_reconciliation(
     root = root.resolve()
     selected_mode = trip_mode(trip_dir)
     statements = reconciliation_statement_files(trip_dir, selected_mode)
+    fx_resolver = WeeklyCadFxResolver(trip_dir)
     emit_progress(progress_callback, "statements", 0, len(statements), "Validating card and bank statements")
     if selected_mode == "arvine":
         reports = preflight_statement_files(statements)
@@ -101,7 +110,7 @@ def sync_reconciliation(
             raise StatementNormalizationError("\n".join(errors))
         normalization = normalize_statement_files(
             statements,
-            fx_resolver=WeeklyCadFxResolver(trip_dir),
+            fx_resolver=fx_resolver,
         )
         if normalization.errors:
             raise StatementNormalizationError("\n".join(normalization.errors))
@@ -151,7 +160,17 @@ def sync_reconciliation(
     }
     assign_simple_expense_ids(expenses)
     emit_progress(progress_callback, "matching", 0, 1, "Matching invoices to statement transactions")
-    match_normalized_transactions(expenses, normalization.transactions)
+    estimated_cad_by_expense = estimate_expense_cad_amounts(
+        expenses,
+        normalization.transactions,
+        fx_resolver,
+        warning_callback,
+    )
+    match_normalized_transactions(
+        expenses,
+        normalization.transactions,
+        estimated_cad_by_expense=estimated_cad_by_expense,
+    )
 
     expense_files = {source_file_key(expense.source_file) for expense in expenses}
     transaction_groups = {transaction.transaction_group_id for transaction in normalization.transactions}
@@ -187,6 +206,7 @@ def sync_reconciliation(
         "requires_resync": False,
         "extracted_expenses": extracted_expenses,
         "expenses": [serialize_expense(expense) for expense in expenses],
+        "estimated_cad_by_expense": estimated_cad_by_expense,
         "invoice_overrides": {
             filename: values for filename, values in invoice_overrides.items() if filename in expense_files
         },
@@ -211,6 +231,54 @@ def sync_reconciliation(
     save_reconciliation_state(trip_dir, state)
     emit_progress(progress_callback, "complete", 1, 1, "Reconciliation ready for review")
     return reconciliation_view(trip_dir, state)
+
+
+def estimate_expense_cad_amounts(
+    expenses: list[Expense],
+    transactions: list[NormalizedTransaction],
+    fx_resolver: WeeklyCadFxResolver,
+    warning_callback: WarningCallback | None = None,
+) -> dict[str, float]:
+    """Estimate each employee's share in CAD for matching suggestions only."""
+
+    estimates: dict[str, float] = {}
+    warned: set[tuple[str, str]] = set()
+    for expense in expenses:
+        if expense.amount is None or not expense.date or not expense.currency:
+            continue
+        people = max(1, int(expense.number_of_people or 1))
+        share = abs(float(expense.amount)) / people
+        currency = str(expense.currency).upper()
+        if any(
+            transaction.match_eligible
+            and str(transaction.purchase_currency or "").upper() == currency
+            and isinstance(transaction.purchase_amount, (int, float))
+            and close_amount(share, abs(float(transaction.purchase_amount)))
+            for transaction in transactions
+        ):
+            continue
+        nearby_cad_candidates = [
+            transaction
+            for transaction in transactions
+            if transaction.match_eligible
+            and isinstance(transaction.cad_amount, (int, float))
+            and (
+                (delta := days_between(expense.date, transaction.transaction_date)) is not None
+                and delta <= 7
+            )
+        ]
+        if not nearby_cad_candidates:
+            continue
+        try:
+            rate = fx_resolver.resolve(currency, expense.date)
+        except FxRateUnavailable as exc:
+            warning_key = (currency, expense.date)
+            if warning_callback and warning_key not in warned:
+                warning_callback(f"FX-aware receipt matching unavailable for {currency} on {expense.date}: {exc}")
+                warned.add(warning_key)
+            continue
+        estimates[source_file_key(expense.source_file)] = round(share * rate.cad_per_unit, 2)
+    return estimates
 
 
 def set_manual_match(
@@ -964,6 +1032,72 @@ def apply_overrides_to_snapshots(extracted: list[dict], overrides: dict[str, dic
     return result
 
 
+def transaction_matches_expense(transaction: dict, source_file: str) -> bool:
+    if transaction.get("ignored"):
+        return False
+    if transaction.get("expense_file") == source_file and not transaction.get("allocations"):
+        return True
+    return any(
+        allocation.get("invoice_file") == source_file
+        and allocation.get("type") in REIMBURSABLE_ALLOCATION_TYPES
+        for allocation in transaction.get("allocations") or []
+    )
+
+
+def transaction_summary(transaction: dict) -> dict:
+    return {
+        "group_id": transaction.get("group_id"),
+        "transaction_date": transaction.get("transaction_date"),
+        "provider": transaction.get("provider"),
+        "account_label": transaction.get("account_label"),
+        "description": transaction.get("description"),
+        "purchase_amount": transaction.get("purchase_amount"),
+        "purchase_currency": transaction.get("purchase_currency"),
+        "cad_amount": transaction.get("cad_amount"),
+        "cad_completeness": transaction.get("cad_completeness"),
+        "expense_file": transaction.get("expense_file"),
+        "allocation_status": transaction.get("allocation_status"),
+    }
+
+
+def serialized_candidate_score(expense: dict, transaction: dict, estimated_cad: object) -> float:
+    """Rank receipt-centric choices using date and the employee share's amount."""
+
+    score = 0.0
+    delta = days_between(expense.get("date"), transaction.get("transaction_date"))
+    if delta == 0:
+        score += 0.35
+    elif delta is not None and delta <= 5:
+        score += max(0.05, 0.28 - 0.05 * delta)
+    amount = expense.get("amount")
+    if isinstance(amount, (int, float)):
+        people = max(1, int(expense.get("number_of_people") or 1))
+        share = abs(float(amount)) / people
+        purchase_amount = transaction.get("purchase_amount")
+        purchase_currency = str(transaction.get("purchase_currency") or "").upper()
+        expense_currency = str(expense.get("currency") or "").upper()
+        cad_amount = transaction.get("cad_amount")
+        if (
+            isinstance(purchase_amount, (int, float))
+            and purchase_currency == expense_currency
+            and close_amount(share, abs(float(purchase_amount)))
+        ):
+            score += 0.55
+        elif (
+            isinstance(estimated_cad, (int, float))
+            and isinstance(cad_amount, (int, float))
+            and close_fx_amount(float(estimated_cad), abs(float(cad_amount)))
+        ):
+            score += 0.55
+        elif (
+            expense_currency == "CAD"
+            and isinstance(cad_amount, (int, float))
+            and close_amount(share, abs(float(cad_amount)))
+        ):
+            score += 0.55
+    return min(score, 1.0)
+
+
 def reconciliation_view(trip_dir: Path, state: dict | None = None) -> dict:
     state = state if state is not None else load_reconciliation_state(trip_dir)
     if not state:
@@ -1193,6 +1327,52 @@ def reconciliation_view(trip_dir: Path, state: dict | None = None) -> dict:
         )
         if expense.get("cad_source") == "manual":
             expense["fx_basis_status"] = f"manual_{expense['fx_basis_status']}"
+
+    estimated_cad_by_expense = state.get("estimated_cad_by_expense", {})
+    for expense in expenses:
+        source_file = expense["source_file"]
+        expense["statement_matches"] = [
+            transaction_summary(transaction)
+            for transaction in transactions
+            if transaction_matches_expense(transaction, source_file)
+        ]
+        candidates = []
+        for transaction in transactions:
+            if (
+                not transaction.get("match_eligible")
+                or transaction.get("ignored")
+                or transaction.get("allocations")
+            ):
+                continue
+            score = serialized_candidate_score(
+                expense,
+                transaction,
+                estimated_cad_by_expense.get(source_file),
+            )
+            candidate = {
+                "group_id": transaction.get("group_id"),
+                "score": round(score, 3),
+                "likely": score >= 0.35,
+                "current": transaction.get("expense_file") == source_file,
+                "suggested": transaction.get("suggested_expense_file") == source_file,
+                "matched_elsewhere": bool(
+                    transaction.get("expense_file")
+                    and transaction.get("expense_file") != source_file
+                ),
+            }
+            candidates.append(candidate)
+        ranked = sorted(
+            candidates,
+            key=lambda item: (
+                not item["current"],
+                not item["suggested"],
+                not item["likely"],
+                -item["score"],
+            ),
+        )
+        expense["match_suggestions"] = [
+            item for item in ranked if item["current"] or item["suggested"] or item["likely"]
+        ][:12]
 
     policy_warnings = trip_policy_warnings(trip_dir, expenses, transactions)
     unresolved_policy_warnings = sum(1 for warning in policy_warnings if not warning["resolved"])

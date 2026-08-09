@@ -56,6 +56,50 @@ def meal_expense(path: Path) -> Expense:
 
 
 class LineItemReviewTests(unittest.TestCase):
+    def test_explicit_line_and_receipt_review_moves_expense_to_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202607_ready-state", mode="arvine")
+            receipt = trip / "expenses_receipts" / "meal.pdf"
+            receipt.write_bytes(b"meal")
+            save_line_item_review(trip, [meal_expense(receipt)])
+
+            initial = line_item_review_view(trip)["receipts"][0]
+            self.assertEqual(initial["status"], "review")
+            self.assertFalse(initial["reviewed"])
+            first_line = initial["line_items"][0]
+
+            one_line = set_line_item_review(
+                trip,
+                receipt.name,
+                first_line["line_id"],
+                {"reviewed": True},
+            )["receipts"][0]
+            self.assertEqual(one_line["line_items"][0]["status"], "ready")
+            self.assertEqual(one_line["status"], "review")
+
+            ready = set_expense_review(trip, receipt.name, {"reviewed": True})["receipts"][0]
+            self.assertEqual(ready["status"], "ready")
+            self.assertTrue(ready["reviewed"])
+            self.assertTrue(all(item["reviewed"] for item in ready["line_items"]))
+
+            corrected = set_expense_review(trip, receipt.name, {"currency": "qar"})["receipts"][0]
+            self.assertEqual(corrected["currency"], "QAR")
+            self.assertEqual(corrected["status"], "review")
+            self.assertFalse(corrected["reviewed"])
+
+            set_expense_review(trip, receipt.name, {"reviewed": True})
+            changed = set_line_item_review(
+                trip,
+                receipt.name,
+                first_line["line_id"],
+                {"description": "Dinner corrected"},
+            )["receipts"][0]
+            self.assertEqual(changed["status"], "review")
+            self.assertFalse(changed["reviewed"])
+            changed_line = next(item for item in changed["line_items"] if item["line_id"] == first_line["line_id"])
+            self.assertFalse(changed_line["reviewed"])
+
     def test_default_payer_override_survives_rescan_and_reset_restores_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
