@@ -13,6 +13,7 @@ from nlp_expenses.ui_services import (
     change_trip_mode,
     create_trip,
     create_trip_name,
+    delete_trip,
     open_workbook,
     remove_source_file,
     resolve_trip,
@@ -53,6 +54,26 @@ class UIServiceTests(unittest.TestCase):
             self.assertEqual(collision.name, "cafe_receipt-2.pdf")
             remove_source_file(root, trip.name, "receipts", collision.name)
             self.assertFalse((trip / "expenses_receipts" / collision.name).exists())
+
+    def test_delete_trip_requires_exact_confirmation_and_removes_only_that_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202607_delete-me", mode="arvine")
+            kept = ensure_trip(root, "202608_keep-me", mode="arvine")
+            nested = trip / "expenses_receipts" / "restaurant" / "receipt.pdf"
+            nested.parent.mkdir(parents=True)
+            nested.write_bytes(b"receipt")
+            (trip / "generated.xlsx").write_bytes(b"workbook")
+
+            with self.assertRaisesRegex(ValueError, "exact trip identifier"):
+                delete_trip(root, trip.name, "wrong-trip")
+            self.assertTrue(trip.is_dir())
+
+            delete_trip(root, trip.name, trip.name)
+            self.assertFalse(trip.exists())
+            self.assertTrue(kept.is_dir())
+            with self.assertRaises(FileNotFoundError):
+                resolve_trip(root, trip.name)
 
     def test_receipt_upload_validates_images_and_supports_heic_when_available(self):
         with tempfile.TemporaryDirectory() as tmp:

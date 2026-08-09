@@ -64,6 +64,7 @@ from nlp_expenses.ui_services import (
     change_trip_claim_program,
     change_trip_mode,
     create_trip,
+    delete_trip,
     open_workbook,
     remove_source_file,
     resolve_trip,
@@ -237,6 +238,14 @@ def create_app(root: Path, access_token: str | None = None, job_manager: JobMana
         with jobs.mutation_guard(trip_name):
             remove_source_file(root, trip_name, str(data.get("kind", "")), str(data.get("filename", "")))
         return jsonify({"trip": trip_details(root, trip_name)})
+
+    @app.delete("/api/trips/<trip_name>")
+    def delete_trip_route(trip_name: str):
+        data = request.get_json(silent=True) or {}
+        with jobs.mutation_guard(trip_name):
+            delete_trip(root, trip_name, str(data.get("confirmation", "")))
+        jobs.forget_trip(trip_name)
+        return jsonify({"deleted": trip_name})
 
     @app.post("/api/trips/<trip_name>/statement-date-convention")
     def update_statement_date_convention(trip_name: str):

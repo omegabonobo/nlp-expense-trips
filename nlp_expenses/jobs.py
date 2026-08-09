@@ -167,6 +167,22 @@ class JobManager:
             job = self._active_job(trip_name)
             return GenerationJob(**job.to_dict()) if job else None
 
+    def forget_trip(self, trip_name: str) -> None:
+        """Clear completed in-memory job history after a trip is deleted."""
+
+        with self._lock:
+            active = self._active_job(trip_name)
+            if active:
+                raise JobConflictError(
+                    "This trip is being processed. Wait for the current sync or workbook job to finish."
+                )
+            self._latest_by_trip.pop(trip_name, None)
+            self._latest_reconciliation_by_trip.pop(trip_name, None)
+            self._latest_line_items_by_trip.pop(trip_name, None)
+            for job_id, job in list(self._jobs.items()):
+                if job.trip_name == trip_name:
+                    self._jobs.pop(job_id, None)
+
     @contextmanager
     def mutation_guard(self, trip_name: str) -> Iterator[None]:
         """Prevent source mutations from overlapping a trip job."""

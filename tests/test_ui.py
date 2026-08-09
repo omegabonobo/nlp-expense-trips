@@ -198,6 +198,44 @@ class UITests(unittest.TestCase):
         self.assertEqual(sponsored_trip["mode"], "ivado")
         self.assertEqual(sponsored_trip["metadata"]["sponsor"], "IVADO Labs")
 
+    def test_delete_trip_requires_exact_confirmation_and_clears_all_trip_data(self):
+        trip = ensure_trip(self.root, "202607_delete-from-ui", mode="arvine")
+        receipt = trip / "expenses_receipts" / "nested" / "receipt.pdf"
+        receipt.parent.mkdir(parents=True)
+        receipt.write_bytes(b"receipt")
+        (trip / "card_statements" / "statement.csv").write_text(
+            "date,description,amount,currency\n2026-07-01,Cafe,10,CAD\n",
+            encoding="utf-8",
+        )
+        (trip / "expense_review.xlsx").write_bytes(b"workbook")
+        (trip / "trip_package.zip").write_bytes(b"package")
+
+        html = self.client.get(f"/?trip={trip.name}").get_data(as_text=True)
+        self.assertIn("Delete trip and all data", html)
+        self.assertIn("Permanently delete trip", html)
+        self.assertIn(f"Type <code>{trip.name}</code> to confirm", html)
+
+        rejected = self.client.delete(
+            f"/api/trips/{trip.name}",
+            json={"confirmation": "wrong-trip"},
+            headers=self.headers,
+        )
+        self.assertEqual(rejected.status_code, 400)
+        self.assertTrue(trip.is_dir())
+
+        deleted = self.client.delete(
+            f"/api/trips/{trip.name}",
+            json={"confirmation": trip.name},
+            headers=self.headers,
+        )
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.get_json()["deleted"], trip.name)
+        self.assertFalse(trip.exists())
+        self.assertEqual(
+            self.client.get(f"/api/trips/{trip.name}").status_code,
+            404,
+        )
+
     def test_trip_metadata_policy_and_lifecycle_endpoints(self):
         trip = ensure_trip(self.root, "202607_lifecycle", mode="ivado")
         metadata = {
@@ -900,6 +938,13 @@ class UITests(unittest.TestCase):
                     headers=headers,
                 )
                 self.assertEqual(switched.status_code, 409)
+                deleted = client.delete(
+                    f"/api/trips/{trip.name}",
+                    json={"confirmation": trip.name},
+                    headers=headers,
+                )
+                self.assertEqual(deleted.status_code, 409)
+                self.assertTrue(trip.is_dir())
         finally:
             release.set()
             self.wait_for_manager(manager, job.id)

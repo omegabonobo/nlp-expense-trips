@@ -100,6 +100,8 @@ code { font-family: "SFMono-Regular", Consolas, monospace; color: #405149; overf
 .button.primary:hover { background: var(--green-dark); }
 .button.secondary { color: var(--ink); background: var(--surface); border-color: var(--line); }
 .button.secondary:hover { border-color: #aab7af; }
+.button.danger { color: white; background: var(--red); }
+.button.danger:hover { background: #8e2929; }
 .button.small { padding: 7px 10px; font-size: 11px; }
 .button.large { padding: 13px 18px; font-size: 14px; }
 .button:disabled { opacity: .45; cursor: not-allowed; }
@@ -279,6 +281,10 @@ code { font-family: "SFMono-Regular", Consolas, monospace; color: #405149; overf
 .package-list { display: grid; border-top: 1px solid var(--line); }
 .package-list > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); }
 .package-list span { color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.trip-danger-zone { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 8px; padding-top: 16px; border-top: 1px solid #efcaca; }
+.trip-danger-zone > div { display: grid; gap: 4px; }
+.trip-danger-zone strong { color: var(--red); font-size: 12px; }
+.trip-danger-zone span { color: var(--muted); font-size: 10px; line-height: 1.4; }
 
 .select, .input { border: 1px solid #bec9c2; border-radius: 8px; background: var(--surface); color: var(--ink); padding: 9px 11px; outline: none; }
 .select:focus, .input:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(23,107,77,.1); }
@@ -292,6 +298,9 @@ code { font-family: "SFMono-Regular", Consolas, monospace; color: #405149; overf
 .modal form { padding: 25px; }
 .modal-heading { margin-bottom: 10px; }
 .help-text { color: var(--muted); font-size: 13px; line-height: 1.5; }
+.danger-text { color: var(--red); }
+.deletion-summary { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin: 16px 0; }
+.deletion-summary span { padding: 9px 10px; border-radius: 8px; background: var(--red-soft); color: var(--red); font-size: 11px; font-weight: 700; }
 .form-error { min-height: 18px; color: var(--red); font-size: 12px; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
 .form-grid .span-2 { grid-column: 1 / -1; }
@@ -331,6 +340,7 @@ code { font-family: "SFMono-Regular", Consolas, monospace; color: #405149; overf
   .system-status { display: none; }
   .page-title, .location-card, .workbook-row { align-items: stretch; grid-template-columns: 1fr; flex-direction: column; }
   .folder-row { align-items: stretch; flex-direction: column; }
+  .trip-danger-zone { align-items: stretch; flex-direction: column; }
   .quality-options { grid-template-columns: 1fr; }
   .processing-summary { grid-template-columns: 1fr; }
   .receipt-extraction > .button { justify-self: stretch; }

@@ -107,6 +107,15 @@ def resolve_trip(root: Path, name: str) -> Path:
     return candidate
 
 
+def delete_trip(root: Path, name: str, confirmation: str) -> None:
+    """Permanently remove one validated trip folder and all data below it."""
+
+    if confirmation != name:
+        raise ValueError("Type the exact trip identifier to confirm deletion.")
+    trip = resolve_trip(root, name)
+    shutil.rmtree(trip)
+
+
 def change_trip_mode(root: Path, name: str, mode: str) -> None:
     if mode not in TRIP_MODES:
         raise ValueError("Choose either Arvine or IVADO mode.")

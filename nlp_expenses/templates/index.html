@@ -1182,6 +1182,15 @@
               {% endfor %}
             </div>
           {% endif %}
+          <div class="trip-danger-zone">
+            <div>
+              <strong>Delete trip and all data</strong>
+              <span>Permanently remove receipts, statements, reviews, generated reports, manifests, and packages.</span>
+            </div>
+            <button class="button danger" id="open-delete-trip-button" {{ 'disabled' if trip_busy }}>
+              Delete trip
+            </button>
+          </div>
         </section>
       {% else %}
         <section class="empty welcome-empty">
@@ -1221,6 +1230,36 @@
       <button class="button primary full-width" type="submit">Create trip</button>
     </form>
   </dialog>
+
+  {% if state.selected %}
+    <dialog id="delete-trip-dialog" class="modal">
+      <form id="delete-trip-form">
+        <div class="modal-heading">
+          <div><p class="eyebrow danger-text">Permanent deletion</p><h2>Delete this trip?</h2></div>
+          <button type="button" class="icon-button close-dialog">×</button>
+        </div>
+        <p class="help-text">
+          This cannot be undone. It will delete the complete local folder for
+          <strong>{{ state.selected.label }}</strong> and all data inside it.
+        </p>
+        <div class="deletion-summary">
+          <span>{{ state.selected.receipts|length }} receipt(s)</span>
+          <span>{{ state.selected.statements|length }} statement(s)</span>
+          <span>{{ state.selected.workbooks|length }} generated workbook(s)</span>
+          <span>{{ state.selected.packages|length }} package(s)</span>
+        </div>
+        <label class="field-label">
+          Type <code>{{ state.selected.name }}</code> to confirm
+          <input class="input" name="confirmation" autocomplete="off" spellcheck="false" required>
+        </label>
+        <p class="form-error" id="delete-trip-error"></p>
+        <div class="modal-actions">
+          <button class="button secondary close-dialog" type="button">Cancel</button>
+          <button class="button danger" type="submit">Permanently delete trip</button>
+        </div>
+      </form>
+    </dialog>
+  {% endif %}
 
   <dialog id="settings-dialog" class="modal">
     <form id="settings-form">

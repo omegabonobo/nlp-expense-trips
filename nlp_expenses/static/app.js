@@ -34,6 +34,13 @@ document.querySelectorAll(".open-settings-button").forEach(button => {
 document.getElementById("open-accounting-button")?.addEventListener("click", () => openDialog("accounting-dialog"));
 document.getElementById("open-trip-metadata-button")?.addEventListener("click", () => openDialog("trip-metadata-dialog"));
 document.getElementById("open-approval-button")?.addEventListener("click", () => openDialog("approval-dialog"));
+document.getElementById("open-delete-trip-button")?.addEventListener("click", () => {
+  const form = document.getElementById("delete-trip-form");
+  form?.reset();
+  const error = document.getElementById("delete-trip-error");
+  if (error) error.textContent = "";
+  openDialog("delete-trip-dialog");
+});
 document.querySelectorAll(".close-dialog").forEach(button => button.addEventListener("click", () => button.closest("dialog").close()));
 
 document.getElementById("trip-select")?.addEventListener("change", event => {
@@ -166,6 +173,31 @@ document.querySelectorAll(".archive-trip-button").forEach(button => button.addEv
     window.location.href = archived ? "/" : `/?trip=${encodeURIComponent(selectedTrip)}`;
   } catch (failure) { toast(failure.message, true); button.disabled = false; }
 }));
+
+document.getElementById("delete-trip-form")?.addEventListener("submit", async event => {
+  event.preventDefault();
+  const form = event.target;
+  const data = new FormData(form);
+  const confirmation = String(data.get("confirmation") || "");
+  const error = document.getElementById("delete-trip-error");
+  const submit = form.querySelector('button[type="submit"]');
+  error.textContent = "";
+  if (confirmation !== selectedTrip) {
+    error.textContent = `Type ${selectedTrip} exactly to confirm.`;
+    return;
+  }
+  submit.disabled = true;
+  try {
+    await api(`/api/trips/${encodeURIComponent(selectedTrip)}`, {
+      method: "DELETE",
+      body: JSON.stringify({ confirmation })
+    });
+    window.location.href = "/";
+  } catch (failure) {
+    error.textContent = failure.message;
+    submit.disabled = false;
+  }
+});
 
 document.getElementById("settings-form")?.addEventListener("submit", async event => {
   event.preventDefault();
