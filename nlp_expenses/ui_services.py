@@ -18,7 +18,7 @@ from nlp_expenses.accounting import trip_accounting_profile
 from nlp_expenses.extraction.text import validate_receipt_content
 from nlp_expenses.generator import SUPPORTED_RECEIPTS
 from nlp_expenses.lifecycle import list_packages, trip_lifecycle
-from nlp_expenses.line_items import line_item_review_view
+from nlp_expenses.line_items import line_item_review_view, persist_review_after_receipt_removal
 from nlp_expenses.statement_normalizer import preflight_statement_files
 from nlp_expenses.trip_metadata import (
     CLAIM_PROGRAMS,
@@ -279,6 +279,8 @@ def remove_source_file(root: Path, trip_name: str, kind: str, filename: str) -> 
     if not target.is_file():
         raise FileNotFoundError(f"{filename} was not found.")
     target.unlink()
+    if kind == "receipts":
+        persist_review_after_receipt_removal(trip)
 
 
 def resolve_receipt(root: Path, trip_name: str, filename: str) -> Path:

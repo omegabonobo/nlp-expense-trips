@@ -1366,7 +1366,50 @@ def load_line_item_review_state(trip_dir: Path) -> dict | None:
         if isinstance(receipt, dict):
             migrate_receipt_contract_fields(receipt, mode)
     state["version"] = LINE_ITEM_REVIEW_VERSION
+    repair_review_after_missing_receipts(trip_dir, state)
     return state
+
+
+def repair_review_after_missing_receipts(trip_dir: Path, state: dict) -> bool:
+    """Keep unchanged receipt reviews usable when source files were only removed."""
+
+    if str(state.get("mode") or "") != trip_mode(trip_dir):
+        return False
+    receipts = [receipt for receipt in state.get("receipts", []) if isinstance(receipt, dict)]
+    stored_sources = {
+        str(receipt.get("source_file") or "")
+        for receipt in receipts
+        if receipt.get("source_file")
+    }
+    folder = trip_receipts_dir(trip_dir)
+    current_paths = {
+        relative_source_name(folder, path): path
+        for path in list_receipt_files(folder)
+    }
+    current_sources = set(current_paths)
+    if current_sources == stored_sources or not current_sources.issubset(stored_sources):
+        return False
+
+    try:
+        synced_timestamp = datetime.fromisoformat(str(state.get("synced_at") or "")).timestamp()
+    except (TypeError, ValueError):
+        return False
+    if any(path.stat().st_mtime > synced_timestamp + 1 for path in current_paths.values()):
+        return False
+
+    state["receipts"] = [
+        receipt for receipt in receipts if str(receipt.get("source_file") or "") in current_sources
+    ]
+    state["input_fingerprint"] = line_item_input_fingerprint(trip_dir)
+    return True
+
+
+def persist_review_after_receipt_removal(trip_dir: Path) -> None:
+    """Persist the safe missing-receipt repair after an in-app file deletion."""
+
+    state = load_line_item_review_state(trip_dir)
+    if state and state.get("input_fingerprint") == line_item_input_fingerprint(trip_dir):
+        save_line_item_review_state(trip_dir, state)
 
 
 def save_line_item_review_state(trip_dir: Path, state: dict) -> None:

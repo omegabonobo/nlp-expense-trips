@@ -198,6 +198,64 @@ class UITests(unittest.TestCase):
         self.assertEqual(sponsored_trip["mode"], "ivado")
         self.assertEqual(sponsored_trip["metadata"]["sponsor"], "IVADO Labs")
 
+    def test_removing_a_receipt_keeps_remaining_line_controls_editable(self):
+        trip = ensure_trip(self.root, "202607_remove-receipt-review", mode="arvine")
+        first = trip / "expenses_receipts" / "first.pdf"
+        second = trip / "expenses_receipts" / "second.pdf"
+        first.write_bytes(b"first")
+        second.write_bytes(b"second")
+        expenses = [
+            Expense(
+                source_file=first,
+                expense_id="FIRST",
+                date="2026-07-01",
+                supplier_name="First Cafe",
+                expense_type="meal",
+                amount=20,
+                currency="CAD",
+                line_items=[LineItem(description="Lunch", amount=20)],
+            ),
+            Expense(
+                source_file=second,
+                expense_id="SECOND",
+                date="2026-07-02",
+                supplier_name="Second Cafe",
+                expense_type="meal",
+                amount=25,
+                currency="CAD",
+                line_items=[LineItem(description="Dinner", amount=25)],
+            ),
+        ]
+        save_line_item_review(trip, expenses)
+
+        removed = self.client.post(
+            f"/api/trips/{trip.name}/remove-file",
+            json={"kind": "receipts", "filename": second.name},
+            headers=self.headers,
+        )
+        self.assertEqual(removed.status_code, 200)
+        review = removed.get_json()["trip"]["line_item_review"]
+        self.assertFalse(review["stale"])
+        self.assertEqual([receipt["source_file"] for receipt in review["receipts"]], [first.name])
+
+        first_line = review["receipts"][0]["line_items"][0]
+        edited = self.client.post(
+            f"/api/trips/{trip.name}/line-items/item",
+            json={
+                "source_file": first.name,
+                "line_id": first_line["line_id"],
+                "fields": {"amount": 19.0},
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(edited.status_code, 200)
+        deleted = self.client.post(
+            f"/api/trips/{trip.name}/line-items/remove",
+            json={"source_file": first.name, "line_id": first_line["line_id"]},
+            headers=self.headers,
+        )
+        self.assertEqual(deleted.status_code, 200)
+
     def test_delete_trip_requires_exact_confirmation_and_clears_all_trip_data(self):
         trip = ensure_trip(self.root, "202607_delete-from-ui", mode="arvine")
         receipt = trip / "expenses_receipts" / "nested" / "receipt.pdf"

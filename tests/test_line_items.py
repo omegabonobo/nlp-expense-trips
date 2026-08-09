@@ -391,6 +391,48 @@ class LineItemReviewTests(unittest.TestCase):
             self.assertEqual(reviewed["automatic_status"], "review")
             self.assertEqual(reviewed["status"], "review")
 
+    def test_removed_receipt_does_not_lock_edits_for_remaining_receipts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202607_removed-receipt", mode="arvine")
+            first = trip / "expenses_receipts" / "first.pdf"
+            second = trip / "expenses_receipts" / "second.pdf"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            first_expense = meal_expense(first)
+            first_expense.expense_id = "MEAL-FIRST"
+            second_expense = meal_expense(second)
+            second_expense.expense_id = "MEAL-SECOND"
+            save_line_item_review(trip, [first_expense, second_expense])
+
+            second.unlink()
+            view = line_item_review_view(trip)
+            self.assertFalse(view["stale"])
+            self.assertEqual([receipt["source_file"] for receipt in view["receipts"]], [first.name])
+
+            dinner = next(
+                item for item in view["receipts"][0]["line_items"] if item["description"] == "Dinner"
+            )
+            updated = set_line_item_review(
+                trip,
+                first.name,
+                dinner["line_id"],
+                {"amount": 79.0},
+            )
+            self.assertEqual(
+                next(
+                    item
+                    for item in updated["receipts"][0]["line_items"]
+                    if item["line_id"] == dinner["line_id"]
+                )["amount"],
+                79.0,
+            )
+            removed = remove_line_item(trip, first.name, dinner["line_id"])
+            self.assertNotIn(
+                dinner["line_id"],
+                [item["line_id"] for item in removed["receipts"][0]["line_items"]],
+            )
+
     def test_legacy_review_repairs_arvine_and_low_confidence_alcohol_flags(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
