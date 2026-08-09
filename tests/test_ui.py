@@ -696,7 +696,7 @@ class UITests(unittest.TestCase):
         self.assertEqual(corrected.status_code, 200)
         reviewed = corrected.get_json()["line_item_review"]["receipts"][0]
         self.assertEqual(reviewed["currency"], "CAD")
-        self.assertEqual(reviewed["status"], "review")
+        self.assertEqual(reviewed["status"], "ok")
 
         ready = self.client.post(
             f"/api/trips/{trip.name}/line-items/expense",

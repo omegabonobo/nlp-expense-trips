@@ -283,6 +283,7 @@ def line_item_review_view(trip_dir: Path, state: dict | None = None) -> dict:
                 1 for receipt in receipts if not receipt.get("included_in_arvine", True)
             ),
             "review_count": sum(1 for receipt in receipts if receipt.get("status") == "review"),
+            "ok_count": sum(1 for receipt in receipts if receipt.get("status") == "ok"),
             "ready_count": sum(1 for receipt in receipts if receipt.get("status") == "ready"),
             "line_review_count": sum(1 for item in all_items if not item.get("reviewed")),
             "blocking_count": sum(1 for receipt in receipts if receipt.get("blocking")),
@@ -753,7 +754,8 @@ def recompute_receipt(receipt: dict, mode: str | None = None) -> None:
     field_issues = expense_field_issues(receipt)
     all_lines_reviewed = all(bool(item.get("reviewed")) for item in items)
     ready = bool(receipt.get("reviewed")) and all_lines_reviewed and not blocking and not field_issues
-    status = "ready" if ready else "review"
+    needs_review = bool(field_issues or blocking or automatic_status == "review")
+    status = "ready" if ready else "review" if needs_review else "ok"
     claimable_ratio = (
         round(max(0.0, min(1.0, included_total / line_total)), 8)
         if has_exclusions and reconciled and line_total > 0
@@ -1447,6 +1449,7 @@ def empty_line_item_review() -> dict:
             "arvine_excluded_count": 0,
             "excluded_expense_count": 0,
             "review_count": 0,
+            "ok_count": 0,
             "ready_count": 0,
             "line_review_count": 0,
             "blocking_count": 0,

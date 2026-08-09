@@ -488,14 +488,15 @@ function updateAutosavedReceipt(payload, sourceFile, lineId) {
     receiptReviewed.checked = false;
     receiptReviewed.closest(".review-check")?.classList.remove("ready");
     const label = receiptReviewed.closest(".review-check")?.querySelector("span");
-    if (label) label.textContent = "Reviewed";
+    if (label) label.textContent = "Review";
   }
   const badge = document.querySelector(`.receipt-status-badge${selector}`);
   if (badge) {
-    badge.classList.remove("ready", "review");
+    badge.classList.remove("ready", "review", "ok");
     badge.classList.add(receipt.status);
     badge.textContent = receipt.status.replaceAll("_", " ");
   }
+  document.getElementById(`receipt-${sourceFile}`)?.classList.toggle("needs-review", receipt.status === "review");
 
   const totals = document.querySelector(`[data-receipt-totals="${CSS.escape(sourceFile)}"]`);
   const setTotal = (kind, label, value) => {
@@ -514,8 +515,13 @@ function updateAutosavedReceipt(payload, sourceFile, lineId) {
     difference.classList.toggle("hidden", !value);
   }
   const reviewCount = document.getElementById("receipt-review-count");
+  const okCount = document.getElementById("receipt-ok-count");
   const readyCount = document.getElementById("receipt-ready-count");
-  if (reviewCount) reviewCount.textContent = review.summary.review_count;
+  if (reviewCount) {
+    reviewCount.textContent = review.summary.review_count;
+    reviewCount.parentElement?.classList.toggle("review", Boolean(review.summary.review_count));
+  }
+  if (okCount) okCount.textContent = review.summary.ok_count;
   if (readyCount) readyCount.textContent = review.summary.ready_count;
 }
 

@@ -375,6 +375,7 @@
                 <div><strong>{{ line_review.summary.excluded_count }}</strong><span>removed from IVADO</span></div>
               {% endif %}
               <div class="{{ 'review' if line_review.summary.review_count else '' }}"><strong id="receipt-review-count">{{ line_review.summary.review_count }}</strong><span>receipts need review</span></div>
+              <div><strong id="receipt-ok-count">{{ line_review.summary.ok_count }}</strong><span>receipts OK automatically</span></div>
               <div><strong id="receipt-ready-count">{{ line_review.summary.ready_count }}</strong><span>receipts ready</span></div>
             </div>
             <div class="notice info">
@@ -429,7 +430,7 @@
                         <input type="checkbox" class="receipt-reviewed" data-source-file="{{ receipt.source_file }}"
                           {{ 'checked' if receipt.reviewed }}
                           {{ 'disabled' if trip_busy or line_review.stale or receipt.field_issues or receipt.blocking }}>
-                        <span>{{ 'Ready' if receipt.ready else 'Reviewed' }}</span>
+                        <span>{{ 'Ready' if receipt.ready else 'Review' }}</span>
                       </label>
                       <span class="match-badge receipt-status-badge {{ receipt.status }}" data-source-file="{{ receipt.source_file }}">{{ receipt.status|replace('_', ' ') }}</span>
                       <button class="button secondary small edit-expense" data-source-file="{{ receipt.source_file }}"

@@ -66,8 +66,9 @@ class LineItemReviewTests(unittest.TestCase):
             save_line_item_review(trip, [meal_expense(receipt)])
 
             initial = line_item_review_view(trip)["receipts"][0]
-            self.assertEqual(initial["status"], "review")
+            self.assertEqual(initial["status"], "ok")
             self.assertFalse(initial["reviewed"])
+            self.assertEqual(line_item_review_view(trip)["summary"]["ok_count"], 1)
             first_line = initial["line_items"][0]
 
             one_line = set_line_item_review(
@@ -77,7 +78,7 @@ class LineItemReviewTests(unittest.TestCase):
                 {"reviewed": True},
             )["receipts"][0]
             self.assertEqual(one_line["line_items"][0]["status"], "ready")
-            self.assertEqual(one_line["status"], "review")
+            self.assertEqual(one_line["status"], "ok")
 
             ready = set_expense_review(trip, receipt.name, {"reviewed": True})["receipts"][0]
             self.assertEqual(ready["status"], "ready")
@@ -86,7 +87,7 @@ class LineItemReviewTests(unittest.TestCase):
 
             corrected = set_expense_review(trip, receipt.name, {"currency": "qar"})["receipts"][0]
             self.assertEqual(corrected["currency"], "QAR")
-            self.assertEqual(corrected["status"], "review")
+            self.assertEqual(corrected["status"], "ok")
             self.assertFalse(corrected["reviewed"])
 
             set_expense_review(trip, receipt.name, {"reviewed": True})
@@ -96,7 +97,7 @@ class LineItemReviewTests(unittest.TestCase):
                 first_line["line_id"],
                 {"description": "Dinner corrected"},
             )["receipts"][0]
-            self.assertEqual(changed["status"], "review")
+            self.assertEqual(changed["status"], "ok")
             self.assertFalse(changed["reviewed"])
             changed_line = next(item for item in changed["line_items"] if item["line_id"] == first_line["line_id"])
             self.assertFalse(changed_line["reviewed"])
@@ -340,11 +341,22 @@ class LineItemReviewTests(unittest.TestCase):
             receipt.write_bytes(b"hotel")
             save_line_item_review(
                 trip,
-                [Expense(source_file=receipt, expense_id="", expense_type="hotel", amount=200)],
+                [
+                    Expense(
+                        source_file=receipt,
+                        expense_id="",
+                        date="2026-07-01",
+                        supplier_name="Hotel",
+                        expense_type="hotel",
+                        amount=200,
+                        currency="CAD",
+                    )
+                ],
             )
 
             reviewed = line_item_review_view(trip)["receipts"][0]
             tax_lines = [item for item in reviewed["line_items"] if item["system_type"]]
+            self.assertEqual(reviewed["status"], "ok")
             self.assertEqual(
                 [(item["description"], item["amount"]) for item in tax_lines],
                 [("GST/HST", 0.0), ("QST", 0.0)],
