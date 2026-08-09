@@ -739,14 +739,13 @@ def recompute_receipt(receipt: dict, mode: str | None = None) -> None:
         if isinstance(receipt_total, (int, float))
         else None
     )
-    tolerance = max(0.05, abs(float(receipt_total or 0)) * 0.03)
     is_meal = str(receipt.get("expense_type") or "").startswith("meal")
     has_gap = any(item.get("description") == "Unreconciled meal item - review" for item in items)
-    reconciled = difference is not None and abs(difference) <= tolerance
-    if not is_meal:
-        automatic_status = "not_applicable"
-    elif not reconciled or has_gap:
+    reconciled = difference == 0.0
+    if not reconciled or has_gap:
         automatic_status = "review"
+    elif not is_meal:
+        automatic_status = "not_applicable"
     else:
         automatic_status = "ok"
     has_exclusions = excluded_total > 0.005

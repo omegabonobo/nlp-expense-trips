@@ -350,6 +350,7 @@ class LineItemReviewTests(unittest.TestCase):
                         expense_type="hotel",
                         amount=200,
                         currency="CAD",
+                        line_items=[LineItem(description="Hotel stay", amount=200)],
                     )
                 ],
             )
@@ -361,6 +362,34 @@ class LineItemReviewTests(unittest.TestCase):
                 [(item["description"], item["amount"]) for item in tax_lines],
                 [("GST/HST", 0.0), ("QST", 0.0)],
             )
+
+    def test_non_meal_receipt_with_a_line_total_difference_requires_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202607_non-meal-gap", mode="arvine")
+            receipt = trip / "expenses_receipts" / "other.pdf"
+            receipt.write_bytes(b"other")
+            save_line_item_review(
+                trip,
+                [
+                    Expense(
+                        source_file=receipt,
+                        expense_id="",
+                        date="2026-07-24",
+                        supplier_name="DAOUST DE 210",
+                        expense_type="other",
+                        amount=30.45,
+                        currency="CAD",
+                    )
+                ],
+            )
+
+            reviewed = line_item_review_view(trip)["receipts"][0]
+            self.assertEqual(reviewed["line_total"], 0.0)
+            self.assertEqual(reviewed["difference"], -30.45)
+            self.assertFalse(reviewed["reconciled"])
+            self.assertEqual(reviewed["automatic_status"], "review")
+            self.assertEqual(reviewed["status"], "review")
 
     def test_legacy_review_repairs_arvine_and_low_confidence_alcohol_flags(self):
         with tempfile.TemporaryDirectory() as tmp:
