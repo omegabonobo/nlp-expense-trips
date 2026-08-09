@@ -15,10 +15,10 @@ from nlp_expenses.accounting import (
     trip_accounting_profile,
 )
 from nlp_expenses.cli import main
-from nlp_expenses.extraction.arvine import heuristic_parse_arvine_receipt
+from nlp_expenses.extraction.arvine import heuristic_parse_arvine_receipt, normalize_arvine_line_items
 from nlp_expenses.generator import generate_review
 from nlp_expenses.matching import match_normalized_transactions
-from nlp_expenses.models import Expense, NormalizedTransaction
+from nlp_expenses.models import Expense, LineItem, NormalizedTransaction
 from nlp_expenses.statement_normalizer import (
     normalize_statement_files,
     preflight_statement_files,
@@ -36,6 +36,32 @@ def write_csv(path: Path, headers: list[str], rows: list[list[object]], delimite
 
 
 class ArvineTests(unittest.TestCase):
+    def test_openai_tax_rows_collapse_into_canonical_structured_lines(self):
+        expense = Expense(
+            source_file=Path("receipt.pdf"),
+            expense_id="",
+            expense_type="meal",
+            amount=18.29,
+            line_items=[
+                LineItem(description="Pizza", amount=15.90),
+                LineItem(description="GST/HST", amount=0.80),
+                LineItem(description="QST", amount=1.59),
+            ],
+        )
+
+        normalize_arvine_line_items(expense)
+
+        self.assertEqual(expense.gst_hst, 0.80)
+        self.assertEqual(expense.qst, 1.59)
+        self.assertEqual(
+            [(item.description, item.amount, item.line_type) for item in expense.line_items],
+            [
+                ("Pizza", 15.90, "purchase"),
+                ("GST/HST", 0.80, "gst_hst"),
+                ("QST", 1.59, "qst"),
+            ],
+        )
+
     def test_trip_mode_is_saved_and_legacy_trip_defaults_to_ivado(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

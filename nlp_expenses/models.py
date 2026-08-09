@@ -8,6 +8,7 @@ from pathlib import Path
 class LineItem:
     description: str
     amount: float | None = None
+    line_type: str = "purchase"
     is_alcohol: bool = False
     included: bool = True
     confidence: float = 0.0

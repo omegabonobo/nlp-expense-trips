@@ -10,6 +10,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from nlp_expenses.models import Expense, LineItem
+from nlp_expenses.tax_lines import SYSTEM_TAX_LINES, tax_line_type
 from nlp_expenses.trips import (
     list_receipt_files,
     relative_source_name,
@@ -21,7 +22,7 @@ from nlp_expenses.trips import (
 
 
 LINE_ITEM_REVIEW_FILE = ".nlp-expenses-line-items.json"
-LINE_ITEM_REVIEW_VERSION = 4
+LINE_ITEM_REVIEW_VERSION = 5
 PAID_BY_VALUES = {"employee_personal", "arvine_corporate_bmo"}
 IVADO_EXCLUSION_REASONS = {
     "alcohol",
@@ -120,6 +121,7 @@ def save_line_item_review(
     }
     receipts = []
     for expense in expenses:
+        normalize_expense_tax_lines(expense)
         source_file = source_file_key(expense.source_file)
         occurrences: dict[str, int] = {}
         lines = []
@@ -211,6 +213,37 @@ def save_line_item_review(
     }
     save_line_item_review_state(trip_dir, state)
     return state
+
+
+def normalize_expense_tax_lines(expense: Expense) -> None:
+    """Normalize parser output before assigning stable review-line identities."""
+
+    ordinary_lines = []
+    extracted_tax_lines: dict[str, LineItem] = {}
+    for item in expense.line_items:
+        kind = item.line_type if item.line_type in SYSTEM_TAX_LINES else tax_line_type(item.description)
+        if kind:
+            extracted_tax_lines.setdefault(kind, item)
+        else:
+            ordinary_lines.append(item)
+    tax_lines = []
+    for kind, label in SYSTEM_TAX_LINES.items():
+        structured_amount = getattr(expense, kind)
+        extracted_amount = extracted_tax_lines.get(kind).amount if extracted_tax_lines.get(kind) else None
+        amount = round(float(structured_amount if structured_amount is not None else extracted_amount or 0), 2)
+        setattr(expense, kind, amount)
+        tax_lines.append(
+            LineItem(
+                description=label,
+                amount=amount,
+                line_type=kind,
+                included=True,
+                confidence=1.0,
+                review_note="System tax line synchronized with the expense tax field.",
+                synthetic=True,
+            )
+        )
+    expense.line_items = ordinary_lines + tax_lines
 
 
 def line_item_review_view(trip_dir: Path, state: dict | None = None) -> dict:
@@ -335,6 +368,8 @@ def add_line_item(
     description = " ".join(str(description or "").split())
     if not description:
         raise ValueError("Line-item description cannot be empty.")
+    if tax_line_type(description):
+        raise ValueError("Use Edit expense to set GST/HST or QST; tax rows are managed automatically.")
     try:
         numeric_amount = round(float(amount), 2)
     except (TypeError, ValueError) as exc:
@@ -396,6 +431,8 @@ def remove_line_item(trip_dir: Path, source_file: str, line_id: str) -> dict:
     index = next((index for index, item in enumerate(items) if item.get("line_id") == line_id), None)
     if index is None:
         raise FileNotFoundError("The selected receipt line is no longer available.")
+    if items[index].get("system_type") in SYSTEM_TAX_LINES:
+        raise ValueError("GST/HST and QST are required system rows and cannot be removed.")
     removed = dict(items.pop(index))
     removed["removed_at"] = datetime.now().isoformat(timespec="seconds")
     receipt.setdefault("removed_line_items", []).append(removed)
@@ -417,6 +454,7 @@ def set_line_item_review(
     item = next((value for value in receipt.get("line_items", []) if value.get("line_id") == line_id), None)
     if not item:
         raise FileNotFoundError("The selected receipt line is no longer available.")
+    system_type = item.get("system_type")
     supported = {
         "included",
         "included_in_arvine",
@@ -431,6 +469,8 @@ def set_line_item_review(
     unknown = set(fields) - supported
     if unknown:
         raise ValueError(f"Unsupported line-item fields: {', '.join(sorted(unknown))}.")
+    if system_type in SYSTEM_TAX_LINES and set(fields) - {"amount", "reviewed"}:
+        raise ValueError("Tax-row labels and claim settings are managed automatically; only the amount is editable.")
     if set(fields) - {"reviewed"}:
         item["reviewed"] = False
         item["reviewed_at"] = None
@@ -503,6 +543,14 @@ def set_line_item_review(
         if amount < 0:
             raise ValueError("Line-item amount cannot be negative.")
         item["amount"] = amount
+        if system_type in SYSTEM_TAX_LINES:
+            receipt[system_type] = amount
+            extracted = receipt.get("extracted") if isinstance(receipt.get("extracted"), dict) else {}
+            overrides = receipt.setdefault("field_overrides", {})
+            if values_differ(amount, extracted.get(system_type)):
+                overrides[system_type] = amount
+            else:
+                overrides.pop(system_type, None)
     if "note" in fields:
         item["inclusion_note"] = str(fields["note"] or "").strip()[:500]
     if "reviewed" in fields:
@@ -745,6 +793,7 @@ def serialize_line_item(item: LineItem, line_id: str, mode: str) -> dict:
         "line_id": line_id,
         "description": item.description,
         "amount": item.amount,
+        "system_type": item.line_type if item.line_type in SYSTEM_TAX_LINES else None,
         "is_alcohol": is_alcohol,
         "included": auto_included,
         "included_in_arvine": auto_included_in_arvine,
@@ -873,8 +922,8 @@ def serialize_expense_fields(expense: Expense) -> dict:
         "country": expense.country,
         "province": expense.province,
         "subtotal": expense.subtotal,
-        "gst_hst": expense.gst_hst,
-        "qst": expense.qst,
+        "gst_hst": round(float(expense.gst_hst or 0), 2),
+        "qst": round(float(expense.qst or 0), 2),
         "gst_hst_number": expense.gst_hst_number,
         "qst_number": expense.qst_number,
         "business_purpose": expense.business_purpose,
@@ -928,7 +977,7 @@ def validate_expense_fields(fields: dict, current: dict) -> dict:
             normalized[field] = " ".join(str(value or "").split())[:500]
         elif field in EXPENSE_NUMERIC_FIELDS:
             if value in ("", None):
-                normalized[field] = None
+                normalized[field] = 0.0 if field in SYSTEM_TAX_LINES else None
             else:
                 try:
                     normalized[field] = round(float(value), 2)
@@ -1086,6 +1135,7 @@ def deserialize_line_item(item: dict) -> LineItem:
     return LineItem(
         description=str(item.get("description") or ""),
         amount=float(item["amount"]) if isinstance(item.get("amount"), (int, float)) else None,
+        line_type=str(item.get("system_type") or "purchase"),
         is_alcohol=bool(item.get("is_alcohol")),
         included=bool(item.get("included", True)),
         confidence=float(item.get("confidence") or 0.0),
@@ -1102,6 +1152,9 @@ def deserialize_line_item(item: dict) -> LineItem:
 
 
 def stable_line_id(source_file: str, item: LineItem, occurrences: dict[str, int]) -> str:
+    if item.line_type in SYSTEM_TAX_LINES:
+        digest = hashlib.sha256(f"{source_file}|system-tax|{item.line_type}".encode("utf-8")).hexdigest()[:16]
+        return f"LI-{digest}"
     description = re.sub(r"\s+", " ", item.description.strip().casefold())
     amount = "" if item.amount is None else f"{item.amount:.2f}"
     signature = f"{description}|{amount}"
@@ -1189,12 +1242,78 @@ def migrate_receipt_contract_fields(receipt: dict, mode: str) -> None:
     receipt.setdefault("paid_by_overridden", False)
     receipt.setdefault("reviewed", False)
     receipt.setdefault("reviewed_at", None)
+    ensure_receipt_tax_lines(receipt)
     for item in receipt.get("line_items", []):
         if isinstance(item, dict):
             migrate_line_contract_fields(item, mode)
     receipt["included"] = bool(
         receipt.get("included_in_ivado" if mode == "ivado" else "included_in_arvine", True)
     )
+
+
+def ensure_receipt_tax_lines(receipt: dict) -> None:
+    """Collapse extracted tax-like rows into two protected, structured rows."""
+
+    source_file = str(receipt.get("source_file") or "receipt")
+    ordinary_lines = []
+    existing_tax_lines: dict[str, dict] = {}
+    for item in receipt.get("line_items", []):
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("system_type") if item.get("system_type") in SYSTEM_TAX_LINES else tax_line_type(item.get("description"))
+        if kind:
+            existing_tax_lines.setdefault(kind, item)
+        else:
+            ordinary_lines.append(item)
+
+    tax_lines = []
+    for kind, label in SYSTEM_TAX_LINES.items():
+        existing = existing_tax_lines.get(kind, {})
+        structured_amount = receipt.get(kind)
+        existing_amount = existing.get("amount")
+        amount = structured_amount if isinstance(structured_amount, (int, float)) else existing_amount
+        amount = round(float(amount or 0), 2)
+        receipt[kind] = amount
+        previous_amount = existing.get("amount")
+        line = dict(existing)
+        digest = hashlib.sha256(f"{source_file}|system-tax|{kind}".encode("utf-8")).hexdigest()[:16]
+        line.update(
+            {
+                "line_id": f"LI-{digest}",
+                "description": label,
+                "amount": amount,
+                "system_type": kind,
+                "is_alcohol": False,
+                "included": True,
+                "included_in_arvine": True,
+                "included_in_ivado": True,
+                "ivado_exclusion_reason": None,
+                "auto_is_alcohol": False,
+                "auto_included": True,
+                "auto_included_in_arvine": True,
+                "auto_included_in_ivado": True,
+                "extracted_description": label,
+                "extracted_amount": amount,
+                "confidence": 1.0,
+                "review_note": "System tax line synchronized with the expense tax field.",
+                "alcohol_confidence": 0.0,
+                "alcohol_reason": "",
+                "alcohol_matched_term": "",
+                "auto_alcohol_confidence": 0.0,
+                "auto_alcohol_reason": "",
+                "auto_alcohol_matched_term": "",
+                "inclusion_overridden": False,
+                "alcohol_overridden": False,
+                "inclusion_note": "",
+                "synthetic": True,
+                "manual": False,
+                "updated_at": line.get("updated_at"),
+                "reviewed": bool(line.get("reviewed")) if previous_amount == amount else False,
+                "reviewed_at": line.get("reviewed_at") if previous_amount == amount else None,
+            }
+        )
+        tax_lines.append(line)
+    receipt["line_items"] = ordinary_lines + tax_lines
 
 
 def normalize_line_program_decisions(item: dict) -> None:
@@ -1239,7 +1358,7 @@ def load_line_item_review_state(trip_dir: Path) -> dict | None:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if not isinstance(state, dict) or state.get("version") not in {1, 2, 3, LINE_ITEM_REVIEW_VERSION}:
+    if not isinstance(state, dict) or state.get("version") not in {1, 2, 3, 4, LINE_ITEM_REVIEW_VERSION}:
         return None
     mode = str(state.get("mode") or trip_mode(trip_dir))
     for receipt in state.get("receipts", []):
@@ -1284,8 +1403,8 @@ def copy_receipt(receipt: dict) -> dict:
     copied.setdefault("country", "")
     copied.setdefault("province", "")
     copied.setdefault("subtotal", None)
-    copied.setdefault("gst_hst", None)
-    copied.setdefault("qst", None)
+    copied.setdefault("gst_hst", 0.0)
+    copied.setdefault("qst", 0.0)
     copied.setdefault("gst_hst_number", "")
     copied.setdefault("qst_number", "")
     copied.setdefault("business_purpose", "")

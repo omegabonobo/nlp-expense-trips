@@ -155,6 +155,8 @@ code { font-family: "SFMono-Regular", Consolas, monospace; color: #405149; overf
 .line-save-status.saved { color: var(--green); }
 .line-save-status.error { color: var(--red); }
 .line-item-table tr.excluded { background: #f4f5f4; color: #737d77; }
+.line-item-table tr.system-line { background: #f8faf9; }
+.system-line-label { display: block; padding: 7px 0; font-size: 10px; }
 .line-item-table tr.excluded td:nth-child(2) strong { text-decoration: line-through; }
 .include-switch, .alcohol-check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 10px; font-weight: 750; }
 .include-switch input, .alcohol-check input { accent-color: var(--green); }

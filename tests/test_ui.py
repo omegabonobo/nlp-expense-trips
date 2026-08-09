@@ -890,7 +890,7 @@ class UITests(unittest.TestCase):
         self.assertEqual(terminal["status"], "succeeded")
         review = self.client.get(f"/api/trips/{trip.name}").get_json()["trip"]["line_item_review"]
         self.assertTrue(review["available"])
-        self.assertEqual(review["summary"]["line_count"], 2)
+        self.assertEqual(review["summary"]["line_count"], 4)
         self.assertEqual(review["summary"]["excluded_count"], 1)
 
     def test_reconciliation_sync_and_manual_mapping_api(self):

@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 from nlp_expenses.models import Expense, LineItem
+from nlp_expenses.tax_lines import SYSTEM_TAX_LINES, tax_line_type
 
 from .receipts import (
     SUPPORTED_CURRENCIES,
@@ -26,8 +27,6 @@ PROVINCE_MARKERS = {
     "BC": re.compile(r"\b(?i:british columbia|vancouver|victoria)\b|\bBC\b"),
     "AB": re.compile(r"\b(?i:alberta|calgary|edmonton)\b|\bAB\b"),
 }
-
-
 def parse_arvine_receipt(
     path: Path,
     use_llm: bool = False,
@@ -93,30 +92,38 @@ def default_description(expense: Expense) -> str:
 
 
 def normalize_arvine_line_items(expense: Expense) -> None:
-    """Retain meal purchases and add explicit tax rows for proportional review."""
+    """Create exactly two canonical tax rows and retain meal purchases."""
 
-    if expense.expense_type != "meal":
-        expense.line_items = []
-        return
-    items = [
-        item
-        for item in expense.line_items
-        if item.description not in {"Unreconciled meal item - review", "Alcohol adjustment - manual"}
-        and not re.fullmatch(r"(?:GST|HST|QST|TPS|TVH|TVQ)", item.description.strip(), re.I)
-    ]
-    for description, amount in (("GST/HST", expense.gst_hst), ("QST", expense.qst)):
-        if amount is not None and amount > 0:
-            items.append(
-                LineItem(
-                    description=description,
-                    amount=round(amount, 2),
-                    included=True,
-                    confidence=1.0,
-                    review_note="Tax line added from the structured invoice tax field.",
-                    synthetic=True,
-                )
+    extracted_tax_lines: dict[str, LineItem] = {}
+    purchase_items = []
+    for item in expense.line_items:
+        kind = item.line_type if item.line_type in SYSTEM_TAX_LINES else tax_line_type(item.description)
+        if kind:
+            extracted_tax_lines.setdefault(kind, item)
+        elif (
+            expense.expense_type == "meal"
+            and item.description not in {"Unreconciled meal item - review", "Alcohol adjustment - manual"}
+        ):
+            purchase_items.append(item)
+
+    items = purchase_items
+    for kind, label in SYSTEM_TAX_LINES.items():
+        structured_amount = getattr(expense, kind)
+        extracted_amount = extracted_tax_lines.get(kind).amount if extracted_tax_lines.get(kind) else None
+        amount = round(float(structured_amount if structured_amount is not None else extracted_amount or 0), 2)
+        setattr(expense, kind, amount)
+        items.append(
+            LineItem(
+                description=label,
+                amount=amount,
+                line_type=kind,
+                included=True,
+                confidence=1.0,
+                review_note="System tax line synchronized with the expense tax field.",
+                synthetic=True,
             )
-    if expense.amount is not None:
+        )
+    if expense.expense_type == "meal" and expense.amount is not None:
         gap = round(expense.amount - sum(item.amount or 0 for item in items), 2)
         if gap > max(0.05, expense.amount * 0.03):
             items.append(
@@ -309,6 +316,8 @@ def llm_parse_arvine_receipt(
                         "Treat a date visible in the receipt or invoice as authoritative. Use a source-filename date "
                         "only when no reliable date is present in the receipt content, and never override a clear receipt date. "
                         "For meal receipts, extract purchased food and drink line items without classifying them. "
+                        "Do not return GST, HST, QST, TPS, TVH, or TVQ as purchased line_items; return taxes only "
+                        "in the structured gst_hst and qst fields. "
                         "For non-meal receipts return an empty line_items array. "
                         "GST/HST includes GST, HST, TPS, or TVH; QST includes QST or TVQ. Copy tax registration numbers "
                         "only when visible and do not invent missing tax, location, or registration data. Use ISO currency codes. "

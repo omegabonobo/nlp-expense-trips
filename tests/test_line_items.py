@@ -12,6 +12,7 @@ from nlp_expenses.line_items import (
     ensure_line_item_review_ready,
     line_item_review_view,
     load_line_item_review_state,
+    remove_line_item,
     reset_receipt_review,
     save_line_item_review,
     save_line_item_review_state,
@@ -266,6 +267,8 @@ class LineItemReviewTests(unittest.TestCase):
                     alcohol_reason="OpenAI classified the line as alcohol",
                 ),
             ]
+            expense.gst_hst = 0.0
+            expense.qst = 0.0
 
             save_line_item_review(trip, [expense])
             reviewed = line_item_review_view(trip)["receipts"][0]
@@ -275,6 +278,77 @@ class LineItemReviewTests(unittest.TestCase):
             self.assertEqual(beer["ivado_exclusion_reason"], "alcohol")
             self.assertEqual(reviewed["arvine_included_total"], 115.0)
             self.assertEqual(reviewed["ivado_included_total"], 95.0)
+
+    def test_tax_fields_and_protected_tax_lines_stay_synchronized(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202607_tax-lines", mode="arvine")
+            receipt = trip / "expenses_receipts" / "meal.pdf"
+            receipt.write_bytes(b"meal")
+            expense = Expense(
+                source_file=receipt,
+                expense_id="",
+                expense_type="meal",
+                amount=18.29,
+                subtotal=15.90,
+                line_items=[
+                    LineItem(description="Pizza", amount=15.90),
+                    LineItem(description="GST/HST", amount=0.80),
+                    LineItem(description="QST", amount=1.59),
+                ],
+            )
+            save_line_item_review(trip, [expense])
+
+            reviewed = line_item_review_view(trip)["receipts"][0]
+            tax_lines = {item["system_type"]: item for item in reviewed["line_items"] if item["system_type"]}
+            self.assertEqual(set(tax_lines), {"gst_hst", "qst"})
+            self.assertEqual(tax_lines["gst_hst"]["description"], "GST/HST")
+            self.assertEqual(tax_lines["gst_hst"]["amount"], 0.80)
+            self.assertEqual(tax_lines["qst"]["amount"], 1.59)
+
+            updated = set_expense_review(trip, receipt.name, {"gst_hst": 1.00, "qst": ""})[
+                "receipts"
+            ][0]
+            tax_lines = {item["system_type"]: item for item in updated["line_items"] if item["system_type"]}
+            self.assertEqual(updated["gst_hst"], 1.00)
+            self.assertEqual(updated["qst"], 0.0)
+            self.assertEqual(tax_lines["gst_hst"]["amount"], 1.00)
+            self.assertEqual(tax_lines["qst"]["amount"], 0.0)
+
+            updated = set_line_item_review(
+                trip,
+                receipt.name,
+                tax_lines["qst"]["line_id"],
+                {"amount": 1.75},
+            )["receipts"][0]
+            self.assertEqual(updated["qst"], 1.75)
+            with self.assertRaisesRegex(ValueError, "managed automatically"):
+                set_line_item_review(
+                    trip,
+                    receipt.name,
+                    tax_lines["gst_hst"]["line_id"],
+                    {"description": "Sales tax"},
+                )
+            with self.assertRaisesRegex(ValueError, "cannot be removed"):
+                remove_line_item(trip, receipt.name, tax_lines["gst_hst"]["line_id"])
+
+    def test_every_expense_has_zero_default_tax_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202607_zero-tax-lines", mode="arvine")
+            receipt = trip / "expenses_receipts" / "hotel.pdf"
+            receipt.write_bytes(b"hotel")
+            save_line_item_review(
+                trip,
+                [Expense(source_file=receipt, expense_id="", expense_type="hotel", amount=200)],
+            )
+
+            reviewed = line_item_review_view(trip)["receipts"][0]
+            tax_lines = [item for item in reviewed["line_items"] if item["system_type"]]
+            self.assertEqual(
+                [(item["description"], item["amount"]) for item in tax_lines],
+                [("GST/HST", 0.0), ("QST", 0.0)],
+            )
 
     def test_legacy_review_repairs_arvine_and_low_confidence_alcohol_flags(self):
         with tempfile.TemporaryDirectory() as tmp:

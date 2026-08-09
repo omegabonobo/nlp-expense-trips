@@ -449,7 +449,7 @@
                       {% endif %}
                       <tbody>
                         {% for item in receipt.line_items %}
-                          <tr class="{{ 'excluded' if trip.mode == 'ivado' and not item.included_in_ivado else '' }}">
+                          <tr class="{{ 'system-line' if item.system_type else '' }} {{ 'excluded' if trip.mode == 'ivado' and not item.included_in_ivado else '' }}">
                             <td>
                               <label class="review-check {{ 'ready' if item.reviewed }}" title="Mark this receipt line as reviewed">
                                 <input type="checkbox" class="line-item-reviewed"
@@ -459,11 +459,16 @@
                               </label>
                             </td>
                             <td>
-                              <input class="input compact-input line-item-description" value="{{ item.description }}"
-                                data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
-                                data-saved-value="{{ item.description }}" data-autosave-field="description"
-                                {{ 'disabled' if trip_busy or line_review.stale }}>
-                              {% if item.synthetic %}<span class="synthetic-label">Generated review line</span>{% endif %}
+                              {% if item.system_type %}
+                                <strong class="system-line-label">{{ item.description }}</strong>
+                                <span class="synthetic-label">System tax line</span>
+                              {% else %}
+                                <input class="input compact-input line-item-description" value="{{ item.description }}"
+                                  data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                                  data-saved-value="{{ item.description }}" data-autosave-field="description"
+                                  {{ 'disabled' if trip_busy or line_review.stale }}>
+                                {% if item.synthetic %}<span class="synthetic-label">Generated review line</span>{% endif %}
+                              {% endif %}
                               {% if item.inclusion_overridden %}<small>User inclusion override</small>{% endif %}
                             </td>
                             <td><input class="input compact-input line-item-amount" type="number" min="0" step="0.01"
@@ -473,25 +478,36 @@
                               {{ 'disabled' if trip_busy or line_review.stale }}></td>
                             {% if trip.mode == 'ivado' %}
                               <td>
-                                <label class="alcohol-check">
-                                  <input type="checkbox" class="line-item-alcohol"
-                                    data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
-                                    {{ 'checked' if item.is_alcohol }} {{ 'disabled' if trip_busy or line_review.stale }}>
-                                  <span>{{ 'Alcohol' if item.is_alcohol else 'No' }}</span>
-                                </label>
-                                {% if item.alcohol_overridden %}<small>Corrected by user</small>{% endif %}
+                                {% if item.system_type %}
+                                  <span>No</span><small>Fixed tax row</small>
+                                {% else %}
+                                  <label class="alcohol-check">
+                                    <input type="checkbox" class="line-item-alcohol"
+                                      data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                                      {{ 'checked' if item.is_alcohol }} {{ 'disabled' if trip_busy or line_review.stale }}>
+                                    <span>{{ 'Alcohol' if item.is_alcohol else 'No' }}</span>
+                                  </label>
+                                  {% if item.alcohol_overridden %}<small>Corrected by user</small>{% endif %}
+                                {% endif %}
                               </td>
                               <td>
-                                <label class="include-switch" title="Included in IVADO sponsor claim">
-                                  <input type="checkbox" class="line-item-ivado"
-                                    data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
-                                    {{ 'checked' if item.included_in_ivado }}
-                                    {{ 'disabled' if trip_busy or line_review.stale or item.is_alcohol }}>
-                                  <span>{{ 'Included' if item.included_in_ivado else 'Removed' }}</span>
-                                </label>
+                                {% if item.system_type %}
+                                  <span>Included</span><small>Follows the expense</small>
+                                {% else %}
+                                  <label class="include-switch" title="Included in IVADO sponsor claim">
+                                    <input type="checkbox" class="line-item-ivado"
+                                      data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                                      {{ 'checked' if item.included_in_ivado }}
+                                      {{ 'disabled' if trip_busy or line_review.stale or item.is_alcohol }}>
+                                    <span>{{ 'Included' if item.included_in_ivado else 'Removed' }}</span>
+                                  </label>
+                                {% endif %}
                               </td>
                               <td>
-                                {% if item.is_alcohol %}
+                                {% if item.system_type %}
+                                  <strong>Structured tax</strong>
+                                  <small>Edit the amount here or in Edit expense.</small>
+                                {% elif item.is_alcohol %}
                                   <strong>Alcohol — automatic</strong>
                                   <small>Mark this line as not alcohol to include it in IVADO.</small>
                                 {% elif item.included_in_ivado %}
@@ -515,9 +531,11 @@
                             <td class="line-actions">
                               <small class="line-save-status" data-source-file="{{ receipt.source_file }}"
                                 data-line-id="{{ item.line_id }}" aria-live="polite"></small>
-                              <button class="icon-button remove-line-item"
-                                data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
-                                title="Remove line" {{ 'disabled' if trip_busy or line_review.stale }}>×</button>
+                              {% if not item.system_type %}
+                                <button class="icon-button remove-line-item"
+                                  data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                                  title="Remove line" {{ 'disabled' if trip_busy or line_review.stale }}>×</button>
+                              {% endif %}
                             </td>
                           </tr>
                         {% else %}
@@ -1442,8 +1460,8 @@
         <label class="field-label">Country<input class="input" name="country"><small class="field-error" data-error-for="country"></small></label>
         <label class="field-label">Province / state<input class="input" name="province"><small class="field-error" data-error-for="province"></small></label>
         <label class="field-label">Subtotal<input class="input" name="subtotal" type="number" min="0" step="0.01"><small class="field-error" data-error-for="subtotal"></small></label>
-        <label class="field-label">GST/HST<input class="input" name="gst_hst" type="number" min="0" step="0.01"><small class="field-error" data-error-for="gst_hst"></small></label>
-        <label class="field-label">QST<input class="input" name="qst" type="number" min="0" step="0.01"><small class="field-error" data-error-for="qst"></small></label>
+        <label class="field-label">GST/HST<input class="input" name="gst_hst" type="number" min="0" step="0.01"><small>Updates the fixed GST/HST line; use 0 when absent.</small><small class="field-error" data-error-for="gst_hst"></small></label>
+        <label class="field-label">QST<input class="input" name="qst" type="number" min="0" step="0.01"><small>Updates the fixed QST line; use 0 when absent.</small><small class="field-error" data-error-for="qst"></small></label>
         <label class="field-label">Tax documentation<input class="input" name="tax_documentation_status" placeholder="ok or review"><small class="field-error" data-error-for="tax_documentation_status"></small></label>
         <label class="field-label">GST/HST number<input class="input" name="gst_hst_number"><small class="field-error" data-error-for="gst_hst_number"></small></label>
         <label class="field-label">QST number<input class="input" name="qst_number"><small class="field-error" data-error-for="qst_number"></small></label>

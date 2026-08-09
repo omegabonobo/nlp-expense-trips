@@ -986,7 +986,7 @@ def validate_invoice_fields(fields: dict, extracted: dict) -> dict:
         tax = normalized.get(field)
         if tax is not None and tax < 0:
             errors[field] = "Tax cannot be negative."
-        elif tax is not None and amount is not None and tax > amount:
+        elif tax is not None and amount is not None and tax > 0 and tax > amount:
             errors[field] = "Tax cannot be greater than the invoice total."
     taxes = sum(value or 0 for value in (normalized.get("gst_hst"), normalized.get("qst")))
     if amount is not None and amount >= 0 and taxes > amount:
