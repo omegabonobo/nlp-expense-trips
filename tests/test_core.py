@@ -21,9 +21,9 @@ from nlp_expenses.extraction.receipts import (
 )
 from nlp_expenses.extraction.statements import parse_csv_statement
 from nlp_expenses.generator import SUPPORTED_RECEIPTS, assign_simple_expense_ids, generate_review
-from nlp_expenses.matching import close_split_amount, match_score
+from nlp_expenses.matching import close_split_amount, match_normalized_transactions, match_score
 from nlp_expenses.matching import enrich_expenses_from_statements
-from nlp_expenses.models import Expense, StatementTransaction
+from nlp_expenses.models import Expense, NormalizedTransaction, StatementTransaction
 from nlp_expenses.trips import ensure_trip, validate_trip_name
 from nlp_expenses.workbook import build_workbook
 
@@ -458,6 +458,68 @@ class CoreTests(unittest.TestCase):
             foreign_currency="AUD",
         )
         self.assertGreaterEqual(match_score(expense, tx), 0.72)
+
+    def test_same_date_and_amount_can_auto_match_with_a_weak_merchant_name(self):
+        expense = Expense(
+            source_file=Path("receipt.pdf"),
+            expense_id="EXP-1",
+            date="2026-07-10",
+            supplier_name="Receipt merchant unreadable",
+            amount=42.50,
+            currency="CAD",
+        )
+        transaction = NormalizedTransaction(
+            source_file=Path("card.csv"),
+            source_row=2,
+            provider="amex",
+            transaction_group_id="TX-1",
+            funding_leg_id="TX-1:1",
+            transaction_date="2026-07-10",
+            description="SQ *LOCAL PURCHASE",
+            match_eligible=True,
+            purchase_amount=42.50,
+            purchase_currency="CAD",
+            cad_amount=42.50,
+            cad_completeness="complete",
+        )
+
+        match_normalized_transactions([expense], [transaction])
+
+        self.assertEqual(transaction.expense_id, expense.expense_id)
+        self.assertEqual(transaction.match_status, "auto")
+        self.assertGreaterEqual(transaction.match_confidence, 0.72)
+
+    def test_same_restaurant_date_with_receipt_thirty_percent_lower_is_review_suggestion(self):
+        expense = Expense(
+            source_file=Path("receipt.pdf"),
+            expense_id="EXP-1",
+            date="2026-07-10",
+            supplier_name="Bistro Montreal",
+            amount=70.0,
+            currency="CAD",
+        )
+        transaction = NormalizedTransaction(
+            source_file=Path("card.csv"),
+            source_row=2,
+            provider="amex",
+            transaction_group_id="TX-1",
+            funding_leg_id="TX-1:1",
+            transaction_date="2026-07-10",
+            description="BISTRO MONTREAL",
+            match_eligible=True,
+            purchase_amount=100.0,
+            purchase_currency="CAD",
+            cad_amount=100.0,
+            cad_completeness="complete",
+        )
+
+        match_normalized_transactions([expense], [transaction])
+
+        self.assertEqual(transaction.suggested_expense_id, expense.expense_id)
+        self.assertFalse(transaction.expense_id)
+        self.assertEqual(transaction.match_status, "suggested")
+        self.assertGreaterEqual(transaction.match_confidence, 0.72)
+        self.assertIn("30% below the card total", transaction.match_review_reason)
 
     def test_split_amount_can_still_match_statement(self):
         self.assertTrue(close_split_amount(400.0, 100.0))

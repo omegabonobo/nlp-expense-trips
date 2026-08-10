@@ -24,6 +24,8 @@ from nlp_expenses.reconciliation import (
     set_manual_match,
     set_transaction_allocations,
     set_transaction_decision,
+    serialized_candidate_reason,
+    serialized_candidate_score,
     sync_reconciliation,
 )
 from nlp_expenses.trips import ensure_trip
@@ -38,6 +40,25 @@ def write_generic_statement(path: Path) -> None:
 
 
 class ReconciliationTests(unittest.TestCase):
+    def test_receipt_matcher_ranks_same_date_merchant_with_tax_tip_gap(self):
+        expense = {
+            "date": "2026-07-10",
+            "vendor": "Bistro Montreal",
+            "amount": 70.0,
+            "currency": "CAD",
+            "number_of_people": 1,
+        }
+        transaction = {
+            "transaction_date": "2026-07-10",
+            "description": "SQ *BISTRO MONTREAL",
+            "purchase_amount": 100.0,
+            "purchase_currency": "CAD",
+            "cad_amount": 100.0,
+        }
+
+        self.assertGreaterEqual(serialized_candidate_score(expense, transaction, None), 0.72)
+        self.assertIn("30% below the card total", serialized_candidate_reason(expense, transaction))
+
     def test_nested_receipt_folders_are_recursive_and_duplicate_basenames_stay_distinct(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

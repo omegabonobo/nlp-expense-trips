@@ -108,6 +108,7 @@ class NormalizedTransaction:
     suggested_expense_id: str = ""
     match_status: str = "unmatched"
     match_confidence: float = 0.0
+    match_review_reason: str = ""
     normalization_status: str = "ok"
     review_note: str = ""
 

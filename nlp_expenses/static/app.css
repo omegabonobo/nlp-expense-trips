@@ -125,12 +125,19 @@ code { font-family: "SFMono-Regular", Consolas, monospace; color: #405149; overf
 .line-receipt-list { display: grid; gap: 13px; }
 .line-receipt { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
 .line-receipt.needs-review { border-color: #efd49d; }
+.line-receipt.items-collapsed .line-item-table-wrap { display: none; }
 .line-receipt-heading { padding: 13px 14px; display: flex; align-items: center; justify-content: space-between; gap: 14px; background: var(--surface-soft); }
 .line-receipt-heading > div:first-child { min-width: 0; display: grid; gap: 4px; }
 .line-receipt-heading strong { font-size: 12px; overflow-wrap: anywhere; }
 .line-receipt-heading span { color: var(--muted); font-size: 10px; }
 .line-receipt-heading .field-issue { color: var(--red); font-size: 10px; }
 .line-receipt-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.receipt-collapse-tools { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; color: var(--muted); font-size: 10px; }
+.section-collapse-toggle { white-space: nowrap; }
+.card.section-collapsed > :not(.card-heading) { display: none !important; }
+.coverage-panel.subsection-collapsed > :not(.subsection-heading),
+.policy-warning-panel.subsection-collapsed > :not(.subsection-heading),
+.review-subsection.subsection-collapsed > :not(.subsection-heading) { display: none !important; }
 .people-review-form, .currency-review-form { display: flex; align-items: end; gap: 6px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .people-review-form label, .currency-review-form label { display: grid; gap: 3px; color: var(--muted); font-size: 9px; white-space: nowrap; }
 .people-review-form .input { width: 76px; min-height: 30px; padding: 5px 8px; }
@@ -320,7 +327,7 @@ code { font-family: "SFMono-Regular", Consolas, monospace; color: #405149; overf
 .receipt-preview-shell iframe { width: 100%; height: min(72vh, 760px); border: 1px solid var(--line); border-radius: 10px; background: white; }
 .receipt-preview-shell .modal-actions { margin-top: 12px; align-items: center; }
 .card-match-shell { padding: 22px; }
-.card-match-filters { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, .55fr); gap: 12px; }
+.card-match-filters { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(170px, .7fr) minmax(150px, .55fr) minmax(130px, .4fr); gap: 12px; }
 .card-match-filters .field-label { margin-top: 10px; }
 .card-match-results { display: grid; gap: 7px; max-height: 52vh; margin: 15px 0; overflow-y: auto; }
 .card-match-option { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); }

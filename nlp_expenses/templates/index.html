@@ -150,13 +150,15 @@
         </section>
 
         <section class="card location-card">
-          <div>
-            <p class="card-kicker">Trip folder</p>
-            <code>{{ trip.path }}</code>
-          </div>
-          <div class="button-group">
-            <button class="button secondary" id="refresh-files-button">Refresh files</button>
-            <button class="button finder-button" data-target="trip">Reveal in Finder</button>
+          <div class="card-heading">
+            <div>
+              <p class="card-kicker">Trip folder</p>
+              <code>{{ trip.path }}</code>
+            </div>
+            <div class="button-group">
+              <button class="button secondary" id="refresh-files-button">Refresh files</button>
+              <button class="button finder-button" data-target="trip">Reveal in Finder</button>
+            </div>
           </div>
           <div class="folder-row">
             <div>
@@ -386,6 +388,15 @@
               {% endif %}
             </div>
 
+            <div class="receipt-collapse-tools">
+              <span>Receipt headers and totals stay visible when item details are collapsed.</span>
+              <div class="button-group">
+                <button type="button" class="button secondary small" id="collapse-all-receipts">Collapse all receipts</button>
+                <button type="button" class="button secondary small" id="expand-review-receipts">Expand receipts needing review</button>
+                <button type="button" class="button secondary small" id="expand-all-receipts">Expand all receipts</button>
+              </div>
+            </div>
+
             <div class="line-receipt-list">
               {% for receipt in line_review.receipts %}
                 <article id="receipt-{{ receipt.source_file }}" class="line-receipt {{ 'needs-review' if receipt.status == 'review' or receipt.field_issues else '' }}">
@@ -439,6 +450,9 @@
                         {{ 'disabled' if trip_busy or line_review.stale }}>Add line</button>
                       <button class="button secondary small reset-line-items" data-source-file="{{ receipt.source_file }}"
                         {{ 'disabled' if trip_busy or line_review.stale }}>Reset automatic</button>
+                      <button type="button" class="button secondary small receipt-items-toggle"
+                        data-source-file="{{ receipt.source_file }}" data-item-count="{{ receipt.line_items|length }}"
+                        aria-expanded="true">Hide items</button>
                     </div>
                   </div>
                   <div class="line-item-table-wrap">
@@ -702,14 +716,15 @@
                 </div>
               {% endif %}
 
-              <div class="subsection-heading">
-                <div>
-                  <h4>Invoice and CAD review</h4>
-                  <p>Receipt fields use the shared editor from Step 3; exact CAD and FX come from the mapping below.</p>
+              <div class="review-subsection">
+                <div class="subsection-heading">
+                  <div>
+                    <h4>Invoice and CAD review</h4>
+                    <p>Receipt fields use the shared editor from Step 3; exact CAD and FX come from the mapping below.</p>
+                  </div>
                 </div>
-              </div>
-              <div class="reconciliation-table-wrap">
-                <table class="reconciliation-table invoice-review-table">
+                <div class="reconciliation-table-wrap">
+                  <table class="reconciliation-table invoice-review-table">
                   <thead>
                     <tr>
                       <th>Invoice</th>
@@ -785,29 +800,31 @@
                       </tr>
                     {% endfor %}
                   </tbody>
-                </table>
-              </div>
+                  </table>
+                </div>
 
-              {% if reconciliation.unmatched_expenses %}
-                <div class="unmatched-invoices">
-                  <strong>Invoices without a card match</strong>
+                {% if reconciliation.unmatched_expenses %}
+                  <div class="unmatched-invoices">
+                    <strong>Invoices without a card match</strong>
+                    <div>
+                      {% for expense in reconciliation.unmatched_expenses %}
+                        <span>{{ expense.vendor or expense.source_file }} · {{ expense.amount if expense.amount is not none else '?' }} {{ expense.currency or '' }}</span>
+                      {% endfor %}
+                    </div>
+                  </div>
+                {% endif %}
+              </div>
+              {% endif %}
+
+              <div class="review-subsection">
+                <div id="statement-mappings" class="subsection-heading">
                   <div>
-                    {% for expense in reconciliation.unmatched_expenses %}
-                      <span>{{ expense.vendor or expense.source_file }} · {{ expense.amount if expense.amount is not none else '?' }} {{ expense.currency or '' }}</span>
-                    {% endfor %}
+                    <h4>Statement mappings</h4>
+                    <p>Each charge should point to the receipt it settles. The resulting CAD amount and FX rate feed the final claim.</p>
                   </div>
                 </div>
-              {% endif %}
-              {% endif %}
-
-              <div id="statement-mappings" class="subsection-heading">
-                <div>
-                  <h4>Statement mappings</h4>
-                  <p>Each charge should point to the receipt it settles. The resulting CAD amount and FX rate feed the final claim.</p>
-                </div>
-              </div>
-              <div class="reconciliation-table-wrap">
-                <table class="reconciliation-table">
+                <div class="reconciliation-table-wrap">
+                  <table class="reconciliation-table">
                   <thead>
                     <tr>
                       <th>Card transaction</th>
@@ -873,6 +890,7 @@
                           {% if transaction.suggested_expense_label and not transaction.expense_file %}
                             <small>Suggested: {{ transaction.suggested_expense_label }} ({{ (transaction.match_confidence * 100)|round|int }}%)</small>
                           {% endif %}
+                          {% if transaction.match_review_reason %}<small>{{ transaction.match_review_reason }}</small>{% endif %}
                           {% if transaction.allocations %}
                             <small>
                               {{ transaction.allocations|length }} allocations ·
@@ -929,7 +947,8 @@
                       <tr><td colspan="5" class="empty-line">No match-eligible card transactions were found.</td></tr>
                     {% endfor %}
                   </tbody>
-                </table>
+                  </table>
+                </div>
               </div>
             {% else %}
               <div class="empty reconciliation-empty">
@@ -1594,6 +1613,13 @@
       <div class="card-match-filters">
         <label class="field-label">Search transactions<input class="input" id="card-match-search" placeholder="Merchant, date, amount…"></label>
         <label class="field-label">Card / account<select class="select" id="card-match-account"><option value="">All cards and accounts</option></select></label>
+        <label class="field-label">Date around receipt<input class="input" type="date" id="card-match-date"></label>
+        <label class="field-label">Date window<select class="select" id="card-match-date-window">
+          <option value="0">Same date</option>
+          <option value="3" selected>±3 days</option>
+          <option value="7">±7 days</option>
+          <option value="all">All dates</option>
+        </select></label>
       </div>
       <div id="card-match-results" class="card-match-results"></div>
       <div class="modal-actions">

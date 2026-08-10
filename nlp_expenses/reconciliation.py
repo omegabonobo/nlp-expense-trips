@@ -6,6 +6,7 @@ import os
 import uuid
 from collections import defaultdict
 from datetime import date, datetime, timedelta
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from nlp_expenses.generator import (
@@ -17,6 +18,7 @@ from nlp_expenses.generator import (
 from nlp_expenses.fx_rates import FxRateUnavailable, WeeklyCadFxResolver
 from nlp_expenses.matching import (
     apply_manual_matches,
+    card_total_gap_percent,
     close_amount,
     close_fx_amount,
     common_value,
@@ -193,6 +195,7 @@ def sync_reconciliation(
         group["auto_expense_file"] = automatic["expense_file"]
         group["auto_match_status"] = automatic["match_status"]
         group["auto_match_confidence"] = automatic["match_confidence"]
+        group["auto_match_review_reason"] = automatic.get("match_review_reason", "")
         group["override_active"] = group["group_id"] in manual_matches
         group["override_expense_file"] = manual_matches.get(group["group_id"])
     apply_decisions_to_groups(current_groups, transaction_decisions)
@@ -306,6 +309,7 @@ def set_manual_match(
         transaction["expense_file"] = transaction.get("auto_expense_file")
         transaction["match_status"] = transaction.get("auto_match_status", "unmatched")
         transaction["match_confidence"] = transaction.get("auto_match_confidence", transaction.get("match_confidence", 0.0))
+        transaction["match_review_reason"] = transaction.get("auto_match_review_reason", "")
         transaction["override_active"] = False
         transaction["override_expense_file"] = None
     else:
@@ -316,6 +320,7 @@ def set_manual_match(
         transaction["expense_file"] = expense_file
         transaction["match_status"] = "manual" if expense_file else "unmatched"
         transaction["match_confidence"] = 1.0 if expense_file else 0.0
+        transaction["match_review_reason"] = ""
         transaction["override_active"] = True
         transaction["override_expense_file"] = expense_file
 
@@ -845,6 +850,7 @@ def apply_decision_to_group(group: dict, decision: dict) -> None:
             not group.get("expense_file")
             and group.get("suggested_expense_file")
             and float(group.get("match_confidence") or 0) >= 0.72
+            and not group.get("match_review_reason")
         ):
             group["expense_file"] = group["suggested_expense_file"]
             group["match_status"] = "auto"
@@ -1070,6 +1076,7 @@ def serialized_candidate_score(expense: dict, transaction: dict, estimated_cad: 
     elif delta is not None and delta <= 5:
         score += max(0.05, 0.28 - 0.05 * delta)
     amount = expense.get("amount")
+    exact_amount = False
     if isinstance(amount, (int, float)):
         people = max(1, int(expense.get("number_of_people") or 1))
         share = abs(float(amount)) / people
@@ -1083,19 +1090,65 @@ def serialized_candidate_score(expense: dict, transaction: dict, estimated_cad: 
             and close_amount(share, abs(float(purchase_amount)))
         ):
             score += 0.55
+            exact_amount = True
         elif (
             isinstance(estimated_cad, (int, float))
             and isinstance(cad_amount, (int, float))
             and close_fx_amount(float(estimated_cad), abs(float(cad_amount)))
         ):
             score += 0.55
+            exact_amount = True
         elif (
             expense_currency == "CAD"
             and isinstance(cad_amount, (int, float))
             and close_amount(share, abs(float(cad_amount)))
         ):
             score += 0.55
+            exact_amount = True
+        elif serialized_card_total_gap_percent(expense, transaction) is not None:
+            score += 0.25
+    vendor = str(expense.get("vendor") or "").lower()
+    description = str(transaction.get("description") or "").lower()
+    if vendor and description:
+        score += 0.25 * SequenceMatcher(None, vendor, description).ratio()
+        vendor_tokens = {token for token in vendor.split() if len(token) > 2}
+        if vendor_tokens and any(token in description for token in vendor_tokens):
+            score += 0.10
+    if delta == 0 and exact_amount:
+        score += 0.05
     return min(score, 1.0)
+
+
+def serialized_card_total_gap_percent(expense: dict, transaction: dict) -> int | None:
+    amount = expense.get("amount")
+    if not isinstance(amount, (int, float)):
+        return None
+    people = max(1, int(expense.get("number_of_people") or 1))
+    share = abs(float(amount)) / people
+    expense_currency = str(expense.get("currency") or "").upper()
+    purchase_currency = str(transaction.get("purchase_currency") or "").upper()
+    purchase_amount = transaction.get("purchase_amount")
+    if expense_currency and expense_currency == purchase_currency and isinstance(purchase_amount, (int, float)):
+        return card_total_gap_percent(share, abs(float(purchase_amount)))
+    cad_amount = transaction.get("cad_amount")
+    if expense_currency == "CAD" and isinstance(cad_amount, (int, float)):
+        return card_total_gap_percent(share, abs(float(cad_amount)))
+    return None
+
+
+def serialized_candidate_reason(expense: dict, transaction: dict) -> str:
+    gap = serialized_card_total_gap_percent(expense, transaction)
+    delta = days_between(expense.get("date"), transaction.get("transaction_date"))
+    vendor = str(expense.get("vendor") or "").lower()
+    description = str(transaction.get("description") or "").lower()
+    merchant_similarity = SequenceMatcher(None, vendor, description).ratio() if vendor and description else 0.0
+    if gap is not None and delta == 0 and merchant_similarity >= 0.35:
+        return f"Same merchant and date; receipt is {gap}% below the card total, possibly tax or tip."
+    if gap is not None:
+        return f"Receipt is {gap}% below the card total; review tax or tip."
+    if delta == 0:
+        return "Same transaction date; amount and merchant also influence this ranking."
+    return ""
 
 
 def reconciliation_view(trip_dir: Path, state: dict | None = None) -> dict:
@@ -1359,6 +1412,7 @@ def reconciliation_view(trip_dir: Path, state: dict | None = None) -> dict:
                     transaction.get("expense_file")
                     and transaction.get("expense_file") != source_file
                 ),
+                "reason": serialized_candidate_reason(expense, transaction),
             }
             candidates.append(candidate)
         ranked = sorted(
@@ -1568,6 +1622,10 @@ def aggregate_transaction_groups(
                 "match_status": status,
                 "match_confidence": max((leg.match_confidence for leg in legs), default=0.0),
                 "auto_match_confidence": max((leg.match_confidence for leg in legs), default=0.0),
+                "match_review_reason": common_value(
+                    [leg.match_review_reason for leg in eligible]
+                )
+                or "",
                 "normalization_status": normalization_status,
                 "review_note": " ".join(notes),
                 "possible_duplicate": possible_duplicate,

@@ -13,15 +13,17 @@ def match_transactions(expenses: list[Expense], transactions: list[StatementTran
     for transaction in transactions:
         best_expense: Expense | None = None
         best_score = 0.0
+        best_review_reason = ""
         for expense in expenses:
             score = match_score(expense, transaction)
             if score > best_score:
                 best_score = score
                 best_expense = expense
+                best_review_reason = statement_match_review_reason(expense, transaction)
         if best_expense and best_score >= 0.35:
             transaction.suggested_expense_id = best_expense.expense_id
             transaction.match_confidence = round(best_score, 3)
-            if best_score >= 0.72:
+            if best_score >= 0.72 and not best_review_reason:
                 transaction.expense_id = best_expense.expense_id
     enrich_expenses_from_statements(expenses, transactions)
 
@@ -48,6 +50,7 @@ def match_normalized_transactions(
 
         best_expense: Expense | None = None
         best_score = 0.0
+        best_review_reason = ""
         for expense in expenses:
             score = normalized_match_score(
                 expense,
@@ -61,11 +64,19 @@ def match_normalized_transactions(
             if score > best_score:
                 best_score = score
                 best_expense = expense
+                best_review_reason = normalized_match_review_reason(
+                    expense,
+                    representative.transaction_date,
+                    representative.description,
+                    purchase_amount,
+                    purchase_currency,
+                    cad_amount,
+                )
 
         if not best_expense or best_score < 0.35:
             continue
         confidence = round(best_score, 3)
-        auto_assign = best_score >= 0.72 and all(
+        auto_assign = best_score >= 0.72 and not best_review_reason and all(
             leg.normalization_status in {"ok", "duplicate_confirmed"}
             for leg in eligible
         )
@@ -73,6 +84,7 @@ def match_normalized_transactions(
             leg.suggested_expense_id = best_expense.expense_id
             leg.match_confidence = confidence
             leg.match_status = "suggested"
+            leg.match_review_reason = best_review_reason
             if auto_assign:
                 leg.expense_id = best_expense.expense_id
                 leg.match_status = "auto"
@@ -127,9 +139,11 @@ def apply_manual_matches(
                 leg.suggested_expense_id = expense.expense_id
                 leg.match_status = "manual"
                 leg.match_confidence = 1.0
+                leg.match_review_reason = ""
             else:
                 leg.expense_id = ""
                 leg.match_status = "unmatched"
+                leg.match_review_reason = ""
 
 
 def normalized_match_score(
@@ -149,6 +163,7 @@ def normalized_match_score(
         elif date_delta <= 3:
             score += max(0.0, 0.24 - 0.05 * date_delta)
     receipt_amount = shared_receipt_amount(expense)
+    exact_amount = False
     if receipt_amount is not None:
         if (
             purchase_amount is not None
@@ -156,16 +171,29 @@ def normalized_match_score(
             and close_amount(receipt_amount, abs(purchase_amount))
         ):
             score += 0.36
+            exact_amount = True
         elif expense.currency == "CAD" and cad_amount is not None and close_amount(receipt_amount, abs(cad_amount)):
             score += 0.36
+            exact_amount = True
         elif (
             estimated_expense_cad is not None
             and cad_amount is not None
             and close_fx_amount(estimated_expense_cad, abs(cad_amount))
         ):
             score += 0.46
+            exact_amount = True
         elif cad_amount is not None and close_amount(receipt_amount, abs(cad_amount)):
             score += 0.18
+            exact_amount = True
+        elif normalized_card_total_gap_percent(
+            expense,
+            purchase_amount,
+            purchase_currency,
+            cad_amount,
+        ) is not None:
+            score += 0.22
+    if date_delta == 0 and exact_amount:
+        score += 0.08
     supplier = (expense.supplier_name or "").lower()
     normalized_description = description.lower()
     if supplier and normalized_description:
@@ -196,17 +224,25 @@ def match_score(expense: Expense, transaction: StatementTransaction) -> float:
         elif date_delta <= 3:
             score += max(0.0, 0.24 - 0.05 * date_delta)
     receipt_amount = shared_receipt_amount(expense)
+    exact_amount = False
     if receipt_amount is not None:
         if transaction.foreign_amount is not None and close_amount(receipt_amount, transaction.foreign_amount):
             score += 0.36
+            exact_amount = True
         elif transaction.foreign_amount is not None and close_split_amount(receipt_amount, transaction.foreign_amount):
             score += 0.28
         elif expense.currency == "CAD" and transaction.amount_cad is not None and close_amount(receipt_amount, transaction.amount_cad):
             score += 0.36
+            exact_amount = True
         elif expense.currency == "CAD" and transaction.amount_cad is not None and close_split_amount(receipt_amount, transaction.amount_cad):
             score += 0.28
         elif transaction.amount_cad is not None and close_amount(receipt_amount, transaction.amount_cad):
             score += 0.18
+            exact_amount = True
+        elif statement_card_total_gap_percent(expense, transaction) is not None:
+            score += 0.22
+    if date_delta == 0 and exact_amount:
+        score += 0.08
     supplier = (expense.supplier_name or "").lower()
     description = transaction.description.lower()
     if supplier and description:
@@ -300,6 +336,72 @@ def close_fx_amount(a: float, b: float) -> bool:
     """Allow normal card spread while comparing a weekly FX estimate to settled CAD."""
 
     return abs(a - b) <= max(0.50, abs(a) * 0.06)
+
+
+def card_total_gap_percent(receipt_amount: float | None, card_amount: float | None) -> int | None:
+    """Return a plausible tax/tip uplift when the card total exceeds the receipt amount."""
+
+    if receipt_amount is None or card_amount is None:
+        return None
+    receipt = abs(float(receipt_amount))
+    card = abs(float(card_amount))
+    if receipt <= 0 or card <= receipt:
+        return None
+    receipt_share_of_card = receipt / card
+    if receipt_share_of_card < 0.68 or receipt_share_of_card > 0.95:
+        return None
+    return round((1 - receipt / card) * 100)
+
+
+def normalized_card_total_gap_percent(
+    expense: Expense,
+    purchase_amount: float | None,
+    purchase_currency: str | None,
+    cad_amount: float | None,
+) -> int | None:
+    receipt_amount = shared_receipt_amount(expense)
+    expense_currency = str(expense.currency or "").upper()
+    if expense_currency and expense_currency == str(purchase_currency or "").upper():
+        return card_total_gap_percent(receipt_amount, purchase_amount)
+    if expense_currency == "CAD":
+        return card_total_gap_percent(receipt_amount, cad_amount)
+    return None
+
+
+def normalized_match_review_reason(
+    expense: Expense,
+    transaction_date: str | None,
+    description: str,
+    purchase_amount: float | None,
+    purchase_currency: str | None,
+    cad_amount: float | None,
+) -> str:
+    gap = normalized_card_total_gap_percent(expense, purchase_amount, purchase_currency, cad_amount)
+    if gap is None:
+        return ""
+    date_delta = days_between(expense.date, transaction_date)
+    supplier = (expense.supplier_name or "").lower()
+    merchant_similarity = SequenceMatcher(None, supplier, (description or "").lower()).ratio()
+    if date_delta == 0 and merchant_similarity >= 0.35:
+        return f"Same merchant and date; receipt is {gap}% below the card total, possibly tax or tip."
+    return f"Receipt is {gap}% below the card total; review tax or tip."
+
+
+def statement_card_total_gap_percent(
+    expense: Expense,
+    transaction: StatementTransaction,
+) -> int | None:
+    receipt_amount = shared_receipt_amount(expense)
+    if transaction.foreign_amount is not None and str(expense.currency or "").upper() == str(transaction.foreign_currency or "").upper():
+        return card_total_gap_percent(receipt_amount, transaction.foreign_amount)
+    if str(expense.currency or "").upper() == "CAD":
+        return card_total_gap_percent(receipt_amount, transaction.amount_cad)
+    return None
+
+
+def statement_match_review_reason(expense: Expense, transaction: StatementTransaction) -> str:
+    gap = statement_card_total_gap_percent(expense, transaction)
+    return f"Receipt is {gap}% below the card total; review tax or tip." if gap is not None else ""
 
 
 def shared_receipt_amount(expense: Expense) -> float | None:

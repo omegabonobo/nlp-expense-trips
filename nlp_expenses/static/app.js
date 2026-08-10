@@ -27,6 +27,99 @@ function toast(message, isError = false) {
 }
 
 function openDialog(id) { document.getElementById(id)?.showModal(); }
+
+function collapsePreference(key) {
+  try { return window.localStorage.getItem(key); } catch (_failure) { return null; }
+}
+
+function saveCollapsePreference(key, collapsed) {
+  try { window.localStorage.setItem(key, collapsed ? "collapsed" : "expanded"); } catch (_failure) { /* Optional preference only. */ }
+}
+
+function collapseKey(kind, identifier) {
+  return `nlp-expenses:${selectedTrip || "no-trip"}:${kind}:${identifier}`;
+}
+
+function initializeCollapsibleSections() {
+  document.querySelectorAll("main section.card").forEach((section, index) => {
+    const heading = section.querySelector(":scope > .card-heading");
+    if (!heading) return;
+    const title = heading.querySelector("h3")?.textContent.trim() || `Section ${index + 1}`;
+    const identifier = section.id || title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    const key = collapseKey("section", identifier);
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "button secondary small section-collapse-toggle";
+    const setCollapsed = (collapsed, persist = true) => {
+      section.classList.toggle("section-collapsed", collapsed);
+      toggle.setAttribute("aria-expanded", String(!collapsed));
+      toggle.textContent = collapsed ? "Expand section" : "Collapse section";
+      toggle.title = `${collapsed ? "Expand" : "Collapse"} ${title}`;
+      if (persist) saveCollapsePreference(key, collapsed);
+    };
+    setCollapsed(collapsePreference(key) === "collapsed", false);
+    toggle.addEventListener("click", () => setCollapsed(!section.classList.contains("section-collapsed")));
+    heading.append(toggle);
+  });
+}
+
+function initializeCollapsibleSubsections() {
+  document.querySelectorAll(".coverage-panel, .policy-warning-panel, .review-subsection").forEach((section, index) => {
+    const heading = section.querySelector(":scope > .subsection-heading");
+    if (!heading) return;
+    const title = heading.querySelector("h4")?.textContent.trim() || `Subsection ${index + 1}`;
+    const identifier = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    const key = collapseKey("subsection", identifier);
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "button secondary small section-collapse-toggle";
+    const setCollapsed = (collapsed, persist = true) => {
+      section.classList.toggle("subsection-collapsed", collapsed);
+      toggle.setAttribute("aria-expanded", String(!collapsed));
+      toggle.textContent = collapsed ? "Expand subsection" : "Collapse subsection";
+      toggle.title = `${collapsed ? "Expand" : "Collapse"} ${title}`;
+      if (persist) saveCollapsePreference(key, collapsed);
+    };
+    setCollapsed(collapsePreference(key) === "collapsed", false);
+    toggle.addEventListener("click", () => setCollapsed(!section.classList.contains("subsection-collapsed")));
+    heading.append(toggle);
+  });
+}
+
+function setReceiptItemsExpanded(article, expanded, persist = true) {
+  const button = article.querySelector(".receipt-items-toggle");
+  if (!button) return;
+  article.classList.toggle("items-collapsed", !expanded);
+  button.setAttribute("aria-expanded", String(expanded));
+  const count = Number(button.dataset.itemCount || 0);
+  button.textContent = expanded ? "Hide items" : `Show items (${count})`;
+  if (persist) saveCollapsePreference(collapseKey("receipt", button.dataset.sourceFile), !expanded);
+}
+
+function initializeReceiptCollapsing() {
+  const receipts = [...document.querySelectorAll(".line-receipt")];
+  for (const article of receipts) {
+    const button = article.querySelector(".receipt-items-toggle");
+    if (!button) continue;
+    const stored = collapsePreference(collapseKey("receipt", button.dataset.sourceFile));
+    const defaultExpanded = article.classList.contains("needs-review");
+    setReceiptItemsExpanded(article, stored == null ? defaultExpanded : stored !== "collapsed", false);
+    button.addEventListener("click", () => setReceiptItemsExpanded(article, article.classList.contains("items-collapsed")));
+  }
+  document.getElementById("collapse-all-receipts")?.addEventListener("click", () => {
+    receipts.forEach(article => setReceiptItemsExpanded(article, false));
+  });
+  document.getElementById("expand-review-receipts")?.addEventListener("click", () => {
+    receipts.forEach(article => setReceiptItemsExpanded(article, article.classList.contains("needs-review")));
+  });
+  document.getElementById("expand-all-receipts")?.addEventListener("click", () => {
+    receipts.forEach(article => setReceiptItemsExpanded(article, true));
+  });
+}
+
+initializeCollapsibleSections();
+initializeCollapsibleSubsections();
+initializeReceiptCollapsing();
 document.getElementById("new-trip-button")?.addEventListener("click", () => openDialog("new-trip-dialog"));
 document.getElementById("empty-new-trip-button")?.addEventListener("click", () => openDialog("new-trip-dialog"));
 document.querySelectorAll(".open-settings-button").forEach(button => {
@@ -636,6 +729,31 @@ function cardAccountKey(transaction) {
   return `${transaction.provider || "card"}|${transaction.account_label || "Account"}`;
 }
 
+function isoDateDistance(left, right) {
+  if (!left || !right) return null;
+  const leftTime = Date.parse(`${left}T00:00:00Z`);
+  const rightTime = Date.parse(`${right}T00:00:00Z`);
+  return Number.isFinite(leftTime) && Number.isFinite(rightTime)
+    ? Math.abs(Math.round((leftTime - rightTime) / 86400000))
+    : null;
+}
+
+function cardMatchAmountContext(expense, transaction) {
+  const people = Math.max(1, Number(expense.number_of_people || 1));
+  const receiptShare = Math.abs(Number(expense.amount || 0)) / people;
+  let cardAmount = null;
+  if (String(expense.currency || "").toUpperCase() === String(transaction.purchase_currency || "").toUpperCase()) {
+    cardAmount = Math.abs(Number(transaction.purchase_amount));
+  } else if (String(expense.currency || "").toUpperCase() === "CAD") {
+    cardAmount = Math.abs(Number(transaction.cad_amount));
+  }
+  if (!receiptShare || !Number.isFinite(cardAmount) || cardAmount <= receiptShare) return "";
+  const shortfall = (1 - receiptShare / cardAmount) * 100;
+  return shortfall >= 5 && shortfall <= 32
+    ? `Receipt is ${Math.round(shortfall)}% below the card total — tax or tip may explain the difference.`
+    : "";
+}
+
 async function chooseReceiptMatch(groupId, button) {
   button.disabled = true;
   try {
@@ -655,9 +773,16 @@ function renderCardMatchResults() {
   const suggestionRank = new Map((expense.match_suggestions || []).map((item, index) => [item.group_id, { ...item, index }]));
   const search = document.getElementById("card-match-search").value.trim().toLowerCase();
   const account = document.getElementById("card-match-account").value;
+  const filterDate = document.getElementById("card-match-date").value;
+  const dateWindow = document.getElementById("card-match-date-window").value;
   const transactions = (state.reconciliation?.transactions || [])
     .filter(item => item.match_eligible && !item.ignored && !(item.allocations || []).length)
     .filter(item => !account || cardAccountKey(item) === account)
+    .filter(item => {
+      if (!filterDate || dateWindow === "all") return true;
+      const distance = isoDateDistance(filterDate, item.transaction_date);
+      return distance != null && distance <= Number(dateWindow);
+    })
     .filter(item => {
       const haystack = [
         item.transaction_date, item.provider, item.account_label, item.description,
@@ -692,6 +817,13 @@ function renderCardMatchResults() {
     const cad = transaction.cad_amount == null ? "CAD unavailable" : `${Number(transaction.cad_amount).toFixed(2)} CAD`;
     amount.textContent = `${purchase} ${transaction.purchase_currency || ""} · ${cad}`;
     details.append(title, source, amount);
+    const amountContext = cardMatchAmountContext(expense, transaction);
+    if (amountContext) {
+      const context = document.createElement("small");
+      context.className = "card-match-context";
+      context.textContent = amountContext;
+      details.append(context);
+    }
     const action = document.createElement("button");
     action.type = "button";
     action.className = "button small";
@@ -706,6 +838,11 @@ function renderCardMatchResults() {
       badge.className = "match-badge suggested";
       badge.textContent = `${Math.round(suggestion.score * 100)}% likely`;
       details.append(badge);
+      if (suggestion.reason) {
+        const reason = document.createElement("small");
+        reason.textContent = suggestion.reason;
+        details.append(reason);
+      }
     } else if (transaction.expense_file && !current) {
       const badge = document.createElement("span");
       badge.className = "match-badge review";
@@ -724,6 +861,8 @@ document.querySelectorAll(".open-receipt-matcher").forEach(button => button.addE
   document.getElementById("card-match-receipt").textContent =
     `${expense.amount ?? "?"} ${expense.currency || ""} · ${expense.date || "date missing"} · employee share 1/${expense.number_of_people || 1}`;
   document.getElementById("card-match-search").value = "";
+  document.getElementById("card-match-date").value = expense.date || "";
+  document.getElementById("card-match-date-window").value = expense.date ? "3" : "all";
   const account = document.getElementById("card-match-account");
   account.replaceChildren(new Option("All cards and accounts", ""));
   const accounts = new Map();
@@ -741,6 +880,8 @@ document.querySelectorAll(".open-receipt-matcher").forEach(button => button.addE
 
 document.getElementById("card-match-search")?.addEventListener("input", renderCardMatchResults);
 document.getElementById("card-match-account")?.addEventListener("change", renderCardMatchResults);
+document.getElementById("card-match-date")?.addEventListener("change", renderCardMatchResults);
+document.getElementById("card-match-date-window")?.addEventListener("change", renderCardMatchResults);
 document.getElementById("card-match-dialog")?.addEventListener("click", event => {
   if (event.target === event.currentTarget) event.currentTarget.close();
 });

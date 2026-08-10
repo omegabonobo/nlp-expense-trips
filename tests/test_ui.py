@@ -663,6 +663,10 @@ class UITests(unittest.TestCase):
         self.assertIn("recognized cocktail", html)
         self.assertIn("Employees sharing bill", html)
         self.assertIn('class="people-review-form"', html)
+        self.assertIn('class="button secondary small receipt-items-toggle"', html)
+        self.assertIn('id="collapse-all-receipts"', html)
+        self.assertIn('id="expand-review-receipts"', html)
+        self.assertIn('id="expand-all-receipts"', html)
         self.assertNotIn('name="approver"', html)
         self.assertNotIn("Policy controls", html)
         self.assertNotIn("Settlement and IVADO handoff", html)
@@ -1012,6 +1016,9 @@ class UITests(unittest.TestCase):
         html = self.client.get(f"/?trip={trip.name}").get_data(as_text=True)
         self.assertIn('class="button secondary small open-receipt-matcher"', html)
         self.assertIn("All cards and accounts", html)
+        self.assertIn('id="card-match-date"', html)
+        self.assertIn('id="card-match-date-window"', html)
+        self.assertIn("±3 days", html)
         self.assertIn("every eligible uploaded-card transaction remains searchable", html)
 
         cleared = self.client.post(
