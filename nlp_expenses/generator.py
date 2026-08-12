@@ -13,7 +13,7 @@ from nlp_expenses.extraction.receipts import parse_receipt
 from nlp_expenses.extraction.text import supported_receipt_extensions
 from nlp_expenses.fx_rates import WeeklyCadFxResolver
 from nlp_expenses.line_items import apply_line_item_review
-from nlp_expenses.models import Expense, GenerationProgress
+from nlp_expenses.models import Expense, GenerationProgress, NormalizationResult
 from nlp_expenses.statement_normalizer import (
     StatementNormalizationError,
     list_statement_files,
@@ -124,14 +124,77 @@ def generate_review(
     allow_openai_prompt: bool = True,
     contract_bundle: bool = False,
 ) -> Path | None:
+    (
+        trip_dir,
+        root,
+        receipts_dir,
+        statements_dir,
+        selected_mode,
+        output_path,
+    ) = validate_generation_request(trip_dir, root, mode, output_path)
+    normalization, proceed = prepare_statement_review(
+        trip_dir,
+        statements_dir,
+        selected_mode,
+        statements_complete,
+        confirm_input,
+        progress_callback,
+        warning_callback,
+    )
+    if not proceed:
+        return None
+
+    expenses = prepare_reviewed_expenses(
+        trip_dir,
+        receipts_dir,
+        root,
+        selected_mode,
+        llm_mode,
+        progress_callback,
+        warning_callback,
+        allow_openai_prompt,
+    )
+    emit_generation_progress(
+        progress_callback,
+        "workbook",
+        0,
+        1,
+        "Building the reimbursement report bundle",
+    )
+    apply_arvine_reconciliation(trip_dir, selected_mode, normalization, expenses)
+
+    if contract_bundle:
+        result = build_contract_review_bundle(trip_dir, root, output_path)
+        complete_message = "Reimbursement report bundle ready"
+    else:
+        result = build_standard_review_workbook(
+            trip_dir,
+            root,
+            statements_dir,
+            selected_mode,
+            normalization,
+            expenses,
+            output_path,
+        )
+        complete_message = "Workbook ready"
+
+    emit_generation_progress(progress_callback, "complete", 1, 1, complete_message)
+    return result
+
+
+def validate_generation_request(
+    trip_dir: Path,
+    root: Path,
+    mode: str | None,
+    output_path: Path | None,
+) -> tuple[Path, Path, Path, Path, str, Path | None]:
     trip_dir = trip_dir.resolve()
     root = root.resolve()
     receipts_dir = trip_receipts_dir(trip_dir)
     statements_dir = trip_statements_dir(trip_dir)
     if not receipts_dir.exists():
         raise FileNotFoundError(f"Missing receipts folder: {receipts_dir}")
-    if not statements_dir.exists():
-        statements_dir.mkdir(parents=True, exist_ok=True)
+    statements_dir.mkdir(parents=True, exist_ok=True)
 
     selected_mode = (mode or trip_mode(trip_dir)).lower()
     if selected_mode not in TRIP_MODES:
@@ -141,45 +204,74 @@ def generate_review(
         output_path = output_path.resolve()
         if output_path.parent != trip_dir:
             raise ValueError("The output workbook must be created inside the selected trip folder.")
+    return trip_dir, root, receipts_dir, statements_dir, selected_mode, output_path
 
-    def progress(stage: str, current: int, total: int, message: str) -> None:
-        if progress_callback:
-            progress_callback(
-                GenerationProgress(stage=stage, current=current, total=total, message=message)
-            )
 
-    def warning(message: str) -> None:
-        if warning_callback:
-            warning_callback(message)
+def prepare_statement_review(
+    trip_dir: Path,
+    statements_dir: Path,
+    selected_mode: str,
+    statements_complete: bool,
+    confirm_input: Callable[[str], str] | None,
+    progress_callback: ProgressCallback | None,
+    warning_callback: WarningCallback | None,
+) -> tuple[NormalizationResult | None, bool]:
+    if selected_mode != "arvine":
+        return None, True
 
-    normalization = None
-    if selected_mode == "arvine":
-        statement_files = list_statement_files(statements_dir)
-        progress("statements", 0, len(statement_files), "Validating card and bank statements")
-        preflight = preflight_statement_files(statement_files)
-        preflight_errors = [error for report in preflight for error in report.errors]
-        if preflight_errors:
-            raise StatementNormalizationError("\n".join(preflight_errors))
-        if not statements_complete:
-            prompt = (
-                f"Detected {len(statement_files)} statement files in {statements_dir}. "
-                "Have all card/bank statements for this trip been added? [y/N]: "
-            )
-            answer = (confirm_input or input)(prompt).strip().lower()
-            if answer not in {"y", "yes"}:
-                return None
-        normalization = normalize_statement_files(
-            statement_files,
-            fx_resolver=WeeklyCadFxResolver(trip_dir),
+    statement_files = list_statement_files(statements_dir)
+    emit_generation_progress(
+        progress_callback,
+        "statements",
+        0,
+        len(statement_files),
+        "Validating card and bank statements",
+    )
+    preflight = preflight_statement_files(statement_files)
+    preflight_errors = [error for report in preflight for error in report.errors]
+    if preflight_errors:
+        raise StatementNormalizationError("\n".join(preflight_errors))
+    if not statements_complete:
+        prompt = (
+            f"Detected {len(statement_files)} statement files in {statements_dir}. "
+            "Have all card/bank statements for this trip been added? [y/N]: "
         )
-        if normalization.errors:
-            raise StatementNormalizationError("\n".join(normalization.errors))
-        for message in normalization.warnings:
-            warning(message)
-        progress("statements", len(statement_files), len(statement_files), "Statements validated")
-        from nlp_expenses.reconciliation import ensure_reconciliation_ready
+        answer = (confirm_input or input)(prompt).strip().lower()
+        if answer not in {"y", "yes"}:
+            return None, False
 
-        ensure_reconciliation_ready(trip_dir)
+    normalization = normalize_statement_files(
+        statement_files,
+        fx_resolver=WeeklyCadFxResolver(trip_dir),
+    )
+    if normalization.errors:
+        raise StatementNormalizationError("\n".join(normalization.errors))
+    for message in normalization.warnings:
+        emit_generation_warning(warning_callback, message)
+    emit_generation_progress(
+        progress_callback,
+        "statements",
+        len(statement_files),
+        len(statement_files),
+        "Statements validated",
+    )
+
+    from nlp_expenses.reconciliation import ensure_reconciliation_ready
+
+    ensure_reconciliation_ready(trip_dir)
+    return normalization, True
+
+
+def prepare_reviewed_expenses(
+    trip_dir: Path,
+    receipts_dir: Path,
+    root: Path,
+    selected_mode: str,
+    llm_mode: str,
+    progress_callback: ProgressCallback | None,
+    warning_callback: WarningCallback | None,
+    allow_openai_prompt: bool,
+) -> list[Expense]:
     expenses = extract_trip_expenses(
         receipts_dir,
         root,
@@ -194,44 +286,60 @@ def generate_review(
     # Receipt review can correct an extracted date. Keep the stable-looking
     # workbook IDs aligned with the reviewed, canonical receipt data.
     assign_simple_expense_ids(expenses)
-    progress("workbook", 0, 1, "Building the reimbursement report bundle")
+    return expenses
+
+
+def apply_arvine_reconciliation(
+    trip_dir: Path,
+    selected_mode: str,
+    normalization: NormalizationResult | None,
+    expenses: list[Expense],
+) -> None:
+    if selected_mode != "arvine":
+        return
+
+    from nlp_expenses.reconciliation import (
+        apply_reconciliation_overrides,
+        apply_transaction_decisions,
+        load_transaction_decisions,
+    )
+
+    apply_reconciliation_overrides(trip_dir, expenses)
+    apply_transaction_decisions(
+        normalization.transactions if normalization else [],
+        load_transaction_decisions(trip_dir),
+    )
+
+
+def build_standard_review_workbook(
+    trip_dir: Path,
+    root: Path,
+    statements_dir: Path,
+    selected_mode: str,
+    normalization: NormalizationResult | None,
+    expenses: list[Expense],
+    output_path: Path | None,
+) -> Path:
+    from nlp_expenses.lifecycle import record_generated_workbook
+
     if selected_mode == "arvine":
+        from nlp_expenses.accounting import trip_accounting_profile
         from nlp_expenses.reconciliation import (
-            apply_reconciliation_overrides,
-            apply_transaction_decisions,
-            load_transaction_decisions,
+            load_manual_matches,
+            load_transaction_allocations,
         )
 
-        apply_reconciliation_overrides(trip_dir, expenses)
-        apply_transaction_decisions(
+        result = build_arvine_workbook(
+            trip_dir,
+            expenses,
             normalization.transactions if normalization else [],
-            load_transaction_decisions(trip_dir),
+            output_path=output_path,
+            manual_matches=load_manual_matches(trip_dir),
+            accounting_profile=trip_accounting_profile(root, trip_dir),
+            transaction_allocations=load_transaction_allocations(trip_dir),
         )
-
-    if not contract_bundle:
-        if selected_mode == "arvine":
-            from nlp_expenses.accounting import trip_accounting_profile
-            from nlp_expenses.lifecycle import record_generated_workbook
-            from nlp_expenses.reconciliation import (
-                load_manual_matches,
-                load_transaction_allocations,
-            )
-
-            result = build_arvine_workbook(
-                trip_dir,
-                expenses,
-                normalization.transactions if normalization else [],
-                output_path=output_path,
-                manual_matches=load_manual_matches(trip_dir),
-                accounting_profile=trip_accounting_profile(root, trip_dir),
-                transaction_allocations=load_transaction_allocations(trip_dir),
-            )
-            record_generated_workbook(root, trip_dir, result)
-            progress("complete", 1, 1, "Workbook ready")
-            return result
-
+    else:
         from nlp_expenses.extraction.statements import parse_all_statements
-        from nlp_expenses.lifecycle import record_generated_workbook
         from nlp_expenses.reconciliation import (
             ivado_statement_transactions_from_reconciliation,
             reconciliation_is_fresh,
@@ -249,10 +357,15 @@ def generate_review(
             output_path=output_path,
             pre_matched=use_reviewed_mappings,
         )
-        record_generated_workbook(root, trip_dir, result)
-        progress("complete", 1, 1, "Workbook ready")
-        return result
+    record_generated_workbook(root, trip_dir, result)
+    return result
 
+
+def build_contract_review_bundle(
+    trip_dir: Path,
+    root: Path,
+    output_path: Path | None,
+) -> Path:
     from nlp_expenses.consolidation import consolidation_view
     from nlp_expenses.lifecycle import record_generated_bundle
     from nlp_expenses.trip_manifest import (
@@ -267,11 +380,7 @@ def generate_review(
     manifest_path = trip_dir / CONTRACT_FILENAME
     created: list[Path] = []
     try:
-        result = build_reimbursement_report_workbook(
-            trip_dir,
-            records,
-            primary_path,
-        )
+        result = build_reimbursement_report_workbook(trip_dir, records, primary_path)
         created.append(result)
         manifest = write_trip_manifest(root, trip_dir, view=view, output_path=manifest_path)
         created.append(manifest)
@@ -287,8 +396,23 @@ def generate_review(
         for path in created:
             path.unlink(missing_ok=True)
         raise
-    progress("complete", 1, 1, "Reimbursement report bundle ready")
     return result
+
+
+def emit_generation_progress(
+    callback: ProgressCallback | None,
+    stage: str,
+    current: int,
+    total: int,
+    message: str,
+) -> None:
+    if callback:
+        callback(GenerationProgress(stage=stage, current=current, total=total, message=message))
+
+
+def emit_generation_warning(callback: WarningCallback | None, message: str) -> None:
+    if callback:
+        callback(message)
 
 
 def assign_simple_expense_ids(expenses: list[Expense]) -> None:

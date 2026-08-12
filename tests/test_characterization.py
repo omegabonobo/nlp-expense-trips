@@ -6,9 +6,11 @@ import tempfile
 import unittest
 from datetime import date, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from openpyxl import load_workbook
 
+from nlp_expenses.generator import build_contract_review_bundle
 from nlp_expenses.models import Expense, NormalizedTransaction
 from nlp_expenses.reconciliation import (
     aggregate_transaction_groups,
@@ -449,6 +451,40 @@ class CharacterizationTests(unittest.TestCase):
                 workbook_contract_digest(output),
                 "7980bd3051096ce42f1091e7b6858a322e8351a2cc3a5f7b1eea2a5525bca2de",
             )
+
+    def test_contract_bundle_removes_completed_artifacts_after_later_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = root / "trips" / "202607_contract"
+            trip.mkdir(parents=True)
+            primary = trip / "expense_review_202607_contract_arvine.xlsx"
+
+            def build_primary(_trip, _records, output_path):
+                output_path.write_bytes(b"workbook")
+                return output_path
+
+            with (
+                patch(
+                    "nlp_expenses.consolidation.consolidation_view",
+                    return_value={"claim_program": "arvine_only"},
+                ),
+                patch(
+                    "nlp_expenses.trip_manifest.build_trip_manifest_records",
+                    return_value=[],
+                ),
+                patch(
+                    "nlp_expenses.generator.build_reimbursement_report_workbook",
+                    side_effect=build_primary,
+                ),
+                patch(
+                    "nlp_expenses.trip_manifest.write_trip_manifest",
+                    side_effect=RuntimeError("manifest failed"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "manifest failed"),
+            ):
+                build_contract_review_bundle(trip, root, None)
+
+            self.assertFalse(primary.exists())
 
 
 if __name__ == "__main__":
