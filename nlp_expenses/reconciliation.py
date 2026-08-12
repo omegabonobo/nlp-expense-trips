@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from difflib import SequenceMatcher
@@ -34,23 +33,37 @@ from nlp_expenses.models import (
     StatementFileReport,
     StatementTransaction,
 )
+from nlp_expenses.reconciliation_allocations import (
+    REIMBURSABLE_ALLOCATION_TYPES,
+    apply_allocations_to_group,
+    apply_allocations_to_groups,
+    normalize_allocations,
+    restore_group_before_allocations,
+)
+from nlp_expenses.reconciliation_state import (
+    RECONCILIATION_VERSION,
+    deserialize_manual_matches,
+    deserialize_transaction_allocations,
+    deserialize_transaction_decisions,
+    load_invoice_overrides,
+    load_manual_cad_overrides,
+    load_reconciliation_state,
+    reconciliation_input_fingerprint,
+    save_reconciliation_state,
+)
 from nlp_expenses.statement_normalizer import (
-    STATEMENT_SETTINGS_FILE,
     StatementNormalizationError,
     list_statement_files,
     normalize_statement_files,
     preflight_statement_files,
 )
-from nlp_expenses.storage import write_json_atomic
 from nlp_expenses.trip_metadata import (
     apply_trip_metadata_defaults,
     trip_metadata,
     trip_policy_warnings,
 )
 from nlp_expenses.trips import (
-    list_receipt_files,
     load_trip_config,
-    relative_source_name,
     save_trip_config,
     source_file_key,
     trip_mode,
@@ -58,8 +71,6 @@ from nlp_expenses.trips import (
     trip_statements_dir,
 )
 
-RECONCILIATION_FILE = ".nlp-expenses-reconciliation.json"
-RECONCILIATION_VERSION = 1
 INVOICE_FIELD_MAP = {
     "date": "date",
     "vendor": "supplier_name",
@@ -77,8 +88,6 @@ INVOICE_FIELD_MAP = {
     "attendees_client": "attendees_client",
 }
 NUMERIC_INVOICE_FIELDS = {"amount", "gst_hst", "qst"}
-ALLOCATION_TYPES = {"purchase", "refund", "fee", "personal", "ignored"}
-REIMBURSABLE_ALLOCATION_TYPES = {"purchase", "refund", "fee"}
 
 
 class InvoiceValidationError(ValueError):
@@ -358,41 +367,6 @@ def load_manual_matches(trip_dir: Path) -> dict[str, str | None]:
     return deserialize_manual_matches(state)
 
 
-def deserialize_manual_matches(state: dict | None) -> dict[str, str | None]:
-    raw = state.get("manual_matches", {}) if state else {}
-    if not isinstance(raw, dict):
-        return {}
-    return {
-        str(group_id): (str(receipt_file) if receipt_file is not None else None)
-        for group_id, receipt_file in raw.items()
-        if isinstance(group_id, str) and (isinstance(receipt_file, str) or receipt_file is None)
-    }
-
-
-def load_invoice_overrides(trip_dir: Path) -> dict[str, dict]:
-    state = load_reconciliation_state(trip_dir)
-    raw = state.get("invoice_overrides", {}) if state else {}
-    if not isinstance(raw, dict):
-        return {}
-    return {
-        filename: dict(values)
-        for filename, values in raw.items()
-        if isinstance(filename, str) and isinstance(values, dict)
-    }
-
-
-def load_manual_cad_overrides(trip_dir: Path) -> dict[str, dict]:
-    state = load_reconciliation_state(trip_dir)
-    raw = state.get("manual_cad_overrides", {}) if state else {}
-    if not isinstance(raw, dict):
-        return {}
-    return {
-        filename: dict(values)
-        for filename, values in raw.items()
-        if isinstance(filename, str) and isinstance(values, dict)
-    }
-
-
 def load_transaction_decisions(trip_dir: Path) -> dict[str, dict]:
     state = load_reconciliation_state(trip_dir)
     if state and not reconciliation_is_fresh(trip_dir, state):
@@ -405,30 +379,6 @@ def load_transaction_allocations(trip_dir: Path) -> dict[str, list[dict]]:
     if state and not reconciliation_is_fresh(trip_dir, state):
         return {}
     return deserialize_transaction_allocations(state)
-
-
-def deserialize_transaction_allocations(state: dict | None) -> dict[str, list[dict]]:
-    raw = state.get("transaction_allocations", {}) if state else {}
-    if not isinstance(raw, dict):
-        return {}
-    return {
-        group_id: [dict(allocation) for allocation in allocations if isinstance(allocation, dict)]
-        for group_id, allocations in raw.items()
-        if isinstance(group_id, str) and isinstance(allocations, list)
-    }
-
-
-def deserialize_transaction_decisions(state: dict | None) -> dict[str, dict]:
-    raw = state.get("transaction_decisions", {}) if state else {}
-    if not isinstance(raw, dict):
-        return {}
-    return {
-        group_id: dict(values)
-        for group_id, values in raw.items()
-        if isinstance(group_id, str)
-        and isinstance(values, dict)
-        and values.get("action") in {"keep", "ignore"}
-    }
 
 
 def apply_transaction_decisions(
@@ -563,116 +513,6 @@ def set_transaction_allocations(
     state["coverage_confirmation"] = None
     save_reconciliation_state(trip_dir, state)
     return reconciliation_view(trip_dir, state)
-
-
-def normalize_allocations(
-    allocations: list[dict],
-    available_files: set[str | None],
-    target_cad: float,
-) -> list[dict]:
-    if not isinstance(allocations, list):
-        raise ValueError("Allocations must be submitted as a list.")
-    normalized = []
-    for index, allocation in enumerate(allocations, start=1):
-        if not isinstance(allocation, dict):
-            raise ValueError(f"Allocation {index} must be an object.")
-        allocation_type = str(allocation.get("type", "")).strip().lower()
-        if allocation_type not in ALLOCATION_TYPES:
-            raise ValueError(f"Allocation {index} has an invalid type.")
-        invoice_file = str(allocation.get("invoice_file") or "").strip() or None
-        category = str(allocation.get("category") or "").strip()
-        note = str(allocation.get("note") or "").strip()
-        if invoice_file and invoice_file not in available_files:
-            raise ValueError(f"Allocation {index} references an invoice that is no longer present.")
-        if allocation_type in {"purchase", "refund"} and not invoice_file:
-            raise ValueError(f"Allocation {index} must reference an invoice.")
-        if allocation_type in {"personal", "ignored"} and not category:
-            category = "Personal / non-reimbursable" if allocation_type == "personal" else "Ignored"
-        if allocation_type in {"personal", "ignored"} and not note:
-            raise ValueError(f"Allocation {index} needs an audit note.")
-        try:
-            cad_amount = round(float(allocation.get("cad_amount")), 2)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"Allocation {index} needs a valid CAD amount.") from exc
-        if cad_amount == 0:
-            raise ValueError(f"Allocation {index} CAD amount cannot be zero.")
-        if allocation_type == "refund" and cad_amount > 0:
-            raise ValueError(f"Allocation {index} refund amount must be negative.")
-        if allocation_type != "refund" and cad_amount < 0:
-            raise ValueError(f"Allocation {index} amount must be positive.")
-        original = allocation.get("original_amount")
-        if original in ("", None):
-            original_amount = None
-        else:
-            try:
-                original_amount = round(float(original), 2)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"Allocation {index} original amount is invalid.") from exc
-        percentage = round(abs(cad_amount / target_cad) * 100, 4) if target_cad else 0.0
-        normalized.append(
-            {
-                "allocation_id": f"A{index:03d}",
-                "type": allocation_type,
-                "invoice_file": invoice_file,
-                "category": category,
-                "original_amount": original_amount,
-                "cad_amount": cad_amount,
-                "percentage": percentage,
-                "note": note,
-            }
-        )
-    return normalized
-
-
-def allocation_totals(allocations: list[dict], target_cad: float) -> dict:
-    total = round(sum(float(item.get("cad_amount") or 0) for item in allocations), 2)
-    balance = round(target_cad - total, 2)
-    if not allocations:
-        status = "none"
-    elif abs(balance) <= 0.01:
-        status = "balanced"
-        balance = 0.0
-    elif target_cad and (total * target_cad < 0 or abs(total) > abs(target_cad)):
-        status = "overallocated"
-    else:
-        status = "unallocated"
-    return {"allocation_total": total, "allocation_balance": balance, "allocation_status": status}
-
-
-def apply_allocations_to_groups(
-    groups: list[dict], allocations_by_group: dict[str, list[dict]]
-) -> None:
-    for group in groups:
-        allocations = allocations_by_group.get(group["group_id"], [])
-        if allocations:
-            apply_allocations_to_group(group, allocations)
-
-
-def apply_allocations_to_group(group: dict, allocations: list[dict]) -> None:
-    group.setdefault(
-        "pre_allocation",
-        {
-            "expense_file": group.get("expense_file"),
-            "match_status": group.get("match_status"),
-            "match_confidence": group.get("match_confidence"),
-        },
-    )
-    group["allocations"] = [dict(allocation) for allocation in allocations]
-    group.update(allocation_totals(allocations, float(group.get("cad_amount") or 0)))
-    group["expense_file"] = None
-    group["match_status"] = "split"
-    group["match_confidence"] = 1.0 if group["allocation_status"] == "balanced" else 0.0
-
-
-def restore_group_before_allocations(group: dict) -> None:
-    previous = group.get("pre_allocation", {})
-    for field in ("expense_file", "match_status", "match_confidence"):
-        if field in previous:
-            group[field] = previous[field]
-    group["allocations"] = []
-    group["allocation_total"] = 0.0
-    group["allocation_balance"] = group.get("cad_amount")
-    group["allocation_status"] = "none"
 
 
 def set_coverage_settings(trip_dir: Path, expected_accounts: list[str]) -> dict:
@@ -1993,51 +1833,6 @@ def amounts_align(actual: float, expected: float) -> bool:
 
 def append_reconciliation_note(existing: str, note: str) -> str:
     return f"{existing.rstrip()} {note}".strip() if existing else note
-
-
-def reconciliation_input_fingerprint(trip_dir: Path) -> str:
-    digest = hashlib.sha256()
-    digest.update(trip_mode(trip_dir).encode("utf-8"))
-    receipts_folder = trip_receipts_dir(trip_dir)
-    for path in list_receipt_files(receipts_folder):
-        stat = path.stat()
-        source_name = relative_source_name(receipts_folder, path)
-        digest.update(
-            f"{receipts_folder.name}/{source_name}|{stat.st_size}|{stat.st_mtime_ns}".encode()
-        )
-    statements_folder = trip_statements_dir(trip_dir)
-    if statements_folder.exists():
-        for path in sorted(
-            item
-            for item in statements_folder.iterdir()
-            if item.is_file() and not item.name.startswith(".")
-        ):
-            stat = path.stat()
-            digest.update(
-                f"{statements_folder.name}/{path.name}|{stat.st_size}|{stat.st_mtime_ns}".encode()
-            )
-    date_settings = trip_dir / STATEMENT_SETTINGS_FILE
-    if date_settings.is_file():
-        digest.update(date_settings.read_bytes())
-    return digest.hexdigest()
-
-
-def load_reconciliation_state(trip_dir: Path) -> dict | None:
-    path = trip_dir / RECONCILIATION_FILE
-    if not path.exists():
-        return None
-    try:
-        state = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(state, dict) or state.get("version") != RECONCILIATION_VERSION:
-        return None
-    return state
-
-
-def save_reconciliation_state(trip_dir: Path, state: dict) -> None:
-    path = trip_dir / RECONCILIATION_FILE
-    write_json_atomic(path, state)
 
 
 def emit_progress(
