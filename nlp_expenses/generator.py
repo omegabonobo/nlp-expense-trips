@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from nlp_expenses.config import (
@@ -41,6 +42,16 @@ LLM_MODES = {"ask", "auto", "off", "required"}
 
 ProgressCallback = Callable[[GenerationProgress], None]
 WarningCallback = Callable[[str], None]
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationContext:
+    trip_dir: Path
+    root: Path
+    receipts_dir: Path
+    statements_dir: Path
+    selected_mode: str
+    output_path: Path | None
 
 
 def resolve_run_settings(
@@ -124,18 +135,11 @@ def generate_review(
     allow_openai_prompt: bool = True,
     contract_bundle: bool = False,
 ) -> Path | None:
-    (
-        trip_dir,
-        root,
-        receipts_dir,
-        statements_dir,
-        selected_mode,
-        output_path,
-    ) = validate_generation_request(trip_dir, root, mode, output_path)
+    context = validate_generation_request(trip_dir, root, mode, output_path)
     normalization, proceed = prepare_statement_review(
-        trip_dir,
-        statements_dir,
-        selected_mode,
+        context.trip_dir,
+        context.statements_dir,
+        context.selected_mode,
         statements_complete,
         confirm_input,
         progress_callback,
@@ -145,10 +149,10 @@ def generate_review(
         return None
 
     expenses = prepare_reviewed_expenses(
-        trip_dir,
-        receipts_dir,
-        root,
-        selected_mode,
+        context.trip_dir,
+        context.receipts_dir,
+        context.root,
+        context.selected_mode,
         llm_mode,
         progress_callback,
         warning_callback,
@@ -161,20 +165,29 @@ def generate_review(
         1,
         "Building the reimbursement report bundle",
     )
-    apply_arvine_reconciliation(trip_dir, selected_mode, normalization, expenses)
+    apply_arvine_reconciliation(
+        context.trip_dir,
+        context.selected_mode,
+        normalization,
+        expenses,
+    )
 
     if contract_bundle:
-        result = build_contract_review_bundle(trip_dir, root, output_path)
+        result = build_contract_review_bundle(
+            context.trip_dir,
+            context.root,
+            context.output_path,
+        )
         complete_message = "Reimbursement report bundle ready"
     else:
         result = build_standard_review_workbook(
-            trip_dir,
-            root,
-            statements_dir,
-            selected_mode,
+            context.trip_dir,
+            context.root,
+            context.statements_dir,
+            context.selected_mode,
             normalization,
             expenses,
-            output_path,
+            context.output_path,
         )
         complete_message = "Workbook ready"
 
@@ -187,7 +200,7 @@ def validate_generation_request(
     root: Path,
     mode: str | None,
     output_path: Path | None,
-) -> tuple[Path, Path, Path, Path, str, Path | None]:
+) -> GenerationContext:
     trip_dir = trip_dir.resolve()
     root = root.resolve()
     receipts_dir = trip_receipts_dir(trip_dir)
@@ -204,7 +217,14 @@ def validate_generation_request(
         output_path = output_path.resolve()
         if output_path.parent != trip_dir:
             raise ValueError("The output workbook must be created inside the selected trip folder.")
-    return trip_dir, root, receipts_dir, statements_dir, selected_mode, output_path
+    return GenerationContext(
+        trip_dir=trip_dir,
+        root=root,
+        receipts_dir=receipts_dir,
+        statements_dir=statements_dir,
+        selected_mode=selected_mode,
+        output_path=output_path,
+    )
 
 
 def prepare_statement_review(

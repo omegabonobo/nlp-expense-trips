@@ -10,6 +10,7 @@ from pathlib import Path
 
 from nlp_expenses.accounting import trip_accounting_profile
 from nlp_expenses.fx_rates import FX_CACHE_FILE
+from nlp_expenses.reconciliation_state import RECONCILIATION_FILE
 from nlp_expenses.storage import write_json_atomic
 from nlp_expenses.trip_metadata import required_metadata_gaps, trip_metadata
 from nlp_expenses.trips import (
@@ -23,7 +24,6 @@ from nlp_expenses.trips import (
 
 APPROVAL_RECORD_PREFIX = ".nlp-expenses-approval-"
 PACKAGE_PREFIX = "trip_package_"
-RECONCILIATION_FILE = ".nlp-expenses-reconciliation.json"
 LINE_ITEM_REVIEW_FILE = ".nlp-expenses-line-items.json"
 STATEMENT_SETTINGS_FILE = ".nlp-expenses-statement-settings.json"
 

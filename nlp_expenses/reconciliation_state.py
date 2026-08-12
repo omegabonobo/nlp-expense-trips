@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any, TypedDict, cast
 
 from nlp_expenses.statement_normalizer import STATEMENT_SETTINGS_FILE
 from nlp_expenses.storage import write_json_atomic
@@ -18,7 +20,27 @@ RECONCILIATION_FILE = ".nlp-expenses-reconciliation.json"
 RECONCILIATION_VERSION = 1
 
 
-def deserialize_manual_matches(state: dict | None) -> dict[str, str | None]:
+class ReconciliationState(TypedDict, total=False):
+    version: int
+    mode: str
+    synced_at: str
+    input_fingerprint: str
+    requires_resync: bool
+    expenses: list[dict[str, Any]]
+    extracted_expenses: list[dict[str, Any]]
+    transactions: list[dict[str, Any]]
+    manual_matches: dict[str, str | None]
+    invoice_overrides: dict[str, dict[str, Any]]
+    manual_cad_overrides: dict[str, dict[str, Any]]
+    transaction_decisions: dict[str, dict[str, Any]]
+    transaction_allocations: dict[str, list[dict[str, Any]]]
+    warnings: list[str]
+
+
+StateMapping = Mapping[str, Any]
+
+
+def deserialize_manual_matches(state: StateMapping | None) -> dict[str, str | None]:
     raw = state.get("manual_matches", {}) if state else {}
     if not isinstance(raw, dict):
         return {}
@@ -29,7 +51,9 @@ def deserialize_manual_matches(state: dict | None) -> dict[str, str | None]:
     }
 
 
-def deserialize_transaction_allocations(state: dict | None) -> dict[str, list[dict]]:
+def deserialize_transaction_allocations(
+    state: StateMapping | None,
+) -> dict[str, list[dict]]:
     raw = state.get("transaction_allocations", {}) if state else {}
     if not isinstance(raw, dict):
         return {}
@@ -40,7 +64,7 @@ def deserialize_transaction_allocations(state: dict | None) -> dict[str, list[di
     }
 
 
-def deserialize_transaction_decisions(state: dict | None) -> dict[str, dict]:
+def deserialize_transaction_decisions(state: StateMapping | None) -> dict[str, dict]:
     raw = state.get("transaction_decisions", {}) if state else {}
     if not isinstance(raw, dict):
         return {}
@@ -104,7 +128,7 @@ def reconciliation_input_fingerprint(trip_dir: Path) -> str:
     return digest.hexdigest()
 
 
-def load_reconciliation_state(trip_dir: Path) -> dict | None:
+def load_reconciliation_state(trip_dir: Path) -> ReconciliationState | None:
     path = trip_dir / RECONCILIATION_FILE
     if not path.exists():
         return None
@@ -114,8 +138,8 @@ def load_reconciliation_state(trip_dir: Path) -> dict | None:
         return None
     if not isinstance(state, dict) or state.get("version") != RECONCILIATION_VERSION:
         return None
-    return state
+    return cast(ReconciliationState, state)
 
 
-def save_reconciliation_state(trip_dir: Path, state: dict) -> None:
+def save_reconciliation_state(trip_dir: Path, state: StateMapping) -> None:
     write_json_atomic(trip_dir / RECONCILIATION_FILE, state)

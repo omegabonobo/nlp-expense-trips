@@ -1,23 +1,45 @@
 from __future__ import annotations
 
+from typing import Literal, TypedDict, cast
+
 ALLOCATION_TYPES = {"purchase", "refund", "fee", "personal", "ignored"}
 REIMBURSABLE_ALLOCATION_TYPES = {"purchase", "refund", "fee"}
+
+AllocationType = Literal["purchase", "refund", "fee", "personal", "ignored"]
+
+
+class AllocationRecord(TypedDict):
+    allocation_id: str
+    type: AllocationType
+    invoice_file: str | None
+    category: str
+    original_amount: float | None
+    cad_amount: float
+    percentage: float
+    note: str
+
+
+class AllocationTotals(TypedDict):
+    allocation_total: float
+    allocation_balance: float
+    allocation_status: Literal["none", "balanced", "overallocated", "unallocated"]
 
 
 def normalize_allocations(
     allocations: list[dict],
     available_files: set[str | None],
     target_cad: float,
-) -> list[dict]:
+) -> list[AllocationRecord]:
     if not isinstance(allocations, list):
         raise ValueError("Allocations must be submitted as a list.")
-    normalized = []
+    normalized: list[AllocationRecord] = []
     for index, allocation in enumerate(allocations, start=1):
         if not isinstance(allocation, dict):
             raise ValueError(f"Allocation {index} must be an object.")
         allocation_type = str(allocation.get("type", "")).strip().lower()
         if allocation_type not in ALLOCATION_TYPES:
             raise ValueError(f"Allocation {index} has an invalid type.")
+        normalized_type = cast(AllocationType, allocation_type)
         invoice_file = str(allocation.get("invoice_file") or "").strip() or None
         category = str(allocation.get("category") or "").strip()
         note = str(allocation.get("note") or "").strip()
@@ -51,7 +73,7 @@ def normalize_allocations(
         normalized.append(
             {
                 "allocation_id": f"A{index:03d}",
-                "type": allocation_type,
+                "type": normalized_type,
                 "invoice_file": invoice_file,
                 "category": category,
                 "original_amount": original_amount,
@@ -63,7 +85,7 @@ def normalize_allocations(
     return normalized
 
 
-def allocation_totals(allocations: list[dict], target_cad: float) -> dict:
+def allocation_totals(allocations: list[dict], target_cad: float) -> AllocationTotals:
     total = round(sum(float(item.get("cad_amount") or 0) for item in allocations), 2)
     balance = round(target_cad - total, 2)
     if not allocations:

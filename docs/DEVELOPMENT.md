@@ -4,6 +4,9 @@ This repository is a local-first Python application. Receipt images, card
 statements, generated workbooks, review state, and API keys are runtime data;
 they are not source fixtures and must not be committed.
 
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the stable public facades, internal
+module boundaries, processing flow, and characterization-test contracts.
+
 ## Prerequisites
 
 - macOS for the Finder launcher and `open` integrations;
