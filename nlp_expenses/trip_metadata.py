@@ -7,7 +7,6 @@ from pathlib import Path
 from nlp_expenses.models import Expense
 from nlp_expenses.trips import load_trip_config, save_trip_config
 
-
 METADATA_LIST_FIELDS = {"origins", "destinations"}
 POLICY_CATEGORIES = {"flight", "hotel", "transport", "meal", "other"}
 CLAIM_PROGRAMS = {"arvine_only", "ivado_sponsored"}
@@ -84,7 +83,9 @@ def save_trip_metadata(trip_dir: Path, submitted: dict) -> dict:
     previous = trip_metadata(trip_dir)
     metadata = validate_trip_metadata(submitted)
     config = load_trip_config(trip_dir)
-    config["metadata"] = {key: value for key, value in metadata.items() if key != "expected_accounts"}
+    config["metadata"] = {
+        key: value for key, value in metadata.items() if key != "expected_accounts"
+    }
     if "expected_accounts" in submitted:
         config["expected_accounts"] = metadata["expected_accounts"]
     save_trip_config(trip_dir, config)
@@ -109,10 +110,7 @@ def apply_default_payer_to_receipts(trip_dir: Path, default_paid_by: str) -> Non
     for receipt in state.get("receipts", []):
         if not isinstance(receipt, dict):
             continue
-        if (
-            not receipt.get("paid_by_overridden")
-            and receipt.get("paid_by") != default_paid_by
-        ):
+        if not receipt.get("paid_by_overridden") and receipt.get("paid_by") != default_paid_by:
             receipt["paid_by"] = default_paid_by
             changed = True
         if receipt.get("auto_paid_by") != default_paid_by:
@@ -344,7 +342,9 @@ def trip_policy_warnings(
         for transaction in transactions:
             for allocation in transaction.get("allocations", []):
                 if allocation.get("type") == "personal":
-                    warning_id = f"personal:{transaction.get('group_id')}:{allocation.get('allocation_id')}"
+                    warning_id = (
+                        f"personal:{transaction.get('group_id')}:{allocation.get('allocation_id')}"
+                    )
                     warnings.append(
                         policy_warning(
                             warning_id,

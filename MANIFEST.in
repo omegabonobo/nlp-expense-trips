@@ -1,0 +1,6 @@
+include .env.example
+include Makefile
+include *.command
+recursive-include docs *.md
+recursive-include examples *.ndjson
+recursive-include scripts *.py *.sh

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from datetime import datetime
 from difflib import SequenceMatcher
-import re
 
 from nlp_expenses.models import Expense, NormalizedTransaction, StatementTransaction
 from nlp_expenses.trips import source_file_key
@@ -44,7 +44,9 @@ def match_normalized_transactions(
             continue
         representative = eligible[0]
         purchase_currency = common_value([leg.purchase_currency for leg in eligible])
-        purchase_amount = sum_values([leg.purchase_amount for leg in eligible]) if purchase_currency else None
+        purchase_amount = (
+            sum_values([leg.purchase_amount for leg in eligible]) if purchase_currency else None
+        )
         cad_complete = all(leg.cad_completeness == "complete" for leg in eligible)
         cad_amount = sum_values([leg.cad_amount for leg in eligible]) if cad_complete else None
 
@@ -76,9 +78,10 @@ def match_normalized_transactions(
         if not best_expense or best_score < 0.35:
             continue
         confidence = round(best_score, 3)
-        auto_assign = best_score >= 0.72 and not best_review_reason and all(
-            leg.normalization_status in {"ok", "duplicate_confirmed"}
-            for leg in eligible
+        auto_assign = (
+            best_score >= 0.72
+            and not best_review_reason
+            and all(leg.normalization_status in {"ok", "duplicate_confirmed"} for leg in eligible)
         )
         for leg in legs:
             leg.suggested_expense_id = best_expense.expense_id
@@ -166,13 +169,15 @@ def normalized_match_score(
     exact_amount = False
     if receipt_amount is not None:
         if (
-            purchase_amount is not None
-            and expense.currency == purchase_currency
-            and close_amount(receipt_amount, abs(purchase_amount))
+            (
+                purchase_amount is not None
+                and expense.currency == purchase_currency
+                and close_amount(receipt_amount, abs(purchase_amount))
+            )
+            or expense.currency == "CAD"
+            and cad_amount is not None
+            and close_amount(receipt_amount, abs(cad_amount))
         ):
-            score += 0.36
-            exact_amount = True
-        elif expense.currency == "CAD" and cad_amount is not None and close_amount(receipt_amount, abs(cad_amount)):
             score += 0.36
             exact_amount = True
         elif (
@@ -185,12 +190,15 @@ def normalized_match_score(
         elif cad_amount is not None and close_amount(receipt_amount, abs(cad_amount)):
             score += 0.18
             exact_amount = True
-        elif normalized_card_total_gap_percent(
-            expense,
-            purchase_amount,
-            purchase_currency,
-            cad_amount,
-        ) is not None:
+        elif (
+            normalized_card_total_gap_percent(
+                expense,
+                purchase_amount,
+                purchase_currency,
+                cad_amount,
+            )
+            is not None
+        ):
             score += 0.22
     if date_delta == 0 and exact_amount:
         score += 0.08
@@ -226,17 +234,31 @@ def match_score(expense: Expense, transaction: StatementTransaction) -> float:
     receipt_amount = shared_receipt_amount(expense)
     exact_amount = False
     if receipt_amount is not None:
-        if transaction.foreign_amount is not None and close_amount(receipt_amount, transaction.foreign_amount):
+        if transaction.foreign_amount is not None and close_amount(
+            receipt_amount, transaction.foreign_amount
+        ):
             score += 0.36
             exact_amount = True
-        elif transaction.foreign_amount is not None and close_split_amount(receipt_amount, transaction.foreign_amount):
+        elif transaction.foreign_amount is not None and close_split_amount(
+            receipt_amount, transaction.foreign_amount
+        ):
             score += 0.28
-        elif expense.currency == "CAD" and transaction.amount_cad is not None and close_amount(receipt_amount, transaction.amount_cad):
+        elif (
+            expense.currency == "CAD"
+            and transaction.amount_cad is not None
+            and close_amount(receipt_amount, transaction.amount_cad)
+        ):
             score += 0.36
             exact_amount = True
-        elif expense.currency == "CAD" and transaction.amount_cad is not None and close_split_amount(receipt_amount, transaction.amount_cad):
+        elif (
+            expense.currency == "CAD"
+            and transaction.amount_cad is not None
+            and close_split_amount(receipt_amount, transaction.amount_cad)
+        ):
             score += 0.28
-        elif transaction.amount_cad is not None and close_amount(receipt_amount, transaction.amount_cad):
+        elif transaction.amount_cad is not None and close_amount(
+            receipt_amount, transaction.amount_cad
+        ):
             score += 0.18
             exact_amount = True
         elif statement_card_total_gap_percent(expense, transaction) is not None:
@@ -253,7 +275,9 @@ def match_score(expense: Expense, transaction: StatementTransaction) -> float:
     return min(score, 1.0)
 
 
-def enrich_expenses_from_statements(expenses: list[Expense], transactions: list[StatementTransaction]) -> None:
+def enrich_expenses_from_statements(
+    expenses: list[Expense], transactions: list[StatementTransaction]
+) -> None:
     by_id = {expense.expense_id: expense for expense in expenses}
     for transaction in transactions:
         expense_id = transaction.expense_id or transaction.suggested_expense_id
@@ -265,7 +289,10 @@ def enrich_expenses_from_statements(expenses: list[Expense], transactions: list[
         merchant = merchant_from_statement(transaction.description)
         if merchant and should_replace_supplier(expense.supplier_name):
             expense.supplier_name = merchant
-            expense.review_note = append_note(expense.review_note, f"Supplier inferred from card statement: {transaction.description}.")
+            expense.review_note = append_note(
+                expense.review_note,
+                f"Supplier inferred from card statement: {transaction.description}.",
+            )
         if merchant and is_food_merchant(merchant, transaction.description):
             expense.expense_type = infer_meal_type(expense.expense_type, expense.raw_text, merchant)
 
@@ -273,7 +300,12 @@ def enrich_expenses_from_statements(expenses: list[Expense], transactions: list[
 def merchant_from_statement(description: str) -> str:
     text = re.sub(r"\s+", " ", description or "").strip()
     text = re.sub(r"^[A-Z]{2,4}\*", "", text)
-    text = re.sub(r"\b(MELBOURNE|HAWTHORN EAST|WANTIRNA|SYDNEY|LONDON|JAKARTA BARAT|HELP\.UBER\.COM)\b.*$", "", text, flags=re.I)
+    text = re.sub(
+        r"\b(MELBOURNE|HAWTHORN EAST|WANTIRNA|SYDNEY|LONDON|JAKARTA BARAT|HELP\.UBER\.COM)\b.*$",
+        "",
+        text,
+        flags=re.I,
+    )
     text = text.strip(" -")
     known = {
         "FARMERS DAUGHTER": "Farmers Daughters",
@@ -300,14 +332,29 @@ def should_replace_supplier(supplier: str | None) -> bool:
 
 def is_food_merchant(merchant: str, description: str) -> bool:
     blob = f"{merchant} {description}".lower()
-    return any(term in blob for term in ["farmers", "nigel", "reine", "gabriel", "intermission", "espresso", "cafe", "restaurant", "hanks"])
+    return any(
+        term in blob
+        for term in [
+            "farmers",
+            "nigel",
+            "reine",
+            "gabriel",
+            "intermission",
+            "espresso",
+            "cafe",
+            "restaurant",
+            "hanks",
+        ]
+    )
 
 
 def infer_meal_type(current: str | None, raw_text: str, merchant: str) -> str:
     if current and current.startswith("meal"):
         return current
     blob = f"{raw_text} {merchant}".lower()
-    if any(term in blob for term in ["breakfast", "cappuccino", "benedict", "banana bread", "espresso"]):
+    if any(
+        term in blob for term in ["breakfast", "cappuccino", "benedict", "banana bread", "espresso"]
+    ):
         return "meal-breakfast"
     return "meal-dinner"
 
@@ -383,7 +430,9 @@ def normalized_match_review_reason(
     supplier = (expense.supplier_name or "").lower()
     merchant_similarity = SequenceMatcher(None, supplier, (description or "").lower()).ratio()
     if date_delta == 0 and merchant_similarity >= 0.35:
-        return f"Same merchant and date; receipt is {gap}% below the card total, possibly tax or tip."
+        return (
+            f"Same merchant and date; receipt is {gap}% below the card total, possibly tax or tip."
+        )
     return f"Receipt is {gap}% below the card total; review tax or tip."
 
 
@@ -392,7 +441,10 @@ def statement_card_total_gap_percent(
     transaction: StatementTransaction,
 ) -> int | None:
     receipt_amount = shared_receipt_amount(expense)
-    if transaction.foreign_amount is not None and str(expense.currency or "").upper() == str(transaction.foreign_currency or "").upper():
+    if (
+        transaction.foreign_amount is not None
+        and str(expense.currency or "").upper() == str(transaction.foreign_currency or "").upper()
+    ):
         return card_total_gap_percent(receipt_amount, transaction.foreign_amount)
     if str(expense.currency or "").upper() == "CAD":
         return card_total_gap_percent(receipt_amount, transaction.amount_cad)

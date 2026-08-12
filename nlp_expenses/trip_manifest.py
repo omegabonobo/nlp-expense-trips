@@ -1,24 +1,21 @@
 from __future__ import annotations
 
 import json
-import os
-import uuid
 from datetime import date
 from hashlib import sha256
+from importlib.resources import files
 from pathlib import Path
 
 from jsonschema import Draft202012Validator, FormatChecker
 
 from nlp_expenses.accounting import trip_accounting_profile
 from nlp_expenses.consolidation import consolidation_view
-
+from nlp_expenses.storage import write_text_atomic
 
 CONTRACT_VERSION = "3.0.0"
 CONTRACT_FILENAME = "trip-reimbursement-manifest.v3.ndjson"
-CONTRACT_SCHEMA = (
-    Path(__file__).resolve().parents[1]
-    / "contracts"
-    / "trip-reimbursement-manifest.v3.schema.json"
+CONTRACT_SCHEMA = files("nlp_expenses.contracts").joinpath(
+    "trip-reimbursement-manifest.v3.schema.json"
 )
 CONTROL_TOLERANCE_CAD = 0.02
 
@@ -139,9 +136,7 @@ def line_manifest_record(
     receipt_included_in_arvine: bool = True,
     receipt_included_in_ivado: bool = True,
 ) -> dict:
-    included_in_arvine = (
-        bool(item.get("included_in_arvine", True)) and receipt_included_in_arvine
-    )
+    included_in_arvine = bool(item.get("included_in_arvine", True)) and receipt_included_in_arvine
     included_in_ivado = (
         bool(item.get("included_in_ivado", True))
         and included_in_arvine
@@ -190,9 +185,7 @@ def trip_report_manifest_record(
     employee_total = money(summary.get("employee_reimbursement_total_cad")) or 0.0
     ivado_total = money(summary.get("ivado_claim_total_cad")) or 0.0
     receipt_dates = [
-        str(expense.get("date"))
-        for expense in view.get("expenses", [])
-        if expense.get("date")
+        str(expense.get("date")) for expense in view.get("expenses", []) if expense.get("date")
     ]
     report_date = (
         metadata.get("report_date")
@@ -318,12 +311,7 @@ def write_trip_manifest(
         json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
         for record in records
     )
-    temporary = target.parent / f".{target.name}.{uuid.uuid4().hex}.tmp"
-    try:
-        temporary.write_text(payload, encoding="utf-8")
-        os.replace(temporary, target)
-    finally:
-        temporary.unlink(missing_ok=True)
+    write_text_atomic(target, payload)
     return target
 
 
@@ -332,7 +320,7 @@ def stable_report_id(trip_name: str) -> str:
 
 
 def stable_receipt_id(trip_name: str, source_file: str) -> str:
-    digest = sha256(f"{trip_name}\0{source_file}".encode("utf-8")).hexdigest()[:20]
+    digest = sha256(f"{trip_name}\0{source_file}".encode()).hexdigest()[:20]
     return f"RCPT-{digest}"
 
 

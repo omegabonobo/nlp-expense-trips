@@ -25,9 +25,7 @@ NON_ALCOHOL_PATTERNS = {
     "non-alcoholic product": re.compile(
         r"\b(?:ginger beer|root beer|birch beer|butter beer|beer batter(?:ed)?|cooking wine|wine vinegar)\b"
     ),
-    "meat cut containing spirit name": re.compile(
-        r"\bscotch\s+(?:fillet|filet|steak|beef)\b"
-    ),
+    "meat cut containing spirit name": re.compile(r"\bscotch\s+(?:fillet|filet|steak|beef)\b"),
     "receipt tax or charge": re.compile(
         r"^(?:gst|hst|qst|vat|sales\s+tax|tax|service\s+(?:fee|charge)|"
         r"weekend\s+surcharge|card\s+surcharge|gratuity|tip|discount)\b"
@@ -348,7 +346,9 @@ ABV_RE = re.compile(r"\b(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:abv|alc(?:ohol)?(?:\s*/\s
 
 def normalize_alcohol_text(description: str) -> str:
     decomposed = unicodedata.normalize("NFKD", description or "")
-    ascii_text = "".join(character for character in decomposed if not unicodedata.combining(character))
+    ascii_text = "".join(
+        character for character in decomposed if not unicodedata.combining(character)
+    )
     normalized = ascii_text.lower().replace("&", " and ")
     normalized = re.sub(r"[^a-z0-9%.,]+", " ", normalized)
     return re.sub(r"\s+", " ", normalized).strip(" .,")
@@ -383,7 +383,9 @@ def detect_alcohol(description: str) -> AlcoholDetection:
 
     for phrase, corrected in OCR_ALCOHOL_PHRASES.items():
         if f" {phrase} " in f" {normalized} ":
-            return AlcoholDetection(True, 0.91, "recognized OCR variant of alcoholic menu item", corrected)
+            return AlcoholDetection(
+                True, 0.91, "recognized OCR variant of alcoholic menu item", corrected
+            )
 
     words = re.findall(r"[a-z0-9]+", normalized)
     for word in words:
@@ -391,10 +393,14 @@ def detect_alcohol(description: str) -> AlcoholDetection:
         if alias:
             return AlcoholDetection(True, 0.91, "recognized OCR variant of alcohol brand", alias)
 
-    matched_terms = sorted(set(words) & ALCOHOL_TERMS, key=lambda value: (words.index(value), value))
+    matched_terms = sorted(
+        set(words) & ALCOHOL_TERMS, key=lambda value: (words.index(value), value)
+    )
     if matched_terms:
         matched = matched_terms[0]
-        return AlcoholDetection(True, 0.93, "recognized alcohol term, style, cocktail, or brand", matched)
+        return AlcoholDetection(
+            True, 0.93, "recognized alcohol term, style, cocktail, or brand", matched
+        )
 
     item_name = _without_leading_quantity(normalized)
     if item_name in KNOWN_ALCOHOL_ITEM_NAMES:

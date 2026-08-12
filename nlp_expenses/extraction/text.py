@@ -5,7 +5,6 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-
 BASE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
 HEIC_EXTENSIONS = {".heic", ".heif"}
 

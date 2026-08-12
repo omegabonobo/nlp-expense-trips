@@ -10,6 +10,7 @@ from pathlib import Path
 
 from nlp_expenses.accounting import trip_accounting_profile
 from nlp_expenses.fx_rates import FX_CACHE_FILE
+from nlp_expenses.storage import write_json_atomic
 from nlp_expenses.trip_metadata import required_metadata_gaps, trip_metadata
 from nlp_expenses.trips import (
     list_receipt_files,
@@ -19,7 +20,6 @@ from nlp_expenses.trips import (
     trip_receipts_dir,
     trip_statements_dir,
 )
-
 
 APPROVAL_RECORD_PREFIX = ".nlp-expenses-approval-"
 PACKAGE_PREFIX = "trip_package_"
@@ -134,7 +134,9 @@ def approve_trip(
     config = load_trip_config(trip_dir)
     generation = config.get("generated_workbooks", {}).get(workbook.name, {})
     if generation.get("input_fingerprint") != current_inputs["fingerprint"]:
-        raise ValueError("Generate a new workbook from the current trip files and review decisions before approval.")
+        raise ValueError(
+            "Generate a new workbook from the current trip files and review decisions before approval."
+        )
 
     reconciliation_summary = approval_reconciliation_check(trip_dir)
     approved_at = datetime.now().isoformat(timespec="seconds")
@@ -184,10 +186,18 @@ def approval_reconciliation_check(trip_dir: Path) -> dict:
             raise ValueError("Sync the current invoices and statements before approval.")
         needs_review = view["summary"]["needs_review_count"]
         if needs_review:
-            raise ValueError(f"Resolve the {needs_review} reconciliation or policy review item(s) before approval.")
+            raise ValueError(
+                f"Resolve the {needs_review} reconciliation or policy review item(s) before approval."
+            )
         coverage = view.get("coverage", {})
-        if trip_mode(trip_dir) == "arvine" and coverage.get("gaps") and not coverage.get("confirmation"):
-            raise ValueError("Acknowledge the unresolved statement coverage gaps during workbook generation.")
+        if (
+            trip_mode(trip_dir) == "arvine"
+            and coverage.get("gaps")
+            and not coverage.get("confirmation")
+        ):
+            raise ValueError(
+                "Acknowledge the unresolved statement coverage gaps during workbook generation."
+            )
     return {
         "required": bool(list_visible_files(trip_statements_dir(trip_dir))),
         "synced_at": view.get("synced_at"),
@@ -235,10 +245,9 @@ def approval_is_current(root: Path, trip_dir: Path, manifest: dict | None = None
             return False
         if not artifact.is_file() or file_sha256(artifact) != entry.get("sha256"):
             return False
-    return (
-        review_input_snapshot(root, trip_dir).get("fingerprint")
-        == manifest.get("review_inputs", {}).get("fingerprint")
-    )
+    return review_input_snapshot(root, trip_dir).get("fingerprint") == manifest.get(
+        "review_inputs", {}
+    ).get("fingerprint")
 
 
 def trip_lifecycle(root: Path, trip_dir: Path) -> dict:
@@ -311,7 +320,9 @@ def export_approved_package(root: Path, trip_dir: Path) -> Path:
     if not manifest:
         raise ValueError("Approve the trip before exporting its consolidation package.")
     if not approval_is_current(root, trip_dir, manifest):
-        raise ValueError("The trip changed after approval. Review and approve a current workbook before exporting.")
+        raise ValueError(
+            "The trip changed after approval. Review and approve a current workbook before exporting."
+        )
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     base = f"{PACKAGE_PREFIX}{trip_dir.name}_{timestamp}"
     target = trip_dir / f"{base}.zip"
@@ -366,7 +377,9 @@ def list_packages(trip_dir: Path) -> list[Path]:
         (
             path
             for path in trip_dir.iterdir()
-            if path.is_file() and path.name.startswith(PACKAGE_PREFIX) and path.suffix.lower() == ".zip"
+            if path.is_file()
+            and path.name.startswith(PACKAGE_PREFIX)
+            and path.suffix.lower() == ".zip"
         ),
         key=lambda path: (path.stat().st_mtime_ns, path.name),
         reverse=True,
@@ -480,16 +493,6 @@ def safe_trip_child(trip_dir: Path, relative_name: str) -> Path:
 def list_visible_files(folder: Path) -> list[Path]:
     if not folder.exists():
         return []
-    return sorted(path for path in folder.iterdir() if path.is_file() and not path.name.startswith("."))
-
-
-def write_json_atomic(path: Path, value: dict) -> None:
-    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
-    try:
-        temporary.write_text(
-            json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    return sorted(
+        path for path in folder.iterdir() if path.is_file() and not path.name.startswith(".")
+    )

@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import json
-import os
-import uuid
 from copy import deepcopy
 from datetime import date
 from pathlib import Path
 
+from nlp_expenses.storage import write_json_atomic
 from nlp_expenses.trips import load_trip_config, save_trip_config
-
 
 ACCOUNTING_PROFILE_FILE = ".nlp-expenses-accounting-profile.json"
 PROFILE_PERCENT_FIELDS = {
@@ -67,12 +65,7 @@ def load_default_accounting_profile(root: Path) -> dict:
 def save_default_accounting_profile(root: Path, profile: dict) -> dict:
     validated = validate_accounting_profile(profile)
     path = root.resolve() / ACCOUNTING_PROFILE_FILE
-    temporary = path.parent / f".{ACCOUNTING_PROFILE_FILE}.{uuid.uuid4().hex}.tmp"
-    try:
-        temporary.write_text(json.dumps(validated, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    write_json_atomic(path, validated)
     return validated
 
 

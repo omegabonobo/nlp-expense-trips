@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import json
 import base64
 import io
+import json
 import mimetypes
 import os
 import re
@@ -15,7 +15,6 @@ from nlp_expenses.models import Expense, LineItem
 
 from .alcohol import AlcoholDetection, detect_alcohol
 from .text import extract_text
-
 
 MONTHS = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec"
 SUPPORTED_CURRENCIES = ("AUD", "CAD", "USD", "IDR", "EUR", "GBP", "VND", "QAR", "HKD", "CHF")
@@ -48,7 +47,9 @@ class MoneyMatch:
     raw: str
 
 
-def parse_receipt(path: Path, use_llm: bool = False, model: str = "gpt-5.2", force_llm: bool = False) -> Expense:
+def parse_receipt(
+    path: Path, use_llm: bool = False, model: str = "gpt-5.2", force_llm: bool = False
+) -> Expense:
     raw_text, method = extract_text(path)
     parsed = heuristic_parse_receipt(path, raw_text)
     should_use_llm = use_llm and raw_text.strip() and (force_llm or needs_llm_text_fallback(parsed))
@@ -62,7 +63,9 @@ def parse_receipt(path: Path, use_llm: bool = False, model: str = "gpt-5.2", for
             parsed = merge_llm_receipt(path, raw_text, vision, "OpenAI vision fallback")
     apply_missing_date_fallback(parsed, path, raw_text)
     if method == "empty":
-        parsed.review_note = append_note(parsed.review_note, "No extractable text/OCR output; review manually.")
+        parsed.review_note = append_note(
+            parsed.review_note, "No extractable text/OCR output; review manually."
+        )
     return parsed
 
 
@@ -73,7 +76,7 @@ def heuristic_parse_receipt(path: Path, raw_text: str) -> Expense:
     supplier = find_supplier(lines, path)
     amount, currency = find_total(raw_text)
     expense_type = classify_expense(raw_text, supplier, path.name)
-    line_items = find_line_items(lines, currency, amount, expense_type)
+    line_items = find_line_items(lines, amount, expense_type)
     line_items = ensure_minimum_line_items(line_items, amount, expense_type)
     line_items = add_reconciliation_gap_line(line_items, amount, expense_type)
     line_items = add_manual_alcohol_adjustment(line_items)
@@ -91,8 +94,14 @@ def heuristic_parse_receipt(path: Path, raw_text: str) -> Expense:
             note,
             f"Source filename suggests date {filename_date}, but receipt content shows {document_date}; kept the receipt date.",
         )
-    if currency == "AUD" and "$" in raw_text and not re.search(r"\b(AUD|AUSTRALIAN|AUSTRALIA|MELBOURNE|VICTORIA|VIC)\b", raw_text, re.I):
-        note = append_note(note, "Currency inferred as AUD from $; review if receipt is not Australian.")
+    if (
+        currency == "AUD"
+        and "$" in raw_text
+        and not re.search(r"\b(AUD|AUSTRALIAN|AUSTRALIA|MELBOURNE|VICTORIA|VIC)\b", raw_text, re.I)
+    ):
+        note = append_note(
+            note, "Currency inferred as AUD from $; review if receipt is not Australian."
+        )
         confidence = min(confidence, 0.68)
     reconciliation_note = line_item_reconciliation_note(amount, line_items, expense_type)
     if reconciliation_note:
@@ -233,7 +242,9 @@ def find_supplier(lines: list[str], path: Path) -> str:
     restaurant_supplier = find_restaurant_supplier(lines)
     if restaurant_supplier:
         return restaurant_supplier
-    ignored = re.compile(r"receipt|tax invoice|invoice|abn|gst|date|amount|total|florent|gmail|reply-to|to:", re.I)
+    ignored = re.compile(
+        r"receipt|tax invoice|invoice|abn|gst|date|amount|total|florent|gmail|reply-to|to:", re.I
+    )
     for line in lines[:14]:
         clean = re.sub(r"\s+", " ", line).strip(" :-")
         if len(clean) >= 3 and not ignored.search(clean) and not MONEY_RE.search(clean):
@@ -273,13 +284,16 @@ def find_total(text: str) -> tuple[float | None, str | None]:
     for idx, line in enumerate(lines):
         category_total = is_category_total_line(line)
         strong_total_label = bool(
-            re.search(r"\b(grand total|total amount|amount paid|balance due|total)\b", line, re.I) and not category_total
+            re.search(r"\b(grand total|total amount|amount paid|balance due|total)\b", line, re.I)
+            and not category_total
         )
         if is_amount_metadata_line(line) and not strong_total_label:
             continue
         for amount, currency in amounts_in_line(line):
             weight = 0
-            has_money_marker = bool(currency or "$" in line or re.search(rf"\b({CURRENCY_PATTERN})\b", line, re.I))
+            has_money_marker = bool(
+                currency or "$" in line or re.search(rf"\b({CURRENCY_PATTERN})\b", line, re.I)
+            )
             normalized_currency = normalize_currency(currency, text)
             if normalized_currency == "AUD" and amount > 5000 and not strong_total_label:
                 continue
@@ -291,11 +305,19 @@ def find_total(text: str) -> tuple[float | None, str | None]:
                 weight += 10
             elif re.search(r"\b(?:american expr|amex|visa|mastercard|card)\b", line, re.I):
                 weight += 12
-            if re.search(r"\b(check|echeck|table|account|phone|telephone|street|postcode|staff|covers|cover|abn|agn|invoice no|booking reference)\b", line, re.I):
+            if re.search(
+                r"\b(check|echeck|table|account|phone|telephone|street|postcode|staff|covers|cover|abn|agn|invoice no|booking reference)\b",
+                line,
+                re.I,
+            ):
                 weight -= 30
             if re.search(r"\b(fare calculation|roe|nuc)\b", line, re.I):
                 weight -= 20
-            if re.search(r"\b(subtotal|tax|gst|tip|gratuity|discount|change|surcharge|service fee)\b", line, re.I):
+            if re.search(
+                r"\b(subtotal|tax|gst|tip|gratuity|discount|change|surcharge|service fee)\b",
+                line,
+                re.I,
+            ):
                 weight -= 5
             if amount > 0 and (weight > 0 or has_money_marker):
                 candidates.append((weight, amount, idx, normalized_currency))
@@ -335,7 +357,11 @@ def subtotal_plus_additives(lines: list[str], text: str) -> tuple[float, str | N
 
 def is_category_total_line(line: str) -> bool:
     return bool(
-        re.search(r"\b(?:food|f[o0]od|fc[o0]d|beverage|bev|drink|age|misc(?:ellaneous)?)\b.*\btotal\b", line, re.I)
+        re.search(
+            r"\b(?:food|f[o0]od|fc[o0]d|beverage|bev|drink|age|misc(?:ellaneous)?)\b.*\btotal\b",
+            line,
+            re.I,
+        )
         or re.search(r"^\s*(?:food sales|beverage)\b", line, re.I)
     )
 
@@ -353,7 +379,9 @@ def money_matches_in_line(line: str) -> list[MoneyMatch]:
             amount = float(amount_text)
         except ValueError:
             continue
-        values.append(MoneyMatch(amount, match.group("cur"), match.start(), match.end(), match.group(0)))
+        values.append(
+            MoneyMatch(amount, match.group("cur"), match.start(), match.end(), match.group(0))
+        )
         occupied.append((match.start(), match.end()))
 
     for match in OCR_SPLIT_MONEY_RE.finditer(line):
@@ -364,7 +392,9 @@ def money_matches_in_line(line: str) -> list[MoneyMatch]:
             amount = float(amount_text)
         except ValueError:
             continue
-        values.append(MoneyMatch(amount, match.group("cur"), match.start(), match.end(), match.group(0)))
+        values.append(
+            MoneyMatch(amount, match.group("cur"), match.start(), match.end(), match.group(0))
+        )
         occupied.append((match.start(), match.end()))
 
     for match in MONEY_RE.finditer(line):
@@ -376,7 +406,11 @@ def money_matches_in_line(line: str) -> list[MoneyMatch]:
             continue
         raw_normalized = normalize_money_raw(line, raw, currency)
         try:
-            values.append(MoneyMatch(float(raw_normalized), currency, match.start(), match.end(), match.group(0)))
+            values.append(
+                MoneyMatch(
+                    float(raw_normalized), currency, match.start(), match.end(), match.group(0)
+                )
+            )
         except ValueError:
             continue
     return values
@@ -391,9 +425,7 @@ def is_valid_money_match(line: str, raw: str, currency: str | None, start: int, 
         return False
     before = line[max(0, start - 1) : start]
     after = line[end : min(len(line), end + 1)]
-    if before.isalpha() or after.isalpha():
-        return False
-    return True
+    return not (before.isalpha() or after.isalpha())
 
 
 def normalize_money_raw(line: str, raw: str, currency: str | None) -> str:
@@ -401,7 +433,12 @@ def normalize_money_raw(line: str, raw: str, currency: str | None) -> str:
         compact = raw.replace(",", ".")
     else:
         compact = raw.replace(",", "").replace(" ", "")
-    if currency and "." not in compact and re.fullmatch(r"0?\d{2}", compact) and ADDITIVE_CHARGE_RE.search(line):
+    if (
+        currency
+        and "." not in compact
+        and re.fullmatch(r"0?\d{2}", compact)
+        and ADDITIVE_CHARGE_RE.search(line)
+    ):
         return f"0.{compact[-2:]}"
     return compact
 
@@ -434,14 +471,23 @@ def infer_currency(text: str) -> str | None:
     for code in SUPPORTED_CURRENCIES:
         if code in upper:
             return code
-    if "AUSTRALIAN DOLLAR" in upper or "AUSTRALIA" in upper or "MELBOURNE" in upper or " VIC" in upper:
+    if (
+        "AUSTRALIAN DOLLAR" in upper
+        or "AUSTRALIA" in upper
+        or "MELBOURNE" in upper
+        or " VIC" in upper
+    ):
         return "AUD"
     if "$" in text:
         return "AUD"
     return None
 
 
-def find_line_items(lines: list[str], fallback_currency: str | None, total_amount: float | None, expense_type: str) -> list[LineItem]:
+def find_line_items(
+    lines: list[str],
+    total_amount: float | None,
+    expense_type: str,
+) -> list[LineItem]:
     if not is_meal_expense(expense_type):
         return []
     items: list[LineItem] = []
@@ -508,13 +554,15 @@ def looks_like_additive_charge(line: str) -> bool:
         return False
     if is_tax_total_summary_line(line):
         return False
-    if INCLUDED_TAX_RE.search(line) and not re.search(r"\b(?:surcharge|service|tip|gratuity)\b", line, re.I):
-        return False
-    return True
+    return not INCLUDED_TAX_RE.search(line) or bool(
+        re.search(r"\b(?:surcharge|service|tip|gratuity)\b", line, re.I)
+    )
 
 
 def looks_like_payable_extra_charge(line: str) -> bool:
-    return bool(re.search(r"\b(?:surcharge|service\s+(?:fee|charge)|gratuity|tip)\b", line, re.I)) and not is_tax_total_summary_line(line)
+    return bool(
+        re.search(r"\b(?:surcharge|service\s+(?:fee|charge)|gratuity|tip)\b", line, re.I)
+    ) and not is_tax_total_summary_line(line)
 
 
 def is_tax_total_summary_line(line: str) -> bool:
@@ -526,7 +574,9 @@ def is_tax_total_summary_line(line: str) -> bool:
     )
 
 
-def choose_line_item_money(line: str, matches: list[MoneyMatch], is_additive_charge: bool) -> MoneyMatch:
+def choose_line_item_money(
+    line: str, matches: list[MoneyMatch], is_additive_charge: bool
+) -> MoneyMatch:
     if is_additive_charge:
         return matches[-1]
     if len(matches) == 1:
@@ -565,13 +615,17 @@ def looks_like_line_item(line: str) -> bool:
     return bool(re.match(r"^\s*\d+\s*[x«]\s+\D+.*\d+[,.]\d{2}\s*$", line, re.I))
 
 
-def line_item_reconciliation_note(amount: float | None, line_items: list[LineItem], expense_type: str | None) -> str:
+def line_item_reconciliation_note(
+    amount: float | None, line_items: list[LineItem], expense_type: str | None
+) -> str:
     if any(item.description == "Unreconciled meal item - review" for item in line_items):
         return "Unreconciled meal item line added to balance receipt total; review description/alcohol manually."
     meaningful_items = [
         item
         for item in line_items
-        if item.amount is not None and not item.description.startswith("Receipt total") and item.description != "Alcohol adjustment - manual"
+        if item.amount is not None
+        and not item.description.startswith("Receipt total")
+        and item.description != "Alcohol adjustment - manual"
     ]
     if not is_meal_expense(expense_type):
         return ""
@@ -585,7 +639,9 @@ def line_item_reconciliation_note(amount: float | None, line_items: list[LineIte
     return ""
 
 
-def add_reconciliation_gap_line(line_items: list[LineItem], amount: float | None, expense_type: str | None) -> list[LineItem]:
+def add_reconciliation_gap_line(
+    line_items: list[LineItem], amount: float | None, expense_type: str | None
+) -> list[LineItem]:
     if amount is None or not is_meal_expense(expense_type):
         return line_items
     if any(item.description.startswith("Receipt total") for item in line_items):
@@ -610,7 +666,9 @@ def add_reconciliation_gap_line(line_items: list[LineItem], amount: float | None
     ]
 
 
-def ensure_minimum_line_items(line_items: list[LineItem], amount: float | None, expense_type: str | None) -> list[LineItem]:
+def ensure_minimum_line_items(
+    line_items: list[LineItem], amount: float | None, expense_type: str | None
+) -> list[LineItem]:
     if line_items:
         return line_items
     if amount is None:
@@ -625,8 +683,16 @@ def ensure_minimum_line_items(line_items: list[LineItem], amount: float | None, 
                 synthetic=True,
             )
         ]
-    description = "Receipt total - review meal line items" if is_meal_expense(expense_type) else "Receipt total"
-    note = "Manual review needed: meal line items were not reliably extracted." if is_meal_expense(expense_type) else ""
+    description = (
+        "Receipt total - review meal line items"
+        if is_meal_expense(expense_type)
+        else "Receipt total"
+    )
+    note = (
+        "Manual review needed: meal line items were not reliably extracted."
+        if is_meal_expense(expense_type)
+        else ""
+    )
     return [
         LineItem(
             description=description,
@@ -671,14 +737,31 @@ def corrected_amount(amount: float | None, line_items: list[LineItem]) -> float 
 
 def classify_expense(text: str, supplier: str, filename: str) -> str:
     blob = f"{text} {supplier} {filename}".lower()
-    if any(term in blob for term in ["airways", "airline", "flight", "e-ticket", "itinerary", "airport", "garuda", "thai airways"]):
+    if any(
+        term in blob
+        for term in [
+            "airways",
+            "airline",
+            "flight",
+            "e-ticket",
+            "itinerary",
+            "airport",
+            "garuda",
+            "thai airways",
+        ]
+    ):
         return "flight"
     if any(term in blob for term in ["hotel", "room", "arrival", "departure", "meridien"]):
         return "hotel"
     if "uber" in blob or "taxi" in blob or "ride" in blob:
         return "transport"
-    if any(term in blob for term in ["farmers", "nigel", "reine", "la rue", "gabriel", "intermission"]):
-        if any(term in blob for term in ["breakfast", "cappuccino", "benedict", "banana bread", "espresso"]):
+    if any(
+        term in blob for term in ["farmers", "nigel", "reine", "la rue", "gabriel", "intermission"]
+    ):
+        if any(
+            term in blob
+            for term in ["breakfast", "cappuccino", "benedict", "banana bread", "espresso"]
+        ):
             return "meal-breakfast"
         return "meal-dinner"
     if "breakfast" in blob:
@@ -687,12 +770,33 @@ def classify_expense(text: str, supplier: str, filename: str) -> str:
         return "meal-lunch"
     if "dinner" in blob or "restaurant" in blob:
         return "meal-dinner"
-    if any(term in blob for term in ["espresso", "cafe", "bbq", "bar", "kitchen", "burger", "beer", "restaurant", "hanks", "eat-in", "eatin", "dine in", "dining", "cappuccino", "benedict"]):
+    if any(
+        term in blob
+        for term in [
+            "espresso",
+            "cafe",
+            "bbq",
+            "bar",
+            "kitchen",
+            "burger",
+            "beer",
+            "restaurant",
+            "hanks",
+            "eat-in",
+            "eatin",
+            "dine in",
+            "dining",
+            "cappuccino",
+            "benedict",
+        ]
+    ):
         return "meal"
     return "other"
 
 
-def score_confidence(date: str | None, supplier: str | None, amount: float | None, raw_text: str) -> float:
+def score_confidence(
+    date: str | None, supplier: str | None, amount: float | None, raw_text: str
+) -> float:
     score = 0.15 if raw_text.strip() else 0.0
     if date:
         score += 0.25
@@ -720,7 +824,9 @@ def receipt_quality_score(expense: Expense) -> float:
     if expense.currency:
         score += 1.0
     if is_meal_expense(expense.expense_type):
-        reconciliation = line_item_reconciliation_note(expense.amount, expense.line_items, expense.expense_type)
+        reconciliation = line_item_reconciliation_note(
+            expense.amount, expense.line_items, expense.expense_type
+        )
         if not reconciliation:
             score += 2.0
         elif "No reliable" not in reconciliation and "Missing" not in reconciliation:
@@ -733,9 +839,14 @@ def needs_llm_text_fallback(expense: Expense) -> bool:
         return True
     if expense.date is None or expense.amount is None or not expense.supplier_name:
         return True
-    if is_meal_expense(expense.expense_type) and line_item_reconciliation_note(expense.amount, expense.line_items, expense.expense_type):
-        return True
-    return False
+    return bool(
+        is_meal_expense(expense.expense_type)
+        and line_item_reconciliation_note(
+            expense.amount,
+            expense.line_items,
+            expense.expense_type,
+        )
+    )
 
 
 def needs_llm_vision_fallback(expense: Expense, extraction_method: str) -> bool:
@@ -744,13 +855,17 @@ def needs_llm_vision_fallback(expense: Expense, extraction_method: str) -> bool:
     if expense.amount is None:
         return True
     if is_meal_expense(expense.expense_type):
-        note = line_item_reconciliation_note(expense.amount, expense.line_items, expense.expense_type)
+        note = line_item_reconciliation_note(
+            expense.amount, expense.line_items, expense.expense_type
+        )
         if note:
             return True
     return False
 
 
-def llm_parse_receipt(path: Path, raw_text: str, heuristic: Expense, model: str, include_images: bool = False) -> Expense | None:
+def llm_parse_receipt(
+    path: Path, raw_text: str, heuristic: Expense, model: str, include_images: bool = False
+) -> Expense | None:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return None
@@ -782,7 +897,15 @@ def llm_parse_receipt(path: Path, raw_text: str, heuristic: Expense, model: str,
             },
             "confidence": {"type": "number"},
         },
-        "required": ["date", "supplier_name", "expense_type", "amount", "currency", "line_items", "confidence"],
+        "required": [
+            "date",
+            "supplier_name",
+            "expense_type",
+            "amount",
+            "currency",
+            "line_items",
+            "confidence",
+        ],
     }
     try:
         client = OpenAI(api_key=api_key)
@@ -878,7 +1001,9 @@ def line_item_from_llm(item: dict, extraction_confidence: float, include_images:
     )
 
 
-def build_llm_content(path: Path, raw_text: str, heuristic: Expense, include_images: bool = False) -> list[dict]:
+def build_llm_content(
+    path: Path, raw_text: str, heuristic: Expense, include_images: bool = False
+) -> list[dict]:
     document_date, filename_date = receipt_date_candidates(path, raw_text)
     text = (
         f"Source filename: {path.name}\n"
@@ -954,7 +1079,9 @@ def merge_llm_receipt(path: Path, raw_text: str, llm: Expense, source: str) -> E
     llm.corrected_amount_in_currency = corrected
     llm.expense_id = ""
     note = f"Structured with {source}; review line items."
-    reconciliation_note = line_item_reconciliation_note(llm.amount, llm.line_items, llm.expense_type)
+    reconciliation_note = line_item_reconciliation_note(
+        llm.amount, llm.line_items, llm.expense_type
+    )
     if reconciliation_note:
         note = append_note(note, reconciliation_note)
     llm.review_note = note

@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install development dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+
+      - name: Check source and tests
+        run: make check
+
+      - name: Build distributions
+        if: matrix.python-version == '3.14'
+        run: make package-check
+
+      - name: Smoke-test wheel contents outside the checkout
+        if: matrix.python-version == '3.14'
+        run: |
+          python -m pip install --no-deps --target /tmp/nlp-expenses-wheel dist/*.whl
+          cd /tmp
+          PYTHONPATH=/tmp/nlp-expenses-wheel python -c \
+            'from importlib.resources import files; from nlp_expenses.trip_manifest import CONTRACT_SCHEMA; assert CONTRACT_SCHEMA.is_file(); assert files("nlp_expenses").joinpath("templates", "index.html").is_file(); assert files("nlp_expenses").joinpath("static", "standard-statement-template.csv").is_file()'

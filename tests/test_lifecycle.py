@@ -79,7 +79,9 @@ class LifecycleTests(unittest.TestCase):
                     if entry["kind"] == "receipt"
                 )
                 archived_receipt = archive.read(receipt_entry["path"])
-                self.assertEqual(hashlib.sha256(archived_receipt).hexdigest(), receipt_entry["sha256"])
+                self.assertEqual(
+                    hashlib.sha256(archived_receipt).hexdigest(), receipt_entry["sha256"]
+                )
                 self.assertEqual(
                     hashlib.sha256(archive.read(manifest["workbook"]["path"])).hexdigest(),
                     manifest["workbook"]["sha256"],

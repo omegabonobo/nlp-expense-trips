@@ -3,19 +3,17 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
-import os
 import re
-import uuid
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable
 
 from openpyxl import load_workbook
 
 from nlp_expenses.fx_rates import FxRateUnavailable, WeeklyCadFxResolver
 from nlp_expenses.models import NormalizationResult, NormalizedTransaction, StatementFileReport
-
+from nlp_expenses.storage import write_json_atomic
 
 SUPPORTED_STATEMENT_EXTENSIONS = {".csv", ".xls", ".xlsx"}
 STATEMENT_SETTINGS_FILE = ".nlp-expenses-statement-settings.json"
@@ -47,7 +45,9 @@ class StatementNormalizationError(ValueError):
 def list_statement_files(statement_dir: Path) -> list[Path]:
     if not statement_dir.exists():
         return []
-    return sorted(path for path in statement_dir.iterdir() if path.is_file() and not path.name.startswith("."))
+    return sorted(
+        path for path in statement_dir.iterdir() if path.is_file() and not path.name.startswith(".")
+    )
 
 
 def preflight_statement_files(paths: list[Path]) -> list[StatementFileReport]:
@@ -85,13 +85,17 @@ def preflight_statement_files(paths: list[Path]) -> list[StatementFileReport]:
                     f"{path.name}: recognized as {provider}, but no valid transactions could be normalized."
                 )
             report.warnings.extend(mark_transaction_issues(transactions))
-            if transactions and not any(transaction_is_usable(transaction) for transaction in transactions):
+            if transactions and not any(
+                transaction_is_usable(transaction) for transaction in transactions
+            ):
                 raise StatementNormalizationError(
                     f"{path.name}: transactions are missing required dates, descriptions, amounts, or currencies."
                 )
         except Exception as exc:
             message = str(exc)
-            report.errors.append(message if message.startswith(f"{path.name}:") else f"{path.name}: {message}")
+            report.errors.append(
+                message if message.startswith(f"{path.name}:") else f"{path.name}: {message}"
+            )
         reports.append(report)
     return reports
 
@@ -128,12 +132,16 @@ def normalize_statement_files(
                     f"recognized as {provider}, but no valid transactions could be normalized."
                 )
             report.warnings.extend(mark_transaction_issues(transactions))
-            if transactions and not any(transaction_is_usable(transaction) for transaction in transactions):
+            if transactions and not any(
+                transaction_is_usable(transaction) for transaction in transactions
+            ):
                 raise StatementNormalizationError(
                     "transactions are missing required dates, descriptions, amounts, or currencies."
                 )
             if report.warnings:
-                result.warnings.append(f"{path.name}: {len(report.warnings)} normalized rows require review.")
+                result.warnings.append(
+                    f"{path.name}: {len(report.warnings)} normalized rows require review."
+                )
             result.transactions.extend(transactions)
         except Exception as exc:
             message = f"{path.name}: {exc}"
@@ -165,10 +173,7 @@ def read_tabular_rows(path: Path) -> list[list[object]]:
     if suffix == ".csv":
         text = path.read_text(encoding="utf-8-sig", errors="replace")
         delimiter = detect_delimiter(text)
-        lines = [
-            unwrap_quoted_delimited_line(line, delimiter)
-            for line in text.splitlines()
-        ]
+        lines = [unwrap_quoted_delimited_line(line, delimiter) for line in text.splitlines()]
         return [list(row) for row in csv.reader(lines, delimiter=delimiter)]
     if suffix == ".xlsx":
         workbook = load_workbook(path, data_only=True, read_only=True)
@@ -180,8 +185,12 @@ def read_tabular_rows(path: Path) -> list[list[object]]:
             raise StatementNormalizationError("XLS support requires xlrd.") from exc
         workbook = xlrd.open_workbook(str(path))
         sheet = workbook.sheet_by_index(0)
-        return [[sheet.cell_value(row, col) for col in range(sheet.ncols)] for row in range(sheet.nrows)]
-    raise StatementNormalizationError(f"Unsupported statement format: {suffix or '(none)'}. Use CSV, XLS, or XLSX.")
+        return [
+            [sheet.cell_value(row, col) for col in range(sheet.ncols)] for row in range(sheet.nrows)
+        ]
+    raise StatementNormalizationError(
+        f"Unsupported statement format: {suffix or '(none)'}. Use CSV, XLS, or XLSX."
+    )
 
 
 def detect_delimiter(text: str) -> str:
@@ -218,11 +227,16 @@ def detect_provider(rows: list[list[object]]) -> tuple[str, int]:
             return "standard", index
         if {"date", "date_processed", "description", "card_member", "account", "amount"} <= headers:
             return "amex", index
-        if {"first_bank_card", "transaction_type", "date_posted", "transaction_amount", "description"} <= headers:
+        if {
+            "first_bank_card",
+            "transaction_type",
+            "date_posted",
+            "transaction_amount",
+            "description",
+        } <= headers:
             return "bmo", index
-        if (
-            {"date", "description", "category", "debit", "credit"} <= headers
-            and bool(headers & {"card_number", "balance"})
+        if {"date", "description", "category", "debit", "credit"} <= headers and bool(
+            headers & {"card_number", "balance"}
         ):
             return "bnc", index
         if {
@@ -238,19 +252,26 @@ def detect_provider(rows: list[list[object]]) -> tuple[str, int]:
             return "wise", index
         if has_generic_signature(headers):
             return "generic", index
-    raise StatementNormalizationError("Statement columns are not recognized; a provider adapter is required.")
+    raise StatementNormalizationError(
+        "Statement columns are not recognized; a provider adapter is required."
+    )
 
 
 def has_generic_signature(headers: set[str]) -> bool:
-    has_date = bool(headers & {"date", "transaction_date", "posted_date", "date_posted", "date_processed"})
+    has_date = bool(
+        headers & {"date", "transaction_date", "posted_date", "date_posted", "date_processed"}
+    )
     has_description = bool(headers & {"description", "merchant", "details", "transaction", "name"})
     has_amount = bool(
-        headers & {"amount", "cad_amount", "debit", "credit", "charge", "withdrawal", "charges_adjustments"}
+        headers
+        & {"amount", "cad_amount", "debit", "credit", "charge", "withdrawal", "charges_adjustments"}
     )
     return has_date and has_description and has_amount
 
 
-def rows_as_dicts(rows: list[list[object]], header_index: int) -> list[tuple[int, dict[str, object]]]:
+def rows_as_dicts(
+    rows: list[list[object]], header_index: int
+) -> list[tuple[int, dict[str, object]]]:
     headers = [normalize_key(value) for value in rows[header_index]]
     result: list[tuple[int, dict[str, object]]] = []
     for zero_index, row in enumerate(rows[header_index + 1 :], start=header_index + 1):
@@ -259,7 +280,11 @@ def rows_as_dicts(rows: list[list[object]], header_index: int) -> list[tuple[int
         result.append(
             (
                 zero_index + 1,
-                {headers[index]: row[index] if index < len(row) else None for index in range(len(headers)) if headers[index]},
+                {
+                    headers[index]: row[index] if index < len(row) else None
+                    for index in range(len(headers))
+                    if headers[index]
+                },
             )
         )
     return result
@@ -299,7 +324,14 @@ def statement_date_values(rows: list[list[object]], header_index: int) -> list[o
     for _source_row, row in rows_as_dicts(rows, header_index):
         value = first_value(
             row,
-            ["date", "transaction_date", "posted_date", "date_posted", "date_processed", "created_on"],
+            [
+                "date",
+                "transaction_date",
+                "posted_date",
+                "date_posted",
+                "date_processed",
+                "created_on",
+            ],
         )
         if value not in (None, ""):
             values.append(value)
@@ -376,7 +408,9 @@ def set_statement_date_convention(
     rows = read_tabular_rows(path)
     provider, _header_index = detect_provider(rows)
     if provider != "generic":
-        raise ValueError("This provider has a fixed date convention and does not need a manual choice.")
+        raise ValueError(
+            "This provider has a fixed date convention and does not need a manual choice."
+        )
     settings = load_statement_settings(trip_dir)
     choices = settings.setdefault("date_conventions", {})
     choices[statement_file_fingerprint(path)] = {
@@ -412,12 +446,7 @@ def load_statement_settings(trip_dir: Path) -> dict:
 
 def save_statement_settings(trip_dir: Path, settings: dict) -> None:
     path = trip_dir / STATEMENT_SETTINGS_FILE
-    temporary = trip_dir / f".{STATEMENT_SETTINGS_FILE}.{uuid.uuid4().hex}.tmp"
-    try:
-        temporary.write_text(json.dumps(settings, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    write_json_atomic(path, settings)
 
 
 def normalize_amex(
@@ -439,7 +468,9 @@ def normalize_amex(
             first_value(row, ["foreign_spend_amount", "foreign_amount", "original_amount"])
         )
         if foreign_amount is not None:
-            foreign_amount = abs(foreign_amount) if transaction_type == "purchase" else -abs(foreign_amount)
+            foreign_amount = (
+                abs(foreign_amount) if transaction_type == "purchase" else -abs(foreign_amount)
+            )
         date = parse_date(row.get("date"), date_convention)
         posted = parse_date(row.get("date_processed"), date_convention)
         account = mask_account(row.get("account"))
@@ -460,7 +491,9 @@ def normalize_amex(
                 status="completed",
                 direction="out" if signed_amount >= 0 else "in",
                 match_eligible=match_eligible,
-                purchase_amount=(foreign_amount if foreign_amount is not None else signed_amount) if match_eligible else None,
+                purchase_amount=(foreign_amount if foreign_amount is not None else signed_amount)
+                if match_eligible
+                else None,
                 purchase_currency=(foreign_currency or "CAD") if match_eligible else None,
                 settlement_amount=signed_amount,
                 settlement_currency="CAD",
@@ -497,7 +530,9 @@ def normalize_bmo(
             first_value(row, ["foreign_spend_amount", "foreign_amount", "original_amount"])
         )
         if foreign_amount is not None:
-            foreign_amount = abs(foreign_amount) if transaction_type == "purchase" else -abs(foreign_amount)
+            foreign_amount = (
+                abs(foreign_amount) if transaction_type == "purchase" else -abs(foreign_amount)
+            )
         account = mask_account(row.get("first_bank_card"))
         group_id = source_group_id("bmo", path, source_row)
         transactions.append(
@@ -515,7 +550,9 @@ def normalize_bmo(
                 status="completed",
                 direction="out" if signed_amount >= 0 else "in",
                 match_eligible=match_eligible,
-                purchase_amount=(foreign_amount if foreign_amount is not None else signed_amount) if match_eligible else None,
+                purchase_amount=(foreign_amount if foreign_amount is not None else signed_amount)
+                if match_eligible
+                else None,
                 purchase_currency=(foreign_currency or "CAD") if match_eligible else None,
                 settlement_amount=signed_amount,
                 settlement_currency="CAD",
@@ -555,7 +592,9 @@ def normalize_bnc(
             first_value(row, ["foreign_spend_amount", "foreign_amount", "original_amount"])
         )
         if foreign_amount is not None:
-            foreign_amount = abs(foreign_amount) if transaction_type == "purchase" else -abs(foreign_amount)
+            foreign_amount = (
+                abs(foreign_amount) if transaction_type == "purchase" else -abs(foreign_amount)
+            )
         group_id = source_group_id("bnc", path, source_row)
         transactions.append(
             NormalizedTransaction(
@@ -576,7 +615,9 @@ def normalize_bnc(
                 status="completed",
                 direction="out" if signed_amount >= 0 else "in",
                 match_eligible=match_eligible,
-                purchase_amount=(foreign_amount if foreign_amount is not None else signed_amount) if match_eligible else None,
+                purchase_amount=(foreign_amount if foreign_amount is not None else signed_amount)
+                if match_eligible
+                else None,
                 purchase_currency=(foreign_currency or "CAD") if match_eligible else None,
                 settlement_amount=signed_amount,
                 settlement_currency="CAD",
@@ -618,11 +659,12 @@ def normalize_wise(
             transaction_type = "purchase"
         source_currency = currency_code(row.get("source_currency"))
         target_currency = currency_code(row.get("target_currency"))
-        settlement_amount = sign * ((source_amount or 0.0) + source_fee) if source_amount is not None else None
+        settlement_amount = (
+            sign * ((source_amount or 0.0) + source_fee) if source_amount is not None else None
+        )
         purchase_amount = sign * target_amount if target_amount is not None else None
         has_transaction_amount = any(
-            amount not in (None, 0, -0.0)
-            for amount in (purchase_amount, settlement_amount)
+            amount not in (None, 0, -0.0) for amount in (purchase_amount, settlement_amount)
         )
         match_eligible = (
             status != "cancelled"
@@ -677,7 +719,9 @@ def normalize_wise(
                 cad_amount=cad_amount,
                 cad_completeness="incomplete" if match_eligible else "not_applicable",
                 match_status="unmatched" if match_eligible else "ignored",
-                normalization_status="review" if status not in {"completed", "refunded", "cancelled"} else "ok",
+                normalization_status="review"
+                if status not in {"completed", "refunded", "cancelled"}
+                else "ok",
                 review_note=review_note,
             )
         )
@@ -692,7 +736,9 @@ def normalize_generic(
 ) -> list[NormalizedTransaction]:
     transactions: list[NormalizedTransaction] = []
     for source_row, row in rows_as_dicts(rows, header_index):
-        description = clean_text(first_value(row, ["description", "merchant", "details", "transaction", "name"]))
+        description = clean_text(
+            first_value(row, ["description", "merchant", "details", "transaction", "name"])
+        )
         debit = parse_number(first_value(row, ["debit", "charge", "withdrawal"]))
         credit = parse_number(first_value(row, ["credit"]))
         amount = parse_number(first_value(row, ["amount", "cad_amount", "charges_adjustments"]))
@@ -717,7 +763,9 @@ def normalize_generic(
         else:
             continue
         date = parse_date(
-            first_value(row, ["date", "transaction_date", "posted_date", "date_posted", "date_processed"]),
+            first_value(
+                row, ["date", "transaction_date", "posted_date", "date_posted", "date_processed"]
+            ),
             date_convention,
         )
         currency = currency_code(first_value(row, ["currency", "settlement_currency"])) or "CAD"
@@ -726,7 +774,9 @@ def normalize_generic(
         )
         match_eligible = transaction_type in {"purchase", "refund"}
         if foreign_amount is not None:
-            foreign_amount = abs(foreign_amount) if transaction_type == "purchase" else -abs(foreign_amount)
+            foreign_amount = (
+                abs(foreign_amount) if transaction_type == "purchase" else -abs(foreign_amount)
+            )
         group_id = source_group_id("generic", path, source_row)
         transactions.append(
             NormalizedTransaction(
@@ -741,19 +791,25 @@ def normalize_generic(
                     date_convention,
                 )
                 or date,
-                account_label=mask_account(first_value(row, ["account", "account_number", "card_number"])),
+                account_label=mask_account(
+                    first_value(row, ["account", "account_number", "card_number"])
+                ),
                 cardholder=clean_text(first_value(row, ["cardholder", "card_member"])),
                 description=description,
                 transaction_type=transaction_type,
                 status="completed",
                 direction="out" if signed_amount >= 0 else "in",
                 match_eligible=match_eligible,
-                purchase_amount=(foreign_amount if foreign_amount is not None else signed_amount) if match_eligible else None,
+                purchase_amount=(foreign_amount if foreign_amount is not None else signed_amount)
+                if match_eligible
+                else None,
                 purchase_currency=(foreign_currency or currency) if match_eligible else None,
                 settlement_amount=signed_amount,
                 settlement_currency=currency,
                 cad_amount=signed_amount if currency == "CAD" else None,
-                cad_completeness="complete" if match_eligible and currency == "CAD" else ("incomplete" if match_eligible else "not_applicable"),
+                cad_completeness="complete"
+                if match_eligible and currency == "CAD"
+                else ("incomplete" if match_eligible else "not_applicable"),
                 match_status="unmatched" if match_eligible else "ignored",
             )
         )
@@ -772,9 +828,7 @@ def normalize_standard(
     for source_row, row in rows_as_dicts(rows, header_index):
         raw_amount = parse_number(row.get("purchase_amount"))
         raw_cad_amount = parse_number(row.get("cad_amount"))
-        if raw_amount is None or (
-            raw_amount == 0 and raw_cad_amount in (None, 0)
-        ):
+        if raw_amount is None or (raw_amount == 0 and raw_cad_amount in (None, 0)):
             continue
         raw_type = normalize_key(row.get("transaction_type"))
         invalid_type = bool(raw_type and raw_type not in STANDARD_TRANSACTION_TYPES)
@@ -834,15 +888,9 @@ def normalize_standard(
                 purchase_amount=signed_amount if match_eligible else None,
                 purchase_currency=purchase_currency if match_eligible else None,
                 settlement_amount=(
-                    signed_cad_amount
-                    if signed_cad_amount is not None
-                    else signed_amount
+                    signed_cad_amount if signed_cad_amount is not None else signed_amount
                 ),
-                settlement_currency=(
-                    "CAD"
-                    if signed_cad_amount is not None
-                    else purchase_currency
-                ),
+                settlement_currency=("CAD" if signed_cad_amount is not None else purchase_currency),
                 cad_amount=signed_cad_amount,
                 cad_completeness=(
                     "complete"
@@ -894,7 +942,10 @@ def deduplicate_transactions(
                 result.warnings.append(
                     f"Removed duplicate statement leg {transaction.funding_leg_id} from {transaction.source_file.name}."
                 )
-                report = next((item for item in result.files if item.source_file == transaction.source_file), None)
+                report = next(
+                    (item for item in result.files if item.source_file == transaction.source_file),
+                    None,
+                )
                 if report:
                     report.rows_skipped += 1
                     report.rows_normalized = max(report.rows_normalized - 1, 0)
@@ -927,7 +978,9 @@ def deduplicate_transactions(
                 transaction.review_note,
                 "Possible duplicate: same provider, account, date, description, amount, and currency.",
             )
-            report = next((item for item in result.files if item.source_file == transaction.source_file), None)
+            report = next(
+                (item for item in result.files if item.source_file == transaction.source_file), None
+            )
             if report and warning not in report.warnings:
                 report.warnings.append(warning)
     return deduplicated
@@ -1020,9 +1073,7 @@ def apply_weekly_cad_rates(
             transaction.review_note = append_note(transaction.review_note, note)
             if key not in warned:
                 warned.add(key)
-                warning = (
-                    f"{transaction.source_file.name} row {transaction.source_row}: {note}"
-                )
+                warning = f"{transaction.source_file.name} row {transaction.source_row}: {note}"
                 result.warnings.append(warning)
                 report = reports_by_path.get(transaction.source_file)
                 if report:
@@ -1172,10 +1223,7 @@ def transaction_is_usable(transaction: NormalizedTransaction) -> bool:
         and transaction.settlement_currency
         and (
             not transaction.match_eligible
-            or (
-                transaction.purchase_amount is not None
-                and transaction.purchase_currency
-            )
+            or (transaction.purchase_amount is not None and transaction.purchase_currency)
         )
     )
 

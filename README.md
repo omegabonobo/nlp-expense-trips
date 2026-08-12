@@ -4,6 +4,11 @@ Local-first Mac app and compatible CLI for reviewing trip receipts, reconciling
 card statements, finalizing claims, and exporting a synchronized reimbursement
 package.
 
+For a new contributor, start with the
+[development and packaging guide](docs/DEVELOPMENT.md). It covers the supported
+Python versions, quality checks, distribution build, private-data boundaries,
+and the wheel smoke test.
+
 The app separates two decisions that must not be conflated:
 
 - **Claim program:** `arvine_only` or `ivado_sponsored`.
@@ -184,6 +189,17 @@ You can also launch it from Terminal:
 ./scripts/setup_local_env.sh
 .venv/bin/nlp-expenses ui
 ```
+
+When the application is installed outside this checkout, run it from the data
+directory that should contain `trips/` and `.env`, or select that directory
+explicitly:
+
+```bash
+nlp-expenses --root ~/Documents/ivado-expenses ui
+```
+
+`NLP_EXPENSES_ROOT` provides the same default for scripts. CLI flags such as
+`--root` and `--version` come before the subcommand.
 
 ## Folder layout
 

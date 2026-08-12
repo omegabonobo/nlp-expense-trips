@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import threading
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Iterator
 
 from nlp_expenses.generator import generate_review
 from nlp_expenses.line_items import sync_line_item_review
@@ -14,7 +14,6 @@ from nlp_expenses.models import GenerationProgress
 from nlp_expenses.reconciliation import sync_reconciliation
 from nlp_expenses.trips import trip_mode, trip_statements_dir
 from nlp_expenses.ui_services import list_source_files, resolve_trip, versioned_output_path
-
 
 ACTIVE_STATUSES = {"queued", "running"}
 
@@ -60,13 +59,19 @@ class JobManager:
         trip = resolve_trip(self.root, trip_name)
         with self._lock:
             if trip_name in self._mutating_trips:
-                raise JobConflictError("Source files are being updated for this trip. Try generation again shortly.")
+                raise JobConflictError(
+                    "Source files are being updated for this trip. Try generation again shortly."
+                )
             existing = self._active_job(trip_name)
             if existing and existing.status in ACTIVE_STATUSES:
-                raise JobConflictError("Another sync or workbook job is already running for this trip.")
+                raise JobConflictError(
+                    "Another sync or workbook job is already running for this trip."
+                )
             job = GenerationJob(id=uuid.uuid4().hex, trip_name=trip_name, quality=quality)
             if trip_mode(trip) == "arvine" and not list_source_files(trip_statements_dir(trip)):
-                job.warnings.append("No statement files were included; statement matching will be empty.")
+                job.warnings.append(
+                    "No statement files were included; statement matching will be empty."
+                )
             self._jobs[job.id] = job
             self._latest_by_trip[trip_name] = job.id
 
@@ -85,10 +90,14 @@ class JobManager:
         trip = resolve_trip(self.root, trip_name)
         with self._lock:
             if trip_name in self._mutating_trips:
-                raise JobConflictError("Source files are being updated for this trip. Try sync again shortly.")
+                raise JobConflictError(
+                    "Source files are being updated for this trip. Try sync again shortly."
+                )
             existing = self._active_job(trip_name)
             if existing and existing.status in ACTIVE_STATUSES:
-                raise JobConflictError("Another sync or workbook job is already running for this trip.")
+                raise JobConflictError(
+                    "Another sync or workbook job is already running for this trip."
+                )
             job = GenerationJob(
                 id=uuid.uuid4().hex,
                 trip_name=trip_name,
@@ -114,10 +123,14 @@ class JobManager:
         trip = resolve_trip(self.root, trip_name)
         with self._lock:
             if trip_name in self._mutating_trips:
-                raise JobConflictError("Source files are being updated for this trip. Try scanning again shortly.")
+                raise JobConflictError(
+                    "Source files are being updated for this trip. Try scanning again shortly."
+                )
             existing = self._active_job(trip_name)
             if existing and existing.status in ACTIVE_STATUSES:
-                raise JobConflictError("Another sync or workbook job is already running for this trip.")
+                raise JobConflictError(
+                    "Another sync or workbook job is already running for this trip."
+                )
             job = GenerationJob(
                 id=uuid.uuid4().hex,
                 trip_name=trip_name,
@@ -194,7 +207,9 @@ class JobManager:
                     "This trip is being processed. Wait for the current sync or workbook job to finish."
                 )
             if trip_name in self._mutating_trips:
-                raise JobConflictError("Another source-file update is already running for this trip.")
+                raise JobConflictError(
+                    "Another source-file update is already running for this trip."
+                )
             self._mutating_trips.add(trip_name)
         try:
             yield
@@ -275,7 +290,9 @@ class JobManager:
                 stage="complete",
                 current=1,
                 total=1,
-                message="Reconciliation ready with warnings" if warnings else "Reconciliation ready",
+                message="Reconciliation ready with warnings"
+                if warnings
+                else "Reconciliation ready",
                 finished_at=datetime.now().isoformat(timespec="seconds"),
             )
         except Exception as exc:
@@ -312,7 +329,9 @@ class JobManager:
                 stage="complete",
                 current=1,
                 total=1,
-                message="Line items ready with warnings" if warnings else "Line items ready for review",
+                message="Line items ready with warnings"
+                if warnings
+                else "Line items ready for review",
                 finished_at=datetime.now().isoformat(timespec="seconds"),
             )
         except Exception as exc:

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
-import uuid
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -11,9 +9,9 @@ from nlp_expenses.accounting import trip_accounting_profile
 from nlp_expenses.lifecycle import review_input_snapshot
 from nlp_expenses.line_items import line_item_review_view
 from nlp_expenses.reconciliation import accounting_basis, reconciliation_view
+from nlp_expenses.storage import write_json_atomic
 from nlp_expenses.trip_metadata import required_metadata_gaps, trip_metadata
 from nlp_expenses.trips import trip_mode, trip_statements_dir
-
 
 FINALIZATION_FILE = ".nlp-expenses-finalization.json"
 FINALIZATION_VERSION = 1
@@ -36,9 +34,21 @@ def consolidation_view(root: Path, trip_dir: Path) -> dict:
     issues: list[dict] = []
 
     if not review["available"]:
-        add_issue(issues, "receipt_scan", "blocking", "Scan the receipts before reviewing results.", "receipt-review")
+        add_issue(
+            issues,
+            "receipt_scan",
+            "blocking",
+            "Scan the receipts before reviewing results.",
+            "receipt-review",
+        )
     elif review["stale"]:
-        add_issue(issues, "receipt_scan", "blocking", "Receipt files changed; rescan them.", "receipt-review")
+        add_issue(
+            issues,
+            "receipt_scan",
+            "blocking",
+            "Receipt files changed; rescan them.",
+            "receipt-review",
+        )
     else:
         if review["summary"]["blocking_count"]:
             add_issue(
@@ -161,8 +171,7 @@ def consolidation_view(root: Path, trip_dir: Path) -> dict:
         for item in receipt.get("line_items", []):
             if (
                 claim_program == "ivado_sponsored"
-                and
-                item.get("included_in_arvine", True)
+                and item.get("included_in_arvine", True)
                 and not item.get("included_in_ivado", True)
                 and not item.get("ivado_exclusion_reason")
             ):
@@ -196,9 +205,21 @@ def consolidation_view(root: Path, trip_dir: Path) -> dict:
     )
     accounting_control = round(accounting["journal_total"] - employee_reimbursement, 2)
     for control_id, difference, label in (
-        ("payer_control", payer_control, "Reviewed total does not equal employee plus corporate-paid amounts"),
-        ("ivado_control", ivado_control, "IVADO claim plus exclusions does not equal the reviewed total"),
-        ("accounting_control", accounting_control, "Accounting components do not equal employee reimbursement"),
+        (
+            "payer_control",
+            payer_control,
+            "Reviewed total does not equal employee plus corporate-paid amounts",
+        ),
+        (
+            "ivado_control",
+            ivado_control,
+            "IVADO claim plus exclusions does not equal the reviewed total",
+        ),
+        (
+            "accounting_control",
+            accounting_control,
+            "Accounting components do not equal employee reimbursement",
+        ),
     ):
         if abs(difference) > 0.02:
             add_issue(
@@ -228,15 +249,18 @@ def consolidation_view(root: Path, trip_dir: Path) -> dict:
             "accounting_difference_cad": accounting_control,
             "tolerance_cad": 0.02,
             "valid": all(
-                abs(value) <= 0.02
-                for value in (payer_control, ivado_control, accounting_control)
+                abs(value) <= 0.02 for value in (payer_control, ivado_control, accounting_control)
             ),
         },
         "summary": {
             "expense_count": len(expenses),
             "included_expense_count": sum(item["included"] for item in expenses),
             "excluded_expense_count": sum(not item["included"] for item in expenses),
-            "matched_expense_count": sum(item["cad_source"] in {"statement", "statement_aggregated", "allocation", "allocation_aggregated"} for item in expenses),
+            "matched_expense_count": sum(
+                item["cad_source"]
+                in {"statement", "statement_aggregated", "allocation", "allocation_aggregated"}
+                for item in expenses
+            ),
             "claimable_cad": employee_reimbursement,
             "reviewed_total_cad": reviewed_total,
             "employee_reimbursement_total_cad": employee_reimbursement,
@@ -259,12 +283,10 @@ def calculate_expense_result(
     claim_program: str | None = None,
 ) -> dict:
     reconciled = reconciled or {}
-    included_in_arvine = bool(
-        receipt.get("included_in_arvine", receipt.get("included", True))
+    included_in_arvine = bool(receipt.get("included_in_arvine", receipt.get("included", True)))
+    included_in_ivado = (
+        bool(receipt.get("included_in_ivado", receipt.get("included", True))) and included_in_arvine
     )
-    included_in_ivado = bool(
-        receipt.get("included_in_ivado", receipt.get("included", True))
-    ) and included_in_arvine
     paid_by = str(receipt.get("paid_by") or "employee_personal")
     people = max(1, int(receipt.get("number_of_people") or 1))
     amount = numeric(receipt.get("amount"))
@@ -306,7 +328,9 @@ def calculate_expense_result(
     ivado_claim_ratio = ivado_line_ratio / people if included_in_ivado else 0.0
 
     manual_cad = numeric(receipt.get("manual_cad_override"))
-    cad_amount = manual_cad if manual_cad is not None else numeric(reconciled.get("cad_amount_used"))
+    cad_amount = (
+        manual_cad if manual_cad is not None else numeric(reconciled.get("cad_amount_used"))
+    )
     cad_source = "manual" if manual_cad is not None else str(reconciled.get("cad_source") or "")
     if cad_amount is None and str(receipt.get("currency") or "").upper() == "CAD":
         cad_amount = amount
@@ -315,7 +339,6 @@ def calculate_expense_result(
         cad_source = "unavailable"
     statement_purchase_amount = numeric(reconciled.get("statement_purchase_amount_used"))
     statement_purchase_currency = str(reconciled.get("statement_purchase_currency") or "").upper()
-    expense_currency = str(receipt.get("currency") or "").upper()
     basis_expense = dict(receipt)
     basis_expense["amount"] = amount
     reconciled_basis = numeric(reconciled.get("fx_basis_amount_used"))
@@ -352,9 +375,7 @@ def calculate_expense_result(
     arvine_claimable_original = (
         round(arvine_original_basis / people, 2) if included_in_arvine else 0.0
     )
-    ivado_claimable_original = (
-        round(ivado_original_basis / people, 2) if included_in_ivado else 0.0
-    )
+    ivado_claimable_original = round(ivado_original_basis / people, 2) if included_in_ivado else 0.0
     direct_statement_statuses = {
         "statement_receipt_total",
         "statement_person_share",
@@ -391,17 +412,9 @@ def calculate_expense_result(
             ivado_claimable_cad or 0.0,
         )
         ivado_excluded_cad = round((arvine_total_cad or 0.0) - ivado_claimable_cad, 2)
-    arvine_reimbursable_cad = (
-        arvine_total_cad if paid_by == "employee_personal" else 0.0
-    )
-    corporate_paid_cad = (
-        arvine_total_cad if paid_by == "arvine_corporate_bmo" else 0.0
-    )
-    claimable_cad = (
-        ivado_claimable_cad
-        if claim_program == "ivado_sponsored"
-        else arvine_total_cad
-    )
+    arvine_reimbursable_cad = arvine_total_cad if paid_by == "employee_personal" else 0.0
+    corporate_paid_cad = arvine_total_cad if paid_by == "arvine_corporate_bmo" else 0.0
+    claimable_cad = ivado_claimable_cad if claim_program == "ivado_sponsored" else arvine_total_cad
     return {
         "receipt_id": receipt.get("receipt_id"),
         "source_file": receipt["source_file"],
@@ -454,7 +467,9 @@ def calculate_expense_result(
         "qst_number": receipt.get("qst_number"),
         "business_purpose": receipt.get("business_purpose"),
         "attendees_client": receipt.get("attendees_client"),
-        "line_items": [dict(item) for item in receipt.get("line_items", []) if isinstance(item, dict)],
+        "line_items": [
+            dict(item) for item in receipt.get("line_items", []) if isinstance(item, dict)
+        ],
         "status": (
             "excluded"
             if not included_in_arvine
@@ -580,7 +595,9 @@ def finalization_view(root: Path, trip_dir: Path) -> dict:
 def ensure_consolidation_finalized(root: Path, trip_dir: Path) -> None:
     state = finalization_view(root, trip_dir)
     if not state["current"]:
-        raise ValueError("Review the calculated results and finalize the current trip before exporting Excel.")
+        raise ValueError(
+            "Review the calculated results and finalize the current trip before exporting Excel."
+        )
 
 
 def load_finalization_state(trip_dir: Path) -> dict | None:
@@ -597,15 +614,7 @@ def load_finalization_state(trip_dir: Path) -> dict | None:
 
 
 def write_state_atomic(path: Path, state: dict) -> None:
-    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
-    try:
-        temporary.write_text(
-            json.dumps(state, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    write_json_atomic(path, state)
 
 
 def add_issue(

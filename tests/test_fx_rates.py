@@ -276,8 +276,7 @@ class WeeklyCadFxTests(unittest.TestCase):
                 fx_resolver=WeeklyCadFxResolver(trip, fetch_json=fetch),
             )
             transactions = {
-                transaction.transaction_group_id: transaction
-                for transaction in result.transactions
+                transaction.transaction_group_id: transaction for transaction in result.transactions
             }
             purchase = transactions["CARD_TRANSACTION-1"]
             refund = transactions["CARD_TRANSACTION-2"]

@@ -63,7 +63,11 @@ class TripMetadataTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "before"):
                 save_trip_metadata(
                     trip,
-                    {**self.complete_metadata(), "start_date": "2026-07-04", "end_date": "2026-07-03"},
+                    {
+                        **self.complete_metadata(),
+                        "start_date": "2026-07-04",
+                        "end_date": "2026-07-03",
+                    },
                 )
 
     def test_trip_purpose_inherits_to_invoice_and_workbook_metadata(self):
@@ -140,10 +144,14 @@ class TripMetadataTests(unittest.TestCase):
             warnings = trip_policy_warnings(trip, expenses, [])
             self.assertEqual(len(warnings), 2)
             self.assertFalse(any(warning["resolved"] for warning in warnings))
-            meal_warning = next(warning for warning in warnings if warning["id"].startswith("meal_limit:"))
+            meal_warning = next(
+                warning for warning in warnings if warning["id"].startswith("meal_limit:")
+            )
             save_policy_exception(trip, meal_warning["id"], "Client dinner approved by manager.")
             refreshed = trip_policy_warnings(trip, expenses, [])
-            self.assertTrue(next(item for item in refreshed if item["id"] == meal_warning["id"])["resolved"])
+            self.assertTrue(
+                next(item for item in refreshed if item["id"] == meal_warning["id"])["resolved"]
+            )
             self.assertEqual(
                 trip_metadata(trip)["policy_exceptions"][meal_warning["id"]],
                 "Client dinner approved by manager.",

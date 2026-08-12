@@ -20,13 +20,13 @@ from nlp_expenses.generator import SUPPORTED_RECEIPTS
 from nlp_expenses.lifecycle import list_packages, trip_lifecycle
 from nlp_expenses.line_items import line_item_review_view, persist_review_after_receipt_removal
 from nlp_expenses.statement_normalizer import preflight_statement_files
+from nlp_expenses.trip_manifest import CONTRACT_FILENAME
 from nlp_expenses.trip_metadata import (
     CLAIM_PROGRAMS,
     required_metadata_gaps,
     save_trip_metadata,
     trip_metadata,
 )
-from nlp_expenses.trip_manifest import CONTRACT_FILENAME
 from nlp_expenses.trips import (
     TRIP_MODES,
     ensure_trip,
@@ -41,7 +41,6 @@ from nlp_expenses.trips import (
     validate_source_name,
     validate_trip_name,
 )
-
 
 ARVINE_STATEMENTS = {".csv", ".xls", ".xlsx"}
 IVADO_STATEMENTS = ARVINE_STATEMENTS | {".pdf"}
@@ -58,7 +57,9 @@ def create_trip_name(month: str, description: str) -> str:
     compact_month = month.replace("-", "").strip()
     if not re.fullmatch(r"20\d{2}(?:0[1-9]|1[0-2])", compact_month):
         raise ValueError("Choose a valid trip month.")
-    normalized = unicodedata.normalize("NFKD", description).encode("ascii", "ignore").decode("ascii")
+    normalized = (
+        unicodedata.normalize("NFKD", description).encode("ascii", "ignore").decode("ascii")
+    )
     slug = re.sub(r"[^a-z0-9]+", "-", normalized.lower()).strip("-")
     if not slug:
         raise ValueError("Enter a descriptive trip name.")
@@ -187,7 +188,8 @@ def trip_details(root: Path, name: str) -> dict:
         "file_state": source_file_state(receipts, statements),
         "receipts": [file_details(path, receipts_folder) for path in receipts],
         "statements": [
-            {**file_details(path), "validation": statement_reports.get(path.name)} for path in statements
+            {**file_details(path), "validation": statement_reports.get(path.name)}
+            for path in statements
         ],
         "workbooks": [file_details(path) for path in list_workbooks(trip)],
         "manifests": [file_details(path) for path in list_manifests(trip)],
@@ -220,7 +222,9 @@ def source_file_state(receipts: list[Path], statements: list[Path]) -> dict:
             except FileNotFoundError:
                 continue
             counts[kind] += 1
-            entries.append(f"{kind}\0{path.resolve().as_posix()}\0{stat.st_size}\0{stat.st_mtime_ns}")
+            entries.append(
+                f"{kind}\0{path.resolve().as_posix()}\0{stat.st_size}\0{stat.st_mtime_ns}"
+            )
     digest = hashlib.sha256("\n".join(entries).encode("utf-8")).hexdigest()
     return {"signature": digest, **counts}
 
@@ -233,7 +237,9 @@ def allowed_extensions(mode: str, kind: str) -> set[str]:
     return ARVINE_STATEMENTS if mode == "arvine" else IVADO_STATEMENTS
 
 
-def store_upload(root: Path, trip_name: str, kind: str, filename: str, stream: BinaryIO) -> UploadResult:
+def store_upload(
+    root: Path, trip_name: str, kind: str, filename: str, stream: BinaryIO
+) -> UploadResult:
     trip = resolve_trip(root, trip_name)
     destination = source_folder(trip, kind)
     cleaned = secure_filename(Path(filename).name)
@@ -241,7 +247,9 @@ def store_upload(root: Path, trip_name: str, kind: str, filename: str, stream: B
         raise ValueError("The uploaded file needs a valid filename.")
     extension = Path(cleaned).suffix.lower()
     if extension not in allowed_extensions(trip_mode(trip), kind):
-        formats = ", ".join(sorted(ext.lstrip(".").upper() for ext in allowed_extensions(trip_mode(trip), kind)))
+        formats = ", ".join(
+            sorted(ext.lstrip(".").upper() for ext in allowed_extensions(trip_mode(trip), kind))
+        )
         raise ValueError(f"{cleaned} is not supported here. Use {formats}.")
 
     destination.mkdir(parents=True, exist_ok=True)
@@ -257,11 +265,20 @@ def store_upload(root: Path, trip_name: str, kind: str, filename: str, stream: B
             temporary = validation_path
             validate_receipt_content(temporary)
         incoming_hash = file_hash(temporary)
-        existing_files = list_receipt_files(destination) if kind == "receipts" else list_source_files(destination)
+        existing_files = (
+            list_receipt_files(destination)
+            if kind == "receipts"
+            else list_source_files(destination)
+        )
         for existing in existing_files:
-            if existing.stat().st_size == temporary.stat().st_size and file_hash(existing) == incoming_hash:
+            if (
+                existing.stat().st_size == temporary.stat().st_size
+                and file_hash(existing) == incoming_hash
+            ):
                 existing_name = (
-                    relative_source_name(destination, existing) if kind == "receipts" else existing.name
+                    relative_source_name(destination, existing)
+                    if kind == "receipts"
+                    else existing.name
                 )
                 return UploadResult(name=existing_name, status="duplicate")
 
@@ -275,7 +292,9 @@ def store_upload(root: Path, trip_name: str, kind: str, filename: str, stream: B
 def remove_source_file(root: Path, trip_name: str, kind: str, filename: str) -> None:
     trip = resolve_trip(root, trip_name)
     folder = source_folder(trip, kind).resolve()
-    target = safe_source_child(folder, filename) if kind == "receipts" else safe_child(folder, filename)
+    target = (
+        safe_source_child(folder, filename) if kind == "receipts" else safe_child(folder, filename)
+    )
     if not target.is_file():
         raise FileNotFoundError(f"{filename} was not found.")
     target.unlink()
@@ -384,7 +403,9 @@ def file_details(path: Path, source_root: Path | None = None) -> dict:
 def list_source_files(folder: Path) -> list[Path]:
     if not folder.exists():
         return []
-    return sorted(path for path in folder.iterdir() if path.is_file() and not path.name.startswith("."))
+    return sorted(
+        path for path in folder.iterdir() if path.is_file() and not path.name.startswith(".")
+    )
 
 
 def source_folder(trip: Path, kind: str) -> Path:

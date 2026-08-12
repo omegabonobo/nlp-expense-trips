@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
-from nlp_expenses.config import ask_openai_for_run, get_openai_settings, prompt_for_openai_if_missing
+from nlp_expenses.config import (
+    ask_openai_for_run,
+    get_openai_settings,
+    prompt_for_openai_if_missing,
+)
 from nlp_expenses.extraction.arvine import parse_arvine_receipt
 from nlp_expenses.extraction.receipts import parse_receipt
 from nlp_expenses.extraction.text import supported_receipt_extensions
@@ -32,8 +36,8 @@ from nlp_expenses.workbook import (
     build_workbook,
 )
 
-
 SUPPORTED_RECEIPTS = supported_receipt_extensions()
+LLM_MODES = {"ask", "auto", "off", "required"}
 
 ProgressCallback = Callable[[GenerationProgress], None]
 WarningCallback = Callable[[str], None]
@@ -44,6 +48,9 @@ def resolve_run_settings(
     llm_mode: str,
     allow_openai_prompt: bool,
 ) -> tuple[str | None, str, bool, bool]:
+    if llm_mode not in LLM_MODES:
+        choices = ", ".join(sorted(LLM_MODES))
+        raise ValueError(f"Unknown LLM mode {llm_mode!r}; choose one of: {choices}.")
     if llm_mode in {"ask", "auto"}:
         if allow_openai_prompt:
             api_key, model = ask_openai_for_run(root)
@@ -73,7 +80,9 @@ def extract_trip_expenses(
 ) -> list[Expense]:
     _api_key, model, use_llm, force_llm = resolve_run_settings(root, llm_mode, allow_openai_prompt)
     receipt_files = [
-        path for path in list_receipt_files(receipts_dir) if path.suffix.lower() in SUPPORTED_RECEIPTS
+        path
+        for path in list_receipt_files(receipts_dir)
+        if path.suffix.lower() in SUPPORTED_RECEIPTS
     ]
     receipt_parser = parse_arvine_receipt if selected_mode == "arvine" else parse_receipt
     expenses: list[Expense] = []
@@ -91,7 +100,9 @@ def extract_trip_expenses(
         expense = receipt_parser(path, use_llm=use_llm, model=model, force_llm=force_llm)
         expense.source_file = Path(source_name)
         if use_llm and force_llm and "OpenAI" not in expense.review_note:
-            message = f"{source_name}: OpenAI extraction was unavailable; local extraction was used."
+            message = (
+                f"{source_name}: OpenAI extraction was unavailable; local extraction was used."
+            )
             expense.review_note = append_note(expense.review_note, message)
             if warning_callback:
                 warning_callback(message)
@@ -133,7 +144,9 @@ def generate_review(
 
     def progress(stage: str, current: int, total: int, message: str) -> None:
         if progress_callback:
-            progress_callback(GenerationProgress(stage=stage, current=current, total=total, message=message))
+            progress_callback(
+                GenerationProgress(stage=stage, current=current, total=total, message=message)
+            )
 
     def warning(message: str) -> None:
         if warning_callback:
@@ -226,7 +239,9 @@ def generate_review(
 
         reviewed_transactions = ivado_statement_transactions_from_reconciliation(trip_dir, expenses)
         use_reviewed_mappings = reconciliation_is_fresh(trip_dir)
-        transactions = reviewed_transactions if use_reviewed_mappings else parse_all_statements(statements_dir)
+        transactions = (
+            reviewed_transactions if use_reviewed_mappings else parse_all_statements(statements_dir)
+        )
         result = build_workbook(
             trip_dir,
             expenses,
@@ -238,8 +253,8 @@ def generate_review(
         progress("complete", 1, 1, "Workbook ready")
         return result
 
-    from nlp_expenses.lifecycle import record_generated_bundle
     from nlp_expenses.consolidation import consolidation_view
+    from nlp_expenses.lifecycle import record_generated_bundle
     from nlp_expenses.trip_manifest import (
         CONTRACT_FILENAME,
         build_trip_manifest_records,

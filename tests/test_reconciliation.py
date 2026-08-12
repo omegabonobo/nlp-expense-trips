@@ -12,22 +12,22 @@ from nlp_expenses.fx_rates import FxRateUnavailable
 from nlp_expenses.generator import generate_review
 from nlp_expenses.line_items import line_item_review_view
 from nlp_expenses.models import Expense
-from nlp_expenses.statement_normalizer import set_statement_date_convention
 from nlp_expenses.reconciliation import (
     InvoiceValidationError,
     confirm_statement_coverage,
     ensure_reconciliation_ready,
     load_manual_matches,
     reconciliation_view,
+    serialized_candidate_reason,
+    serialized_candidate_score,
     set_coverage_settings,
     set_invoice_review,
     set_manual_match,
     set_transaction_allocations,
     set_transaction_decision,
-    serialized_candidate_reason,
-    serialized_candidate_score,
     sync_reconciliation,
 )
+from nlp_expenses.statement_normalizer import set_statement_date_convention
 from nlp_expenses.trips import ensure_trip
 
 
@@ -180,19 +180,27 @@ class ReconciliationTests(unittest.TestCase):
                 view = sync_reconciliation(trip, root, llm_mode="off")
 
             self.assertEqual(view["summary"]["matched_invoice_count"], 2)
-            hotel_transaction = next(item for item in view["transactions"] if item["description"] == "FOREIGN HOTEL")
+            hotel_transaction = next(
+                item for item in view["transactions"] if item["description"] == "FOREIGN HOTEL"
+            )
             self.assertEqual(hotel_transaction["expense_file"], "hotel.pdf")
             self.assertEqual(hotel_transaction["match_status"], "auto")
             self.assertAlmostEqual(hotel_transaction["fx_rate"], 1.3)
 
             manual = set_manual_match(trip, hotel_transaction["group_id"], expense_file="taxi.pdf")
-            changed = next(item for item in manual["transactions"] if item["group_id"] == hotel_transaction["group_id"])
+            changed = next(
+                item
+                for item in manual["transactions"]
+                if item["group_id"] == hotel_transaction["group_id"]
+            )
             self.assertEqual(changed["match_status"], "manual")
             self.assertEqual(changed["expense_file"], "taxi.pdf")
             # The row-level rate uses the card transaction's own original and CAD
             # amounts instead of dividing by an unrelated invoice total.
             self.assertAlmostEqual(changed["fx_rate"], 1.3)
-            taxi_review = next(item for item in manual["expenses"] if item["source_file"] == "taxi.pdf")
+            taxi_review = next(
+                item for item in manual["expenses"] if item["source_file"] == "taxi.pdf"
+            )
             self.assertEqual(taxi_review["statement_purchase_amount_used"], 150.0)
             self.assertAlmostEqual(taxi_review["fx_rate"], 1.3)
             self.assertEqual(load_manual_matches(trip)[hotel_transaction["group_id"]], "taxi.pdf")
@@ -200,7 +208,9 @@ class ReconciliationTests(unittest.TestCase):
             with patch("nlp_expenses.generator.parse_arvine_receipt", side_effect=parsed):
                 resynced = sync_reconciliation(trip, root, llm_mode="off")
             preserved = next(
-                item for item in resynced["transactions"] if item["group_id"] == hotel_transaction["group_id"]
+                item
+                for item in resynced["transactions"]
+                if item["group_id"] == hotel_transaction["group_id"]
             )
             self.assertEqual(preserved["expense_file"], "taxi.pdf")
             self.assertEqual(preserved["match_status"], "manual")
@@ -225,12 +235,20 @@ class ReconciliationTests(unittest.TestCase):
             self.assertEqual(statements.cell(hotel_row, 22).value, "manual")
 
             unmatched = set_manual_match(trip, hotel_transaction["group_id"], expense_file=None)
-            cleared = next(item for item in unmatched["transactions"] if item["group_id"] == hotel_transaction["group_id"])
+            cleared = next(
+                item
+                for item in unmatched["transactions"]
+                if item["group_id"] == hotel_transaction["group_id"]
+            )
             self.assertIsNone(cleared["expense_file"])
             self.assertEqual(cleared["match_status"], "unmatched")
 
             restored = set_manual_match(trip, hotel_transaction["group_id"], use_auto=True)
-            automatic = next(item for item in restored["transactions"] if item["group_id"] == hotel_transaction["group_id"])
+            automatic = next(
+                item
+                for item in restored["transactions"]
+                if item["group_id"] == hotel_transaction["group_id"]
+            )
             self.assertEqual(automatic["expense_file"], "hotel.pdf")
             self.assertEqual(automatic["match_status"], "auto")
             self.assertEqual(automatic["match_confidence"], hotel_transaction["match_confidence"])
@@ -284,8 +302,7 @@ class ReconciliationTests(unittest.TestCase):
             receipt.write_bytes(b"hotel")
             statement = trip / "card_statements" / "ambiguous.csv"
             statement.write_text(
-                "Date,Description,Amount,Currency\n"
-                "07/01/2026,HOTEL,100,CAD\n",
+                "Date,Description,Amount,Currency\n07/01/2026,HOTEL,100,CAD\n",
                 encoding="utf-8",
             )
             set_statement_date_convention(trip, statement.name, "month_first")
@@ -429,7 +446,12 @@ class ReconciliationTests(unittest.TestCase):
                 set_invoice_review(
                     trip,
                     "receipt.pdf",
-                    fields={"date": "2026-99-99", "amount": "-1", "currency": "dollars", "gst_hst": "120"},
+                    fields={
+                        "date": "2026-99-99",
+                        "amount": "-1",
+                        "currency": "dollars",
+                        "gst_hst": "120",
+                    },
                 )
             self.assertEqual(
                 {"date", "amount", "currency", "gst_hst"},
@@ -542,8 +564,7 @@ class ReconciliationTests(unittest.TestCase):
             receipt.write_bytes(b"cafe")
             for filename in ("card-part-1.csv", "card-part-2.csv"):
                 (trip / "card_statements" / filename).write_text(
-                    "Date,Description,Amount,Currency\n"
-                    "2026-07-01,CLIENT CAFE,10,CAD\n",
+                    "Date,Description,Amount,Currency\n2026-07-01,CLIENT CAFE,10,CAD\n",
                     encoding="utf-8",
                 )
             expense = Expense(
@@ -566,7 +587,9 @@ class ReconciliationTests(unittest.TestCase):
             duplicates = [item for item in initial["transactions"] if item["possible_duplicate"]]
             self.assertEqual(len(duplicates), 2)
             self.assertEqual(initial["summary"]["needs_review_count"], 2)
-            self.assertTrue(any("Possible duplicate statement transactions" in warning for warning in warnings))
+            self.assertTrue(
+                any("Possible duplicate statement transactions" in warning for warning in warnings)
+            )
             self.assertEqual(
                 {source["file"] for item in duplicates for source in item["source_rows"]},
                 {"card-part-1.csv", "card-part-2.csv"},
@@ -581,7 +604,9 @@ class ReconciliationTests(unittest.TestCase):
             self.assertEqual(ignored["summary"]["needs_review_count"], 1)
             self.assertEqual(ignored["expenses"][0]["cad_amount_used"], 10)
             ignored_transaction = next(
-                item for item in ignored["transactions"] if item["group_id"] == duplicates[0]["group_id"]
+                item
+                for item in ignored["transactions"]
+                if item["group_id"] == duplicates[0]["group_id"]
             )
             self.assertTrue(ignored_transaction["ignored"])
 
@@ -602,9 +627,7 @@ class ReconciliationTests(unittest.TestCase):
             sheet = load_workbook(output, data_only=False)["card_statements"]
             self.assertEqual(sheet.max_row, 3)
             ignored_rows = [
-                row
-                for row in range(2, sheet.max_row + 1)
-                if sheet.cell(row, 26).value == "ignored"
+                row for row in range(2, sheet.max_row + 1) if sheet.cell(row, 26).value == "ignored"
             ]
             self.assertEqual(len(ignored_rows), 1)
             self.assertFalse(sheet.cell(ignored_rows[0], 13).value)
@@ -645,7 +668,9 @@ class ReconciliationTests(unittest.TestCase):
             self.assertIn("AMEX", changed["gaps"][0]["message"])
             with self.assertRaisesRegex(ValueError, "Explain"):
                 confirm_statement_coverage(trip)
-            confirmation = confirm_statement_coverage(trip, "Corporate Amex was not used on this trip")
+            confirmation = confirm_statement_coverage(
+                trip, "Corporate Amex was not used on this trip"
+            )
             self.assertEqual(confirmation["gap_count"], 1)
 
             output = trip / "coverage.xlsx"
@@ -700,15 +725,28 @@ class ReconciliationTests(unittest.TestCase):
 
             with patch("nlp_expenses.generator.parse_arvine_receipt", side_effect=parsed):
                 synced = sync_reconciliation(trip, root, llm_mode="off")
-            purchase = next(item for item in synced["transactions"] if item["transaction_type"] == "purchase")
-            refund = next(item for item in synced["transactions"] if item["transaction_type"] == "refund")
+            purchase = next(
+                item for item in synced["transactions"] if item["transaction_type"] == "purchase"
+            )
+            refund = next(
+                item for item in synced["transactions"] if item["transaction_type"] == "refund"
+            )
 
             partial = set_transaction_allocations(
                 trip,
                 purchase["group_id"],
-                [{"type": "purchase", "invoice_file": "first.pdf", "cad_amount": 100, "note": "Hotel share"}],
+                [
+                    {
+                        "type": "purchase",
+                        "invoice_file": "first.pdf",
+                        "cad_amount": 100,
+                        "note": "Hotel share",
+                    }
+                ],
             )
-            partial_group = next(item for item in partial["transactions"] if item["group_id"] == purchase["group_id"])
+            partial_group = next(
+                item for item in partial["transactions"] if item["group_id"] == purchase["group_id"]
+            )
             self.assertEqual(partial_group["allocation_status"], "unallocated")
             self.assertEqual(partial_group["allocation_balance"], 200)
             with self.assertRaisesRegex(ValueError, "Finish split allocations"):
@@ -723,7 +761,9 @@ class ReconciliationTests(unittest.TestCase):
                 ],
             )
             over_group = next(
-                item for item in overallocated["transactions"] if item["group_id"] == purchase["group_id"]
+                item
+                for item in overallocated["transactions"]
+                if item["group_id"] == purchase["group_id"]
             )
             self.assertEqual(over_group["allocation_status"], "overallocated")
             self.assertEqual(over_group["allocation_balance"], -50)
@@ -767,7 +807,9 @@ class ReconciliationTests(unittest.TestCase):
                 ],
             )
             purchase_group = next(
-                item for item in balanced["transactions"] if item["group_id"] == purchase["group_id"]
+                item
+                for item in balanced["transactions"]
+                if item["group_id"] == purchase["group_id"]
             )
             self.assertEqual(purchase_group["allocation_status"], "balanced")
             self.assertEqual(purchase_group["allocation_balance"], 0)
@@ -788,10 +830,14 @@ class ReconciliationTests(unittest.TestCase):
             workbook = load_workbook(output, data_only=False)
             cards = workbook["card_statements"]
             allocation_rows = [
-                row for row in range(2, cards.max_row + 1) if cards.cell(row, 5).value == "allocation"
+                row
+                for row in range(2, cards.max_row + 1)
+                if cards.cell(row, 5).value == "allocation"
             ]
             self.assertEqual(len(allocation_rows), 4)
-            personal_row = next(row for row in allocation_rows if cards.cell(row, 10).value == "personal")
+            personal_row = next(
+                row for row in allocation_rows if cards.cell(row, 10).value == "personal"
+            )
             self.assertFalse(cards.cell(personal_row, 13).value)
             self.assertIsNone(cards.cell(personal_row, 20).value)
             linked_cad = sum(

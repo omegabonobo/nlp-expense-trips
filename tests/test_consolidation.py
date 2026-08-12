@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
-import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -120,9 +120,7 @@ class ConsolidationTests(unittest.TestCase):
 
             added = add_line_item(trip, receipt.name, "Tip", 15, included=True)
             manual = next(
-                item
-                for item in added["receipts"][0]["line_items"]
-                if item["description"] == "Tip"
+                item for item in added["receipts"][0]["line_items"] if item["description"] == "Tip"
             )
             self.assertTrue(manual["manual"])
             removed = remove_line_item(trip, receipt.name, manual["line_id"])
@@ -140,8 +138,7 @@ class ConsolidationTests(unittest.TestCase):
             receipt.write_bytes(b"fixture")
             statement = trip / "card_statements" / "card.csv"
             statement.write_text(
-                "Date,Description,Amount,Foreign Spend Amount\n"
-                "2026-07-01,BISTRO,75,50 AUD\n",
+                "Date,Description,Amount,Foreign Spend Amount\n2026-07-01,BISTRO,75,50 AUD\n",
                 encoding="utf-8",
             )
             expense = meal_expense(receipt, currency="AUD", amount=50)
@@ -178,7 +175,9 @@ class ConsolidationTests(unittest.TestCase):
             )
             unresolved = consolidation_view(root, trip)
             self.assertGreater(unresolved["summary"]["blocking_count"], 0)
-            self.assertTrue(any(issue["kind"] == "statement_mapping" for issue in unresolved["issues"]))
+            self.assertTrue(
+                any(issue["kind"] == "statement_mapping" for issue in unresolved["issues"])
+            )
 
     def test_statement_purchase_amount_prevents_double_dividing_a_shared_meal(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -189,8 +188,7 @@ class ConsolidationTests(unittest.TestCase):
             receipt.write_bytes(b"fixture")
             statement = trip / "card_statements" / "card.csv"
             statement.write_text(
-                "Date,Description,Amount,Foreign Spend Amount\n"
-                "2026-07-01,BISTRO,110,100 AUD\n",
+                "Date,Description,Amount,Foreign Spend Amount\n2026-07-01,BISTRO,110,100 AUD\n",
                 encoding="utf-8",
             )
             expense = Expense(
@@ -347,7 +345,9 @@ class ConsolidationTests(unittest.TestCase):
                 "Personal subscription outside the trip",
             )
             excluded_transaction = next(
-                item for item in excluded["transactions"] if item["group_id"] == unrelated["group_id"]
+                item
+                for item in excluded["transactions"]
+                if item["group_id"] == unrelated["group_id"]
             )
             self.assertTrue(excluded_transaction["ignored"])
             self.assertEqual(excluded["summary"]["needs_review_count"], 0)
@@ -355,7 +355,9 @@ class ConsolidationTests(unittest.TestCase):
 
             restored = set_transaction_decision(trip, unrelated["group_id"], "keep")
             restored_transaction = next(
-                item for item in restored["transactions"] if item["group_id"] == unrelated["group_id"]
+                item
+                for item in restored["transactions"]
+                if item["group_id"] == unrelated["group_id"]
             )
             self.assertFalse(restored_transaction["ignored"])
             self.assertEqual(restored_transaction["normalization_status"], "ok")

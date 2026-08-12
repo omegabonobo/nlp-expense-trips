@@ -11,7 +11,7 @@ import webbrowser
 from pathlib import Path
 from urllib.parse import urlencode
 
-from flask import Flask, jsonify, redirect, render_template, request, send_file, session, url_for
+from flask import Flask, jsonify, redirect, render_template, request, send_file, session
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.serving import make_server
 
@@ -67,9 +67,9 @@ from nlp_expenses.ui_services import (
     delete_trip,
     open_workbook,
     remove_source_file,
+    resolve_manifest,
     resolve_receipt,
     resolve_trip,
-    resolve_manifest,
     resolve_workbook,
     reveal_in_finder,
     store_upload,
@@ -78,11 +78,12 @@ from nlp_expenses.ui_services import (
     trip_summaries,
 )
 
-
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
-def create_app(root: Path, access_token: str | None = None, job_manager: JobManager | None = None) -> Flask:
+def create_app(
+    root: Path, access_token: str | None = None, job_manager: JobManager | None = None
+) -> Flask:
     root = root.resolve()
     token = access_token or secrets.token_urlsafe(24)
     app = Flask(__name__)
@@ -117,7 +118,11 @@ def create_app(root: Path, access_token: str | None = None, job_manager: JobMana
             supplied_csrf = request.headers.get("X-CSRF-Token", "")
             expected_csrf = session.get("csrf_token", "")
             if not supplied_csrf or not hmac.compare_digest(supplied_csrf, expected_csrf):
-                return jsonify({"error": "The local session expired. Reload the application from the launcher."}), 403
+                return jsonify(
+                    {
+                        "error": "The local session expired. Reload the application from the launcher."
+                    }
+                ), 403
         return None
 
     @app.get("/")
@@ -228,7 +233,9 @@ def create_app(root: Path, access_token: str | None = None, job_manager: JobMana
             for uploaded in files:
                 if not uploaded.filename:
                     continue
-                results.append(store_upload(root, trip_name, kind, uploaded.filename, uploaded.stream).__dict__)
+                results.append(
+                    store_upload(root, trip_name, kind, uploaded.filename, uploaded.stream).__dict__
+                )
         if not results:
             raise ValueError("Choose one or more files to upload.")
         return jsonify({"files": results, "trip": trip_details(root, trip_name)})
@@ -237,7 +244,9 @@ def create_app(root: Path, access_token: str | None = None, job_manager: JobMana
     def remove_file(trip_name: str):
         data = request.get_json(silent=True) or {}
         with jobs.mutation_guard(trip_name):
-            remove_source_file(root, trip_name, str(data.get("kind", "")), str(data.get("filename", "")))
+            remove_source_file(
+                root, trip_name, str(data.get("kind", "")), str(data.get("filename", ""))
+            )
         return jsonify({"trip": trip_details(root, trip_name)})
 
     @app.delete("/api/trips/<trip_name>")
@@ -353,9 +362,8 @@ def create_app(root: Path, access_token: str | None = None, job_manager: JobMana
         trip = resolve_trip(root, trip_name)
         if not details["receipts"]:
             raise ValueError("Add at least one receipt before generating the workbook.")
-        if details["mode"] == "arvine":
-            if details["statement_errors"]:
-                raise ValueError("Fix the statement validation errors before generating the workbook.")
+        if details["mode"] == "arvine" and details["statement_errors"]:
+            raise ValueError("Fix the statement validation errors before generating the workbook.")
         ensure_reconciliation_ready(trip)
         ensure_consolidation_finalized(root, trip)
         if details["mode"] == "arvine":
@@ -363,7 +371,9 @@ def create_app(root: Path, access_token: str | None = None, job_manager: JobMana
             statements_complete = True
         quality = receipt_quality(ensure_line_item_review_ready(trip))
         if quality == "best" and not system_status(root)["openai_configured"]:
-            raise ValueError("The receipt scan used Best quality. Restore the OpenAI API key before generating.")
+            raise ValueError(
+                "The receipt scan used Best quality. Restore the OpenAI API key before generating."
+            )
         job = jobs.start(trip_name, quality, statements_complete)
         return jsonify({"job": job.to_dict()}), 202
 
@@ -382,7 +392,9 @@ def create_app(root: Path, access_token: str | None = None, job_manager: JobMana
             raise ValueError("Scan the current receipts in Step 3 before reconciliation.")
         quality = receipt_quality(review)
         if quality == "best" and not system_status(root)["openai_configured"]:
-            raise ValueError("The receipt scan used Best quality. Restore the OpenAI API key before reconciling.")
+            raise ValueError(
+                "The receipt scan used Best quality. Restore the OpenAI API key before reconciling."
+            )
         job = jobs.start_reconciliation(trip_name, quality)
         return jsonify({"job": job.to_dict()}), 202
 
@@ -655,7 +667,9 @@ def create_app(root: Path, access_token: str | None = None, job_manager: JobMana
 
     @app.errorhandler(RequestEntityTooLarge)
     def too_large(_error):
-        return jsonify({"error": "The selected upload is too large. Upload fewer files at a time."}), 413
+        return jsonify(
+            {"error": "The selected upload is too large. Upload fewer files at a time."}
+        ), 413
 
     return app
 
@@ -713,7 +727,9 @@ def open_local_url(url: str) -> None:
 def available_port(preferred: int) -> int:
     if preferred < 0 or preferred > 65535:
         raise ValueError("Port must be between 0 and 65535.")
-    candidates = [preferred] if preferred == 0 else list(range(preferred, min(preferred + 20, 65536)))
+    candidates = (
+        [preferred] if preferred == 0 else list(range(preferred, min(preferred + 20, 65536)))
+    )
     for candidate in candidates:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             try:

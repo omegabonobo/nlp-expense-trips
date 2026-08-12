@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from openpyxl import load_workbook
 
 from nlp_expenses.config import ask_openai_for_run
@@ -20,15 +21,31 @@ from nlp_expenses.extraction.receipts import (
     line_item_from_llm,
 )
 from nlp_expenses.extraction.statements import parse_csv_statement
-from nlp_expenses.generator import SUPPORTED_RECEIPTS, assign_simple_expense_ids, generate_review
-from nlp_expenses.matching import close_split_amount, match_normalized_transactions, match_score
-from nlp_expenses.matching import enrich_expenses_from_statements
+from nlp_expenses.generator import (
+    SUPPORTED_RECEIPTS,
+    assign_simple_expense_ids,
+    generate_review,
+    resolve_run_settings,
+)
+from nlp_expenses.matching import (
+    close_split_amount,
+    enrich_expenses_from_statements,
+    match_normalized_transactions,
+    match_score,
+)
 from nlp_expenses.models import Expense, NormalizedTransaction, StatementTransaction
 from nlp_expenses.trips import ensure_trip, validate_trip_name
 from nlp_expenses.workbook import build_workbook
 
 
 class CoreTests(unittest.TestCase):
+    def test_unknown_llm_mode_is_rejected(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            self.assertRaisesRegex(ValueError, "Unknown LLM mode"),
+        ):
+            resolve_run_settings(Path(tmp), "sometimes", allow_openai_prompt=False)
+
     def test_trip_name_validation_and_creation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -46,8 +63,9 @@ class CoreTests(unittest.TestCase):
             self.assertIsNone(api_key)
             self.assertFalse((root / ".env").exists())
 
-            with patch("builtins.input", return_value="y"), patch(
-                "nlp_expenses.config.getpass", return_value="sk-test"
+            with (
+                patch("builtins.input", return_value="y"),
+                patch("nlp_expenses.config.getpass", return_value="sk-test"),
             ):
                 api_key, model = ask_openai_for_run(root)
             self.assertEqual(api_key, "sk-test")
@@ -122,10 +140,18 @@ class CoreTests(unittest.TestCase):
             trip = ensure_trip(root, "202606_test")
             receipt = trip / "expenses_receipts" / "Scanned_20260601-test.pdf"
             receipt.write_bytes(b"dummy")
-            mocked_expense = Expense(source_file=receipt, expense_id="", date="2026-06-01", supplier_name="LLM Cafe")
-            with patch("nlp_expenses.generator.ask_openai_for_run", return_value=("sk-test", "gpt-test")), patch(
-                "nlp_expenses.generator.parse_receipt", return_value=mocked_expense
-            ) as parse_receipt_mock:
+            mocked_expense = Expense(
+                source_file=receipt, expense_id="", date="2026-06-01", supplier_name="LLM Cafe"
+            )
+            with (
+                patch(
+                    "nlp_expenses.generator.ask_openai_for_run",
+                    return_value=("sk-test", "gpt-test"),
+                ),
+                patch(
+                    "nlp_expenses.generator.parse_receipt", return_value=mocked_expense
+                ) as parse_receipt_mock,
+            ):
                 output = generate_review(trip, root, llm_mode="ask")
             self.assertTrue(output.exists())
             self.assertEqual(parse_receipt_mock.call_args.kwargs["use_llm"], True)
@@ -209,7 +235,12 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(expense.currency, "AUD")
             self.assertAlmostEqual(expense.amount, 29.0)
             self.assertAlmostEqual(expense.corrected_amount_in_currency, 20.0)
-            self.assertTrue(any(item.description == "Alcohol adjustment - manual" and item.is_alcohol for item in expense.line_items))
+            self.assertTrue(
+                any(
+                    item.description == "Alcohol adjustment - manual" and item.is_alcohol
+                    for item in expense.line_items
+                )
+            )
 
     def test_invoice_date_is_preferred_for_flights(self):
         text = "\n".join(
@@ -227,10 +258,17 @@ class CoreTests(unittest.TestCase):
             expense = heuristic_parse_receipt(file_path, text)
             self.assertEqual(expense.date, "2026-05-25")
             self.assertEqual(expense.expense_type, "flight")
-            receipt_total_items = [item for item in expense.line_items if item.description == "Receipt total"]
+            receipt_total_items = [
+                item for item in expense.line_items if item.description == "Receipt total"
+            ]
             self.assertEqual(len(receipt_total_items), 1)
             self.assertEqual(receipt_total_items[0].amount, 20598982.0)
-            self.assertTrue(any(item.description == "Alcohol adjustment - manual" and item.is_alcohol for item in expense.line_items))
+            self.assertTrue(
+                any(
+                    item.description == "Alcohol adjustment - manual" and item.is_alcohol
+                    for item in expense.line_items
+                )
+            )
 
     def test_juni_scanned_receipt_keeps_receipt_date_and_restaurant_supplier(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -261,9 +299,18 @@ class CoreTests(unittest.TestCase):
     def test_known_restaurant_cafe_names_classify_as_meals(self):
         cases = [
             ("Nigel\nCappuccino $5.50\nBanana Bread $6.00\nTotal $11.50", "meal-breakfast"),
-            ("Reine & La Rue\nThank you for dining at Reine & La Rue\nTotal Inc Tax: $521.00", "meal-dinner"),
-            ("GABRIEL\nCAPPUCINO x 4\npork belly Benedict 1 $27.00\nSubtotal $43.50", "meal-breakfast"),
-            ("Tax ywvOl\nThame you for dining wan US Bt Farmers\nDaughte’s\nTotal $474.10", "meal-dinner"),
+            (
+                "Reine & La Rue\nThank you for dining at Reine & La Rue\nTotal Inc Tax: $521.00",
+                "meal-dinner",
+            ),
+            (
+                "GABRIEL\nCAPPUCINO x 4\npork belly Benedict 1 $27.00\nSubtotal $43.50",
+                "meal-breakfast",
+            ),
+            (
+                "Tax ywvOl\nThame you for dining wan US Bt Farmers\nDaughte’s\nTotal $474.10",
+                "meal-dinner",
+            ),
         ]
         with tempfile.TemporaryDirectory() as tmp:
             for idx, (text, expected_type) in enumerate(cases):
@@ -295,7 +342,9 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(items["weekend surcharge"], 4.30)
             self.assertNotIn("Total includes GST", items)
             self.assertNotIn("Dine In Small", items)
-            self.assertFalse(any("classic espresso" in description.lower() for description in items))
+            self.assertFalse(
+                any("classic espresso" in description.lower() for description in items)
+            )
 
     def test_ocr_decimal_variants_and_payment_total_are_parsed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -370,7 +419,11 @@ class CoreTests(unittest.TestCase):
                 ]
             )
             expense = heuristic_parse_receipt(file_path, text)
-            gap_items = [item for item in expense.line_items if item.description == "Unreconciled meal item - review"]
+            gap_items = [
+                item
+                for item in expense.line_items
+                if item.description == "Unreconciled meal item - review"
+            ]
             self.assertEqual(len(gap_items), 1)
             self.assertAlmostEqual(gap_items[0].amount, 5.0)
             self.assertIn("Unreconciled meal item line added", expense.review_note)
@@ -425,7 +478,9 @@ class CoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "statement.csv"
             with path.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=["Date", "Description", "Amount", "Foreign Spend Amount"])
+                writer = csv.DictWriter(
+                    handle, fieldnames=["Date", "Description", "Amount", "Foreign Spend Amount"]
+                )
                 writer.writeheader()
                 writer.writerow(
                     {
@@ -556,7 +611,12 @@ class CoreTests(unittest.TestCase):
                 corrected_amount_in_currency=8,
                 confidence=0.8,
             )
-            transaction = StatementTransaction(source_file=Path("statement.csv"), date="2026-06-02", description="Unmatched", amount_cad=99)
+            transaction = StatementTransaction(
+                source_file=Path("statement.csv"),
+                date="2026-06-02",
+                description="Unmatched",
+                amount_cad=99,
+            )
             output = build_workbook(trip, [expense], [transaction])
             wb = load_workbook(output, data_only=False)
             self.assertEqual(wb["expense_list"]["E1"].value, "amount_in_currency")
@@ -630,14 +690,17 @@ class CoreTests(unittest.TestCase):
                 output.touch()
                 return output
 
-            with patch("nlp_expenses.generator.parse_receipt", return_value=expense), patch(
-                "nlp_expenses.generator.apply_line_item_review", side_effect=apply_review
-            ), patch("nlp_expenses.generator.build_workbook", side_effect=build):
+            with (
+                patch("nlp_expenses.generator.parse_receipt", return_value=expense),
+                patch("nlp_expenses.generator.apply_line_item_review", side_effect=apply_review),
+                patch("nlp_expenses.generator.build_workbook", side_effect=build),
+            ):
                 output = generate_review(trip, root, llm_mode="off", mode="ivado")
 
             self.assertEqual(captured["expense_id"], "20260603_#1")
             self.assertEqual(output, (trip / "review.xlsx").resolve())
 
+    @pytest.mark.integration
     def test_integration_existing_melbourne_receipt_count(self):
         root = Path(__file__).resolve().parents[1]
         trip = root / "trips" / "202606_melbourne"

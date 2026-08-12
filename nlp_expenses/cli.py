@@ -1,23 +1,41 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
+from nlp_expenses import __version__
 from nlp_expenses.config import configure_openai
 from nlp_expenses.generator import generate_review
 from nlp_expenses.trips import TRIP_MODES, ensure_trip, list_trips, trip_mode, validate_trip_name
 
 
-def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Generate local trip expense review workbooks.")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="nlp-expenses",
+        description="Generate local trip expense review workbooks.",
+    )
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=Path(os.environ.get("NLP_EXPENSES_ROOT", Path.cwd())),
+        help="Data directory containing trips and local settings (default: current directory).",
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command")
 
-    create = sub.add_parser("create-trip", help="Create a trip folder with receipt and statement subfolders.")
+    create = sub.add_parser(
+        "create-trip", help="Create a trip folder with receipt and statement subfolders."
+    )
     create.add_argument("name", help="Trip folder name, e.g. 202606_melbourne")
-    create.add_argument("--mode", choices=sorted(TRIP_MODES), default="ivado", help="Trip processing mode.")
+    create.add_argument(
+        "--mode", choices=sorted(TRIP_MODES), default="ivado", help="Trip processing mode."
+    )
 
-    generate = sub.add_parser("generate", help="Generate expense_review_[trip].xlsx for a trip folder.")
+    generate = sub.add_parser(
+        "generate", help="Generate expense_review_[trip].xlsx for a trip folder."
+    )
     generate.add_argument("trip", type=Path, help="Path to a trips/YYYYMM_tripName folder.")
     generate.add_argument(
         "--llm",
@@ -25,7 +43,9 @@ def main(argv: list[str] | None = None) -> None:
         default="ask",
         help="ask prompts whether to use an OpenAI API key; off uses heuristics only; required forces OpenAI extraction.",
     )
-    generate.add_argument("--mode", choices=sorted(TRIP_MODES), help="Override the trip's saved processing mode.")
+    generate.add_argument(
+        "--mode", choices=sorted(TRIP_MODES), help="Override the trip's saved processing mode."
+    )
     generate.add_argument(
         "--statements-complete",
         action="store_true",
@@ -44,14 +64,26 @@ def main(argv: list[str] | None = None) -> None:
         help="Choose OpenAI-assisted or local-only invoice extraction.",
     )
 
-    sub.add_parser("configure-openai", help="Store OPENAI_API_KEY in local .env for fallback extraction.")
+    sub.add_parser(
+        "configure-openai", help="Store OPENAI_API_KEY in local .env for fallback extraction."
+    )
 
     ui = sub.add_parser("ui", help="Run the local browser interface.")
-    ui.add_argument("--port", type=int, default=8765, help="Preferred localhost port (default: 8765).")
-    ui.add_argument("--no-browser", action="store_true", help="Do not open the browser automatically.")
+    ui.add_argument(
+        "--port", type=int, default=8765, help="Preferred localhost port (default: 8765)."
+    )
+    ui.add_argument(
+        "--no-browser", action="store_true", help="Do not open the browser automatically."
+    )
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = build_parser()
 
     args = parser.parse_args(argv)
-    root = Path.cwd()
+    root = args.root.expanduser().resolve()
 
     if args.command == "create-trip":
         trip = ensure_trip(root, args.name, mode=args.mode)
@@ -100,7 +132,10 @@ def main(argv: list[str] | None = None) -> None:
         run_local_ui(root, port=args.port, open_browser=not args.no_browser)
         return
 
-    interactive_menu(root)
+    if sys.stdin.isatty():
+        interactive_menu(root)
+    else:
+        parser.print_help()
 
 
 def interactive_menu(root: Path) -> None:

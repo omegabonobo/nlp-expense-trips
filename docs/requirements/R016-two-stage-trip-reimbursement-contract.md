@@ -16,8 +16,8 @@ Keep `nlp-expenses` and `arvine-accounting-expenses` as separate projects.
   sharing, line-item/alcohol review, and report generation.
 - `arvine-accounting-expenses` owns BMO reimbursement matching, accounting
   mappings, and reviewed Tx staging.
-- The boundary is
-  `contracts/trip-reimbursement-manifest.v3.schema.json`.
+- The boundary is the packaged schema at
+  `nlp_expenses/contracts/trip-reimbursement-manifest.v3.schema.json`.
 
 The boundary contains only data the accounting consumer needs. It does not
 carry legal identifiers, approvers, settlement legs, policy profiles, payment

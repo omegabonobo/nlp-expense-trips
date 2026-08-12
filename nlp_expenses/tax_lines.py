@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 
-
 SYSTEM_TAX_LINES = {"gst_hst": "GST/HST", "qst": "QST"}
 
 

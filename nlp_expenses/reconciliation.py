@@ -2,20 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import uuid
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from difflib import SequenceMatcher
 from pathlib import Path
 
+from nlp_expenses.extraction.statements import parse_statement_file
+from nlp_expenses.fx_rates import FxRateUnavailable, WeeklyCadFxResolver
 from nlp_expenses.generator import (
     ProgressCallback,
     WarningCallback,
     assign_simple_expense_ids,
     extract_trip_expenses,
 )
-from nlp_expenses.fx_rates import FxRateUnavailable, WeeklyCadFxResolver
+from nlp_expenses.line_items import apply_line_item_review, save_line_item_review
 from nlp_expenses.matching import (
     apply_manual_matches,
     card_total_gap_percent,
@@ -26,8 +26,6 @@ from nlp_expenses.matching import (
     match_normalized_transactions,
     sum_values,
 )
-from nlp_expenses.extraction.statements import parse_statement_file
-from nlp_expenses.line_items import apply_line_item_review, save_line_item_review
 from nlp_expenses.models import (
     Expense,
     GenerationProgress,
@@ -43,6 +41,7 @@ from nlp_expenses.statement_normalizer import (
     normalize_statement_files,
     preflight_statement_files,
 )
+from nlp_expenses.storage import write_json_atomic
 from nlp_expenses.trip_metadata import (
     apply_trip_metadata_defaults,
     trip_metadata,
@@ -58,7 +57,6 @@ from nlp_expenses.trips import (
     trip_receipts_dir,
     trip_statements_dir,
 )
-
 
 RECONCILIATION_FILE = ".nlp-expenses-reconciliation.json"
 RECONCILIATION_VERSION = 1
@@ -104,7 +102,9 @@ def sync_reconciliation(
     selected_mode = trip_mode(trip_dir)
     statements = reconciliation_statement_files(trip_dir, selected_mode)
     fx_resolver = WeeklyCadFxResolver(trip_dir)
-    emit_progress(progress_callback, "statements", 0, len(statements), "Validating card and bank statements")
+    emit_progress(
+        progress_callback, "statements", 0, len(statements), "Validating card and bank statements"
+    )
     if selected_mode == "arvine":
         reports = preflight_statement_files(statements)
         errors = [error for report in reports for error in report.errors]
@@ -121,7 +121,9 @@ def sync_reconciliation(
     if warning_callback:
         for message in normalization.warnings:
             warning_callback(message)
-    emit_progress(progress_callback, "statements", len(statements), len(statements), "Statements normalized")
+    emit_progress(
+        progress_callback, "statements", len(statements), len(statements), "Statements normalized"
+    )
 
     previous_state = load_reconciliation_state(trip_dir)
     current_fingerprint = reconciliation_input_fingerprint(trip_dir)
@@ -161,7 +163,9 @@ def sync_reconciliation(
         if expense.manual_cad_override is not None
     }
     assign_simple_expense_ids(expenses)
-    emit_progress(progress_callback, "matching", 0, 1, "Matching invoices to statement transactions")
+    emit_progress(
+        progress_callback, "matching", 0, 1, "Matching invoices to statement transactions"
+    )
     estimated_cad_by_expense = estimate_expense_cad_amounts(
         expenses,
         normalization.transactions,
@@ -175,7 +179,9 @@ def sync_reconciliation(
     )
 
     expense_files = {source_file_key(expense.source_file) for expense in expenses}
-    transaction_groups = {transaction.transaction_group_id for transaction in normalization.transactions}
+    transaction_groups = {
+        transaction.transaction_group_id for transaction in normalization.transactions
+    }
     preserved_manual_matches = (
         deserialize_manual_matches(previous_state)
         if previous_state and previous_state.get("input_fingerprint") == current_fingerprint
@@ -184,7 +190,8 @@ def sync_reconciliation(
     manual_matches = {
         group_id: receipt_file
         for group_id, receipt_file in preserved_manual_matches.items()
-        if group_id in transaction_groups and (receipt_file is None or receipt_file in expense_files)
+        if group_id in transaction_groups
+        and (receipt_file is None or receipt_file in expense_files)
     }
     auto_groups = aggregate_transaction_groups(expenses, normalization.transactions)
     apply_manual_matches(expenses, normalization.transactions, manual_matches)
@@ -211,10 +218,14 @@ def sync_reconciliation(
         "expenses": [serialize_expense(expense) for expense in expenses],
         "estimated_cad_by_expense": estimated_cad_by_expense,
         "invoice_overrides": {
-            filename: values for filename, values in invoice_overrides.items() if filename in expense_files
+            filename: values
+            for filename, values in invoice_overrides.items()
+            if filename in expense_files
         },
         "manual_cad_overrides": {
-            filename: values for filename, values in manual_cad_overrides.items() if filename in expense_files
+            filename: values
+            for filename, values in manual_cad_overrides.items()
+            if filename in expense_files
         },
         "transaction_decisions": {
             group_id: values
@@ -277,7 +288,9 @@ def estimate_expense_cad_amounts(
         except FxRateUnavailable as exc:
             warning_key = (currency, expense.date)
             if warning_callback and warning_key not in warned:
-                warning_callback(f"FX-aware receipt matching unavailable for {currency} on {expense.date}: {exc}")
+                warning_callback(
+                    f"FX-aware receipt matching unavailable for {currency} on {expense.date}: {exc}"
+                )
                 warned.add(warning_key)
             continue
         estimates[source_file_key(expense.source_file)] = round(share * rate.cad_per_unit, 2)
@@ -294,21 +307,31 @@ def set_manual_match(
     if not state:
         raise ValueError("Run invoice and statement sync before editing mappings.")
     if not reconciliation_is_fresh(trip_dir, state):
-        raise ValueError("Receipts or statements changed after the last sync. Sync again before editing mappings.")
-    transaction = next((item for item in state.get("transactions", []) if item.get("group_id") == group_id), None)
+        raise ValueError(
+            "Receipts or statements changed after the last sync. Sync again before editing mappings."
+        )
+    transaction = next(
+        (item for item in state.get("transactions", []) if item.get("group_id") == group_id), None
+    )
     if not transaction:
-        raise FileNotFoundError("The statement transaction is no longer present in the reconciliation snapshot.")
+        raise FileNotFoundError(
+            "The statement transaction is no longer present in the reconciliation snapshot."
+        )
     if transaction.get("ignored"):
         raise ValueError("Restore this ignored transaction before changing its invoice mapping.")
     if state.get("transaction_allocations", {}).get(group_id):
-        raise ValueError("Clear this transaction's split allocations before using the simple invoice mapping.")
+        raise ValueError(
+            "Clear this transaction's split allocations before using the simple invoice mapping."
+        )
 
     manual_matches = state.setdefault("manual_matches", {})
     if use_auto:
         manual_matches.pop(group_id, None)
         transaction["expense_file"] = transaction.get("auto_expense_file")
         transaction["match_status"] = transaction.get("auto_match_status", "unmatched")
-        transaction["match_confidence"] = transaction.get("auto_match_confidence", transaction.get("match_confidence", 0.0))
+        transaction["match_confidence"] = transaction.get(
+            "auto_match_confidence", transaction.get("match_confidence", 0.0)
+        )
         transaction["match_review_reason"] = transaction.get("auto_match_review_reason", "")
         transaction["override_active"] = False
         transaction["override_expense_file"] = None
@@ -459,10 +482,16 @@ def set_transaction_decision(
     if not state:
         raise ValueError("Run invoice and statement sync before reviewing transactions.")
     if not reconciliation_is_fresh(trip_dir, state):
-        raise ValueError("Receipts or statements changed after the last sync. Sync again before reviewing transactions.")
-    transaction = next((item for item in state.get("transactions", []) if item.get("group_id") == group_id), None)
+        raise ValueError(
+            "Receipts or statements changed after the last sync. Sync again before reviewing transactions."
+        )
+    transaction = next(
+        (item for item in state.get("transactions", []) if item.get("group_id") == group_id), None
+    )
     if not transaction:
-        raise FileNotFoundError("The statement transaction is no longer present in the reconciliation snapshot.")
+        raise FileNotFoundError(
+            "The statement transaction is no longer present in the reconciliation snapshot."
+        )
     if state.get("transaction_allocations", {}).get(group_id):
         raise ValueError("Clear split allocations before changing the transaction disposition.")
     action = action.strip().lower()
@@ -506,13 +535,21 @@ def set_transaction_allocations(
     if not state:
         raise ValueError("Run invoice and statement sync before allocating transactions.")
     if not reconciliation_is_fresh(trip_dir, state):
-        raise ValueError("Receipts or statements changed after the last sync. Sync again before allocating.")
-    group = next((item for item in state.get("transactions", []) if item.get("group_id") == group_id), None)
+        raise ValueError(
+            "Receipts or statements changed after the last sync. Sync again before allocating."
+        )
+    group = next(
+        (item for item in state.get("transactions", []) if item.get("group_id") == group_id), None
+    )
     if not group:
-        raise FileNotFoundError("The statement transaction is no longer present in the reconciliation snapshot.")
+        raise FileNotFoundError(
+            "The statement transaction is no longer present in the reconciliation snapshot."
+        )
     if group.get("ignored"):
         raise ValueError("Restore this ignored transaction before adding allocations.")
-    if group.get("cad_completeness") != "complete" or not isinstance(group.get("cad_amount"), (int, float)):
+    if group.get("cad_completeness") != "complete" or not isinstance(
+        group.get("cad_amount"), (int, float)
+    ):
         raise ValueError("Split allocation requires a complete exact CAD statement amount.")
     available_files = {expense.get("source_file") for expense in state.get("expenses", [])}
     normalized = normalize_allocations(allocations, available_files, float(group["cad_amount"]))
@@ -602,7 +639,9 @@ def allocation_totals(allocations: list[dict], target_cad: float) -> dict:
     return {"allocation_total": total, "allocation_balance": balance, "allocation_status": status}
 
 
-def apply_allocations_to_groups(groups: list[dict], allocations_by_group: dict[str, list[dict]]) -> None:
+def apply_allocations_to_groups(
+    groups: list[dict], allocations_by_group: dict[str, list[dict]]
+) -> None:
     for group in groups:
         allocations = allocations_by_group.get(group["group_id"], [])
         if allocations:
@@ -692,7 +731,11 @@ def statement_coverage_view(trip_dir: Path, state: dict | None = None) -> dict:
     accounts = []
     present_labels: set[str] = set()
     for (provider, account), account_groups in sorted(grouped.items()):
-        dates = sorted(str(group["transaction_date"]) for group in account_groups if group.get("transaction_date"))
+        dates = sorted(
+            str(group["transaction_date"])
+            for group in account_groups
+            if group.get("transaction_date")
+        )
         files = sorted(
             {
                 str(source.get("file"))
@@ -735,7 +778,9 @@ def statement_coverage_view(trip_dir: Path, state: dict | None = None) -> dict:
                 "latest_date": dates[-1] if dates else None,
                 "transaction_count": len(account_groups),
                 "match_eligible_count": sum(
-                    1 for group in account_groups if group.get("match_eligible") and not group.get("ignored")
+                    1
+                    for group in account_groups
+                    if group.get("match_eligible") and not group.get("ignored")
                 ),
                 "unresolved_duplicate_count": unresolved_duplicates,
                 "overlapping_files": overlaps,
@@ -762,7 +807,9 @@ def statement_coverage_view(trip_dir: Path, state: dict | None = None) -> dict:
                 }
             )
         if coverage_start and coverage_end:
-            earliest = date.fromisoformat(account["earliest_date"]) if account["earliest_date"] else None
+            earliest = (
+                date.fromisoformat(account["earliest_date"]) if account["earliest_date"] else None
+            )
             latest = date.fromisoformat(account["latest_date"]) if account["latest_date"] else None
             if not earliest or not latest:
                 gaps.append(
@@ -916,10 +963,14 @@ def set_invoice_review(
     if not state:
         raise ValueError("Run invoice and statement sync before reviewing invoices.")
     if state.get("input_fingerprint") != reconciliation_input_fingerprint(trip_dir):
-        raise ValueError("Receipts or statements changed after the last sync. Sync again before reviewing invoices.")
+        raise ValueError(
+            "Receipts or statements changed after the last sync. Sync again before reviewing invoices."
+        )
 
     extracted = state.get("extracted_expenses") or state.get("expenses") or []
-    extracted_invoice = next((item for item in extracted if item.get("source_file") == source_file), None)
+    extracted_invoice = next(
+        (item for item in extracted if item.get("source_file") == source_file), None
+    )
     if not extracted_invoice:
         raise FileNotFoundError("The invoice is no longer present in the reconciliation snapshot.")
 
@@ -1085,23 +1136,21 @@ def serialized_candidate_score(expense: dict, transaction: dict, estimated_cad: 
         expense_currency = str(expense.get("currency") or "").upper()
         cad_amount = transaction.get("cad_amount")
         if (
-            isinstance(purchase_amount, (int, float))
-            and purchase_currency == expense_currency
-            and close_amount(share, abs(float(purchase_amount)))
-        ):
-            score += 0.55
-            exact_amount = True
-        elif (
-            isinstance(estimated_cad, (int, float))
-            and isinstance(cad_amount, (int, float))
-            and close_fx_amount(float(estimated_cad), abs(float(cad_amount)))
-        ):
-            score += 0.55
-            exact_amount = True
-        elif (
-            expense_currency == "CAD"
-            and isinstance(cad_amount, (int, float))
-            and close_amount(share, abs(float(cad_amount)))
+            (
+                isinstance(purchase_amount, (int, float))
+                and purchase_currency == expense_currency
+                and close_amount(share, abs(float(purchase_amount)))
+            )
+            or (
+                isinstance(estimated_cad, (int, float))
+                and isinstance(cad_amount, (int, float))
+                and close_fx_amount(float(estimated_cad), abs(float(cad_amount)))
+            )
+            or (
+                expense_currency == "CAD"
+                and isinstance(cad_amount, (int, float))
+                and close_amount(share, abs(float(cad_amount)))
+            )
         ):
             score += 0.55
             exact_amount = True
@@ -1128,7 +1177,11 @@ def serialized_card_total_gap_percent(expense: dict, transaction: dict) -> int |
     expense_currency = str(expense.get("currency") or "").upper()
     purchase_currency = str(transaction.get("purchase_currency") or "").upper()
     purchase_amount = transaction.get("purchase_amount")
-    if expense_currency and expense_currency == purchase_currency and isinstance(purchase_amount, (int, float)):
+    if (
+        expense_currency
+        and expense_currency == purchase_currency
+        and isinstance(purchase_amount, (int, float))
+    ):
         return card_total_gap_percent(share, abs(float(purchase_amount)))
     cad_amount = transaction.get("cad_amount")
     if expense_currency == "CAD" and isinstance(cad_amount, (int, float)):
@@ -1141,9 +1194,13 @@ def serialized_candidate_reason(expense: dict, transaction: dict) -> str:
     delta = days_between(expense.get("date"), transaction.get("transaction_date"))
     vendor = str(expense.get("vendor") or "").lower()
     description = str(transaction.get("description") or "").lower()
-    merchant_similarity = SequenceMatcher(None, vendor, description).ratio() if vendor and description else 0.0
+    merchant_similarity = (
+        SequenceMatcher(None, vendor, description).ratio() if vendor and description else 0.0
+    )
     if gap is not None and delta == 0 and merchant_similarity >= 0.35:
-        return f"Same merchant and date; receipt is {gap}% below the card total, possibly tax or tip."
+        return (
+            f"Same merchant and date; receipt is {gap}% below the card total, possibly tax or tip."
+        )
     if gap is not None:
         return f"Receipt is {gap}% below the card total; review tax or tip."
     if delta == 0:
@@ -1210,10 +1267,17 @@ def reconciliation_view(trip_dir: Path, state: dict | None = None) -> dict:
                     allocation_expenses.add(expense_file)
                     cad_totals_by_expense[expense_file] += float(allocation.get("cad_amount") or 0)
                     original_amount = allocation.get("original_amount")
-                    if not isinstance(original_amount, (int, float)) and len(reimbursable_allocations) == 1:
+                    if (
+                        not isinstance(original_amount, (int, float))
+                        and len(reimbursable_allocations) == 1
+                    ):
                         original_amount = transaction.get("purchase_amount")
                     purchase_currency = str(transaction.get("purchase_currency") or "").upper()
-                    if isinstance(original_amount, (int, float)) and original_amount and purchase_currency:
+                    if (
+                        isinstance(original_amount, (int, float))
+                        and original_amount
+                        and purchase_currency
+                    ):
                         purchase_totals_by_expense[expense_file] += abs(float(original_amount))
                         purchase_currencies_by_expense[expense_file].add(purchase_currency)
         expense = (
@@ -1231,7 +1295,11 @@ def reconciliation_view(trip_dir: Path, state: dict | None = None) -> dict:
                 cad_totals_by_expense[expense_file] += transaction["cad_amount"]
                 purchase_amount = transaction.get("purchase_amount")
                 purchase_currency = str(transaction.get("purchase_currency") or "").upper()
-                if isinstance(purchase_amount, (int, float)) and purchase_amount and purchase_currency:
+                if (
+                    isinstance(purchase_amount, (int, float))
+                    and purchase_amount
+                    and purchase_currency
+                ):
                     purchase_totals_by_expense[expense_file] += abs(float(purchase_amount))
                     purchase_currencies_by_expense[expense_file].add(purchase_currency)
             else:
@@ -1277,14 +1345,8 @@ def reconciliation_view(trip_dir: Path, state: dict | None = None) -> dict:
         if transaction.get("match_eligible")
         and not transaction.get("ignored")
         and (
-            (
-                transaction.get("allocations")
-                and transaction.get("allocation_status") != "balanced"
-            )
-            or (
-                not transaction.get("allocations")
-                and not transaction.get("expense_file")
-            )
+            (transaction.get("allocations") and transaction.get("allocation_status") != "balanced")
+            or (not transaction.get("allocations") and not transaction.get("expense_file"))
             or transaction.get("normalization_status") in {"review", "possible_duplicate"}
             or (
                 not transaction.get("allocations")
@@ -1352,7 +1414,8 @@ def reconciliation_view(trip_dir: Path, state: dict | None = None) -> dict:
             expense.get("cad_amount_used") is not None,
             (
                 statement_purchase_amount
-                if expense.get("cad_source") in {
+                if expense.get("cad_source")
+                in {
                     "statement",
                     "statement_aggregated",
                     "allocation",
@@ -1367,7 +1430,8 @@ def reconciliation_view(trip_dir: Path, state: dict | None = None) -> dict:
             expense,
             (
                 statement_purchase_amount
-                if expense.get("cad_source") in {
+                if expense.get("cad_source")
+                in {
                     "statement",
                     "statement_aggregated",
                     "allocation",
@@ -1431,7 +1495,9 @@ def reconciliation_view(trip_dir: Path, state: dict | None = None) -> dict:
     policy_warnings = trip_policy_warnings(trip_dir, expenses, transactions)
     unresolved_policy_warnings = sum(1 for warning in policy_warnings if not warning["resolved"])
     needs_review += unresolved_policy_warnings
-    unmatched_expenses = [expense for expense in expenses if expense["source_file"] not in matched_files]
+    unmatched_expenses = [
+        expense for expense in expenses if expense["source_file"] not in matched_files
+    ]
     return {
         "available": True,
         "stale": not reconciliation_is_fresh(trip_dir, state),
@@ -1455,10 +1521,7 @@ def reconciliation_view(trip_dir: Path, state: dict | None = None) -> dict:
                 and not item.get("ignored")
                 and (
                     item.get("expense_file")
-                    or (
-                        item.get("allocations")
-                        and item.get("allocation_status") == "balanced"
-                    )
+                    or (item.get("allocations") and item.get("allocation_status") == "balanced")
                 )
             ),
             "audit_transaction_count": sum(
@@ -1524,9 +1587,13 @@ def aggregate_transaction_groups(
         eligible = [leg for leg in legs if leg.match_eligible]
         representative = eligible[0] if eligible else legs[0]
         purchase_currency = common_value([leg.purchase_currency for leg in eligible])
-        purchase_amount = sum_values([leg.purchase_amount for leg in eligible]) if purchase_currency else None
+        purchase_amount = (
+            sum_values([leg.purchase_amount for leg in eligible]) if purchase_currency else None
+        )
         completeness = representative.cad_completeness
-        cad_amount = sum_values([leg.cad_amount for leg in eligible]) if completeness == "complete" else None
+        cad_amount = (
+            sum_values([leg.cad_amount for leg in eligible]) if completeness == "complete" else None
+        )
         rate_values = {
             round(float(leg.cad_conversion_rate), 10)
             for leg in eligible
@@ -1546,18 +1613,11 @@ def aggregate_transaction_groups(
         }
         conversion_sources = list(
             dict.fromkeys(
-                leg.cad_conversion_source
-                for leg in eligible
-                if leg.cad_conversion_source
+                leg.cad_conversion_source for leg in eligible if leg.cad_conversion_source
             )
         )
         conversion_source_urls = list(
-            dict.fromkeys(
-                url
-                for leg in eligible
-                for url in leg.cad_conversion_source_urls
-                if url
-            )
+            dict.fromkeys(url for leg in eligible for url in leg.cad_conversion_source_urls if url)
         )
         expense_id = common_value([leg.expense_id for leg in eligible])
         suggested_id = common_value([leg.suggested_expense_id for leg in eligible])
@@ -1618,13 +1678,13 @@ def aggregate_transaction_groups(
                 "cad_conversion_source_urls": conversion_source_urls,
                 "match_eligible": bool(eligible),
                 "expense_file": source_file_key(expense.source_file) if expense else None,
-                "suggested_expense_file": source_file_key(suggested.source_file) if suggested else None,
+                "suggested_expense_file": source_file_key(suggested.source_file)
+                if suggested
+                else None,
                 "match_status": status,
                 "match_confidence": max((leg.match_confidence for leg in legs), default=0.0),
                 "auto_match_confidence": max((leg.match_confidence for leg in legs), default=0.0),
-                "match_review_reason": common_value(
-                    [leg.match_review_reason for leg in eligible]
-                )
+                "match_review_reason": common_value([leg.match_review_reason for leg in eligible])
                 or "",
                 "normalization_status": normalization_status,
                 "review_note": " ".join(notes),
@@ -1637,8 +1697,7 @@ def aggregate_transaction_groups(
                 "allocation_status": "none",
                 "source_files": sorted({leg.source_file.name for leg in legs}),
                 "source_rows": [
-                    {"file": leg.source_file.name, "row": leg.source_row}
-                    for leg in legs
+                    {"file": leg.source_file.name, "row": leg.source_row} for leg in legs
                 ],
                 "funding_legs": [
                     {
@@ -1663,7 +1722,14 @@ def aggregate_transaction_groups(
                 "funding_leg_count": len(legs),
             }
         )
-    return sorted(result, key=lambda item: (item["transaction_date"] or "9999-99-99", item["description"], item["group_id"]))
+    return sorted(
+        result,
+        key=lambda item: (
+            item["transaction_date"] or "9999-99-99",
+            item["description"],
+            item["group_id"],
+        ),
+    )
 
 
 def serialize_expense(expense: Expense) -> dict:
@@ -1753,10 +1819,12 @@ def normalize_ivado_statement_files(paths: list[Path]) -> NormalizationResult:
                     account_label=path.stem,
                     description=transaction.description,
                     transaction_type="refund"
-                    if isinstance(transaction.amount_cad, (int, float)) and transaction.amount_cad < 0
+                    if isinstance(transaction.amount_cad, (int, float))
+                    and transaction.amount_cad < 0
                     else "purchase",
                     direction="in"
-                    if isinstance(transaction.amount_cad, (int, float)) and transaction.amount_cad < 0
+                    if isinstance(transaction.amount_cad, (int, float))
+                    and transaction.amount_cad < 0
                     else "out",
                     match_eligible=transaction.amount_cad is not None,
                     purchase_amount=purchase_amount,
@@ -1764,7 +1832,9 @@ def normalize_ivado_statement_files(paths: list[Path]) -> NormalizationResult:
                     settlement_amount=transaction.amount_cad,
                     settlement_currency="CAD",
                     cad_amount=transaction.amount_cad,
-                    cad_completeness="complete" if transaction.amount_cad is not None else "incomplete",
+                    cad_completeness="complete"
+                    if transaction.amount_cad is not None
+                    else "incomplete",
                     normalization_status="ok",
                 )
             )
@@ -1810,7 +1880,11 @@ def ivado_statement_transactions_from_reconciliation(
 def serialized_extraction_status(expense: dict) -> str:
     if expense.get("amount") is None or not expense.get("currency"):
         return "manual"
-    if not expense.get("date") or not expense.get("vendor") or expense.get("vendor") == "Unknown supplier":
+    if (
+        not expense.get("date")
+        or not expense.get("vendor")
+        or expense.get("vendor") == "Unknown supplier"
+    ):
         return "review"
     return "review" if expense.get("review_note") else "ok"
 
@@ -1821,7 +1895,9 @@ def expense_label(expense: dict | None) -> str | None:
     vendor = expense.get("vendor") or expense.get("source_file") or "Unknown invoice"
     amount = expense.get("amount")
     currency = expense.get("currency") or ""
-    amount_label = f"{amount:,.2f} {currency}" if isinstance(amount, (int, float)) else "amount missing"
+    amount_label = (
+        f"{amount:,.2f} {currency}" if isinstance(amount, (int, float)) else "amount missing"
+    )
     date = expense.get("date") or "date missing"
     return f"{vendor} · {amount_label} · {date}"
 
@@ -1926,14 +2002,20 @@ def reconciliation_input_fingerprint(trip_dir: Path) -> str:
     for path in list_receipt_files(receipts_folder):
         stat = path.stat()
         source_name = relative_source_name(receipts_folder, path)
-        digest.update(f"{receipts_folder.name}/{source_name}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8"))
+        digest.update(
+            f"{receipts_folder.name}/{source_name}|{stat.st_size}|{stat.st_mtime_ns}".encode()
+        )
     statements_folder = trip_statements_dir(trip_dir)
     if statements_folder.exists():
         for path in sorted(
-            item for item in statements_folder.iterdir() if item.is_file() and not item.name.startswith(".")
+            item
+            for item in statements_folder.iterdir()
+            if item.is_file() and not item.name.startswith(".")
         ):
             stat = path.stat()
-            digest.update(f"{statements_folder.name}/{path.name}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8"))
+            digest.update(
+                f"{statements_folder.name}/{path.name}|{stat.st_size}|{stat.st_mtime_ns}".encode()
+            )
     date_settings = trip_dir / STATEMENT_SETTINGS_FILE
     if date_settings.is_file():
         digest.update(date_settings.read_bytes())
@@ -1955,12 +2037,7 @@ def load_reconciliation_state(trip_dir: Path) -> dict | None:
 
 def save_reconciliation_state(trip_dir: Path, state: dict) -> None:
     path = trip_dir / RECONCILIATION_FILE
-    temporary = trip_dir / f".{RECONCILIATION_FILE}.{uuid.uuid4().hex}.tmp"
-    try:
-        temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    write_json_atomic(path, state)
 
 
 def emit_progress(

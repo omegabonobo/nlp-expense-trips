@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from openpyxl import load_workbook
 
 from nlp_expenses.trip_manifest import (
+    CONTRACT_SCHEMA,
     build_trip_manifest_records,
     validate_manifest_records,
     write_trip_manifest,
@@ -18,11 +19,18 @@ from nlp_expenses.trips import ensure_trip
 from nlp_expenses.workbook import build_ivado_claim_workbook
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SCHEMA_PATH = REPO_ROOT / "contracts" / "trip-reimbursement-manifest.v3.schema.json"
+SCHEMA_PATH = CONTRACT_SCHEMA
 EXAMPLE_PATH = REPO_ROOT / "examples" / "ivado-trip-manifest-v3.ndjson"
 
 
 class InterprojectContractTests(unittest.TestCase):
+    def test_contract_schema_is_available_as_package_data(self):
+        self.assertTrue(SCHEMA_PATH.is_file())
+        self.assertEqual(
+            json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))["$id"],
+            "urn:arvine-labs:expenses:trip-reimbursement-manifest:3.0.0",
+        )
+
     def test_ivado_adapter_lists_a_whole_receipt_exclusion(self):
         with tempfile.TemporaryDirectory() as tmp:
             trip = Path(tmp)
@@ -135,9 +143,7 @@ class InterprojectContractTests(unittest.TestCase):
             self.assertEqual(report["N9"].value, 90.0)
             items = workbook["Receipt Items"]
             wine = next(
-                row
-                for row in items.iter_rows(min_row=2, values_only=True)
-                if row[6] == "Wine"
+                row for row in items.iter_rows(min_row=2, values_only=True) if row[6] == "Wine"
             )
             self.assertEqual(wine[4], 3)
             self.assertEqual(wine[8], 10.0)
@@ -189,10 +195,7 @@ class InterprojectContractTests(unittest.TestCase):
 
     def test_consumer_contract_copy_matches_when_repo_is_present(self):
         consumer_schema = (
-            REPO_ROOT.parent.parent
-            / "arvine-accounting-expenses"
-            / "contracts"
-            / SCHEMA_PATH.name
+            REPO_ROOT.parent.parent / "arvine-accounting-expenses" / "contracts" / SCHEMA_PATH.name
         )
         if not consumer_schema.exists():
             self.skipTest("arvine-accounting-expenses checkout is not present")
@@ -294,10 +297,7 @@ class InterprojectContractTests(unittest.TestCase):
             self.assertNotIn("sponsor", records[1])
 
             output = write_trip_manifest(root, trip, view=view)
-            written = [
-                json.loads(line)
-                for line in output.read_text(encoding="utf-8").splitlines()
-            ]
+            written = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
             self.assertEqual(written, records)
 
             consumer_parser = (

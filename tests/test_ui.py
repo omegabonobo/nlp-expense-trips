@@ -64,7 +64,9 @@ class UITests(unittest.TestCase):
         self.assertEqual(other.get("/").status_code, 403)
         other.get("/?token=secret")
         self.assertEqual(
-            other.post("/api/trips", json={"month": "2026-07", "description": "Montreal"}).status_code,
+            other.post(
+                "/api/trips", json={"month": "2026-07", "description": "Montreal"}
+            ).status_code,
             403,
         )
 
@@ -108,19 +110,24 @@ class UITests(unittest.TestCase):
         self.assertIn("Download standard CSV", html)
         self.assertIn("/static/standard-statement-template.csv", html)
         self.assertNotIn('name="quality"', html)
-        self.assertRegex(html, r'<input type="radio" name="receipt-quality" value="best"[^>]*disabled')
+        self.assertRegex(
+            html, r'<input type="radio" name="receipt-quality" value="best"[^>]*disabled'
+        )
         self.assertIn(str((self.root / ".env").resolve()), html)
 
     def test_standard_statement_template_is_downloadable(self):
         response = self.client.get("/static/standard-statement-template.csv")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            response.get_data(as_text=True).strip(),
-            (
-                "transaction_date,description,purchase_amount,purchase_currency,"
-                "cad_amount,transaction_type,posted_date,account,cardholder,category"
-            ),
-        )
+        try:
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                response.get_data(as_text=True).strip(),
+                (
+                    "transaction_date,description,purchase_amount,purchase_currency,"
+                    "cad_amount,transaction_type,posted_date,account,cardholder,category"
+                ),
+            )
+        finally:
+            response.close()
 
     def test_best_quality_controls_are_enabled_when_key_is_configured(self):
         trip = ensure_trip(self.root, "202607_montreal", mode="arvine")
@@ -130,7 +137,9 @@ class UITests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
         self.assertIn("OpenAI key saved", html)
-        self.assertRegex(html, r'<input type="radio" name="receipt-quality" value="best"[^>]*checked')
+        self.assertRegex(
+            html, r'<input type="radio" name="receipt-quality" value="best"[^>]*checked'
+        )
 
     def test_file_state_endpoint_detects_files_added_outside_the_ui(self):
         trip = ensure_trip(self.root, "202607_montreal", mode="arvine")
@@ -319,7 +328,9 @@ class UITests(unittest.TestCase):
             headers=self.headers,
         )
         self.assertEqual(updated.status_code, 200)
-        self.assertEqual(updated.get_json()["trip"]["metadata"]["business_purpose"], "Client workshop")
+        self.assertEqual(
+            updated.get_json()["trip"]["metadata"]["business_purpose"], "Client workshop"
+        )
 
         exception = self.client.post(
             f"/api/trips/{trip.name}/policy-exception",
@@ -370,6 +381,7 @@ class UITests(unittest.TestCase):
         )
         self.assertEqual(downloaded.status_code, 200)
         self.assertTrue(downloaded.data.startswith(b"PK"))
+        downloaded.close()
 
         archived = self.client.post(
             f"/api/trips/{trip.name}/archive",
@@ -381,10 +393,7 @@ class UITests(unittest.TestCase):
 
     def test_ambiguous_statement_date_convention_can_be_selected(self):
         trip = ensure_trip(self.root, "202607_ambiguous-date", mode="arvine")
-        statement = (
-            b"Date,Description,Amount,Currency\n"
-            b"07/01/2026,Ambiguous purchase,10,CAD\n"
-        )
+        statement = b"Date,Description,Amount,Currency\n07/01/2026,Ambiguous purchase,10,CAD\n"
         uploaded = self.client.post(
             f"/api/trips/{trip.name}/upload/statements",
             data={"files": (BytesIO(statement), "ambiguous.csv")},
@@ -549,9 +558,7 @@ class UITests(unittest.TestCase):
         expense_report = ivado_workbook["Expense Report"]
         self.assertEqual(expense_report["H9"].value, 95)
         self.assertEqual(expense_report["N9"].value, 95)
-        statement_headers = [
-            cell.value for cell in ivado_workbook["Card Statements"][1]
-        ]
+        statement_headers = [cell.value for cell in ivado_workbook["Card Statements"][1]]
         self.assertEqual(
             statement_headers[-7:],
             [
@@ -566,9 +573,7 @@ class UITests(unittest.TestCase):
         )
         receipt_items = ivado_workbook["Receipt Items"]
         alcohol_row = next(
-            row
-            for row in receipt_items.iter_rows(min_row=2, values_only=True)
-            if row[6] == "Wine"
+            row for row in receipt_items.iter_rows(min_row=2, values_only=True) if row[6] == "Wine"
         )
         self.assertEqual(alcohol_row[10], "Yes")
         self.assertEqual(alcohol_row[12], "No")
@@ -673,7 +678,9 @@ class UITests(unittest.TestCase):
 
         current = self.client.get(f"/api/trips/{trip.name}").get_json()["trip"]["line_item_review"]
         cocktail = next(
-            item for item in current["receipts"][0]["line_items"] if item["description"] == "French 75"
+            item
+            for item in current["receipts"][0]["line_items"]
+            if item["description"] == "French 75"
         )
         updated = self.client.post(
             f"/api/trips/{trip.name}/line-items/item",
@@ -882,8 +889,7 @@ class UITests(unittest.TestCase):
         receipt = trip / "expenses_receipts" / "cafe.pdf"
         receipt.write_bytes(b"fixture")
         (trip / "card_statements" / "card.csv").write_text(
-            "Date,Description,Amount,Foreign Spend Amount\n"
-            "2026-07-01,CAFE,75,50 AUD\n",
+            "Date,Description,Amount,Foreign Spend Amount\n2026-07-01,CAFE,75,50 AUD\n",
             encoding="utf-8",
         )
         expense = Expense(
@@ -906,9 +912,9 @@ class UITests(unittest.TestCase):
             self.assertEqual(started.status_code, 202)
             self.wait_for_job(started.get_json()["job"]["id"])
 
-        reconciliation = self.client.get(
-            f"/api/trips/{trip.name}/reconciliation"
-        ).get_json()["reconciliation"]
+        reconciliation = self.client.get(f"/api/trips/{trip.name}/reconciliation").get_json()[
+            "reconciliation"
+        ]
         self.assertTrue(reconciliation["available"])
         self.assertEqual(reconciliation["summary"]["matched_invoice_count"], 1)
         self.assertEqual(reconciliation["expenses"][0]["cad_amount_used"], 75)
@@ -988,7 +994,9 @@ class UITests(unittest.TestCase):
             headers=self.headers,
         )
         self.assertEqual(unscanned_reconciliation.status_code, 400)
-        self.assertIn("Scan the current receipts in Step 3", unscanned_reconciliation.get_json()["error"])
+        self.assertIn(
+            "Scan the current receipts in Step 3", unscanned_reconciliation.get_json()["error"]
+        )
 
         save_line_item_review(trip, [expense])
         with patch("nlp_expenses.generator.parse_arvine_receipt", return_value=expense):
@@ -1152,8 +1160,7 @@ class UITests(unittest.TestCase):
         receipt.write_bytes(b"fixture")
         for filename in ("one.csv", "two.csv"):
             (trip / "card_statements" / filename).write_text(
-                "Date,Description,Amount,Currency\n"
-                "2026-07-01,CLIENT CAFE,10,CAD\n",
+                "Date,Description,Amount,Currency\n2026-07-01,CLIENT CAFE,10,CAD\n",
                 encoding="utf-8",
             )
         expense = Expense(
@@ -1174,7 +1181,9 @@ class UITests(unittest.TestCase):
                 headers=self.headers,
             )
             self.wait_for_job(started.get_json()["job"]["id"])
-        view = self.client.get(f"/api/trips/{trip.name}/reconciliation").get_json()["reconciliation"]
+        view = self.client.get(f"/api/trips/{trip.name}/reconciliation").get_json()[
+            "reconciliation"
+        ]
         duplicate = next(item for item in view["transactions"] if item["possible_duplicate"])
 
         rejected = self.client.post(
@@ -1185,7 +1194,11 @@ class UITests(unittest.TestCase):
         self.assertEqual(rejected.status_code, 400)
         saved = self.client.post(
             f"/api/trips/{trip.name}/reconciliation/transaction-decision",
-            json={"group_id": duplicate["group_id"], "action": "ignore", "note": "Overlapping export"},
+            json={
+                "group_id": duplicate["group_id"],
+                "action": "ignore",
+                "note": "Overlapping export",
+            },
             headers=self.headers,
         )
         self.assertEqual(saved.status_code, 200)
@@ -1225,7 +1238,9 @@ class UITests(unittest.TestCase):
                 headers=self.headers,
             )
             self.wait_for_job(started.get_json()["job"]["id"])
-        view = self.client.get(f"/api/trips/{trip.name}/reconciliation").get_json()["reconciliation"]
+        view = self.client.get(f"/api/trips/{trip.name}/reconciliation").get_json()[
+            "reconciliation"
+        ]
         unrelated = next(item for item in view["transactions"] if "SPOTIFY" in item["description"])
 
         page = self.client.get(f"/?trip={trip.name}")
@@ -1267,8 +1282,7 @@ class UITests(unittest.TestCase):
         receipt = trip / "expenses_receipts" / "hotel.pdf"
         receipt.write_bytes(b"fixture")
         (trip / "card_statements" / "card.csv").write_text(
-            "Date,Description,Amount,Currency,Account\n"
-            "2026-07-01,HOTEL,100,CAD,1234\n",
+            "Date,Description,Amount,Currency,Account\n2026-07-01,HOTEL,100,CAD,1234\n",
             encoding="utf-8",
         )
         expense = Expense(
@@ -1326,7 +1340,9 @@ class UITests(unittest.TestCase):
 
     def test_accounting_profile_api_updates_trip_and_can_become_default(self):
         trip = ensure_trip(self.root, "202607_profile-api", mode="arvine")
-        profile = self.client.get(f"/api/trips/{trip.name}").get_json()["trip"]["accounting_profile"]
+        profile = self.client.get(f"/api/trips/{trip.name}").get_json()["trip"][
+            "accounting_profile"
+        ]
         profile.update(
             {
                 "company_legal_name": "Example Corp.",
@@ -1349,7 +1365,9 @@ class UITests(unittest.TestCase):
         self.assertEqual(applied["meal_deduction_pct"], 0.65)
 
         later = ensure_trip(self.root, "202608_later-profile", mode="arvine")
-        inherited = self.client.get(f"/api/trips/{later.name}").get_json()["trip"]["accounting_profile"]
+        inherited = self.client.get(f"/api/trips/{later.name}").get_json()["trip"][
+            "accounting_profile"
+        ]
         self.assertEqual(inherited["company_legal_name"], "Example Corp.")
         self.assertEqual(inherited["counter_account"], "Corporate Card Payable")
 
@@ -1358,8 +1376,7 @@ class UITests(unittest.TestCase):
         receipt = trip / "expenses_receipts" / "hotel.pdf"
         receipt.write_bytes(b"fixture")
         (trip / "card_statements" / "card.csv").write_text(
-            "Date,Description,Amount,Currency\n"
-            "2026-07-01,HOTEL PACKAGE,300,CAD\n",
+            "Date,Description,Amount,Currency\n2026-07-01,HOTEL PACKAGE,300,CAD\n",
             encoding="utf-8",
         )
         expense = Expense(
@@ -1379,7 +1396,9 @@ class UITests(unittest.TestCase):
                 headers=self.headers,
             )
             self.wait_for_job(started.get_json()["job"]["id"])
-        view = self.client.get(f"/api/trips/{trip.name}/reconciliation").get_json()["reconciliation"]
+        view = self.client.get(f"/api/trips/{trip.name}/reconciliation").get_json()[
+            "reconciliation"
+        ]
         group_id = view["transactions"][0]["group_id"]
 
         draft = self.client.post(
@@ -1388,7 +1407,12 @@ class UITests(unittest.TestCase):
                 "group_id": group_id,
                 "allocations": [
                     {"type": "purchase", "invoice_file": "hotel.pdf", "cad_amount": 250},
-                    {"type": "personal", "category": "Personal", "cad_amount": 25, "note": "Personal"},
+                    {
+                        "type": "personal",
+                        "category": "Personal",
+                        "cad_amount": 25,
+                        "note": "Personal",
+                    },
                 ],
             },
             headers=self.headers,
@@ -1496,8 +1520,11 @@ class UITests(unittest.TestCase):
         )
         warnings: list[str] = []
         output = trip / "expense_review_fallback.xlsx"
-        with patch("nlp_expenses.generator.get_openai_settings", return_value=("sk-test", "gpt-test")), patch(
-            "nlp_expenses.generator.parse_receipt", return_value=expense
+        with (
+            patch(
+                "nlp_expenses.generator.get_openai_settings", return_value=("sk-test", "gpt-test")
+            ),
+            patch("nlp_expenses.generator.parse_receipt", return_value=expense),
         ):
             result = generate_review(
                 trip,

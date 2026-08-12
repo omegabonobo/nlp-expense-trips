@@ -7,8 +7,8 @@ from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
-from nlp_expenses.trips import ensure_trip, trip_mode
 from nlp_expenses.extraction.text import HEIC_AVAILABLE
+from nlp_expenses.trips import ensure_trip, trip_mode
 from nlp_expenses.ui_services import (
     change_trip_mode,
     create_trip,
@@ -27,7 +27,10 @@ from nlp_expenses.ui_services import (
 
 class UIServiceTests(unittest.TestCase):
     def test_trip_name_creation_and_default_arvine_mode(self):
-        self.assertEqual(create_trip_name("2026-07", "Montréal Client Meetings"), "202607_montreal-client-meetings")
+        self.assertEqual(
+            create_trip_name("2026-07", "Montréal Client Meetings"),
+            "202607_montreal-client-meetings",
+        )
         with self.assertRaises(ValueError):
             create_trip_name("2026-13", "Montreal")
         with tempfile.TemporaryDirectory() as tmp:
@@ -42,15 +45,21 @@ class UIServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             trip = ensure_trip(root, "202607_montreal", mode="arvine")
-            first = store_upload(root, trip.name, "receipts", "café receipt.pdf", BytesIO(b"%PDF-first"))
+            first = store_upload(
+                root, trip.name, "receipts", "café receipt.pdf", BytesIO(b"%PDF-first")
+            )
             self.assertEqual(first.status, "uploaded")
             self.assertEqual(first.name, "cafe_receipt.pdf")
 
-            duplicate = store_upload(root, trip.name, "receipts", "copy.pdf", BytesIO(b"%PDF-first"))
+            duplicate = store_upload(
+                root, trip.name, "receipts", "copy.pdf", BytesIO(b"%PDF-first")
+            )
             self.assertEqual(duplicate.status, "duplicate")
             self.assertEqual(duplicate.name, first.name)
 
-            collision = store_upload(root, trip.name, "receipts", "café receipt.pdf", BytesIO(b"%PDF-second"))
+            collision = store_upload(
+                root, trip.name, "receipts", "café receipt.pdf", BytesIO(b"%PDF-second")
+            )
             self.assertEqual(collision.name, "cafe_receipt-2.pdf")
             remove_source_file(root, trip.name, "receipts", collision.name)
             self.assertFalse((trip / "expenses_receipts" / collision.name).exists())

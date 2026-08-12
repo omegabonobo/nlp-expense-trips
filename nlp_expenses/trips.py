@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import json
-import os
 import re
-import uuid
 from pathlib import Path
+
+from nlp_expenses.storage import write_json_atomic
 
 TRIP_NAME_RE = re.compile(r"^\d{6}_[A-Za-z0-9][A-Za-z0-9_-]*$")
 RECEIPTS_DIR = "expenses_receipts"
@@ -127,9 +127,4 @@ def load_trip_config(trip_dir: Path) -> dict:
 
 def save_trip_config(trip_dir: Path, data: dict) -> None:
     config_path = trip_dir / TRIP_CONFIG
-    temporary = trip_dir / f".{TRIP_CONFIG}.{uuid.uuid4().hex}.tmp"
-    try:
-        temporary.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.replace(temporary, config_path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    write_json_atomic(config_path, data)

@@ -10,8 +10,8 @@ from nlp_expenses.tax_lines import SYSTEM_TAX_LINES, tax_line_type
 
 from .receipts import (
     SUPPORTED_CURRENCIES,
-    apply_missing_date_fallback,
     append_note,
+    apply_missing_date_fallback,
     heuristic_parse_receipt,
     money_matches_in_line,
     receipt_date_candidates,
@@ -19,14 +19,17 @@ from .receipts import (
 )
 from .text import extract_text
 
-
-CANADIAN_MARKERS = re.compile(r"\b(?:canada|québec|quebec|montreal|montréal|toronto|ontario|vancouver|calgary)\b", re.I)
+CANADIAN_MARKERS = re.compile(
+    r"\b(?:canada|québec|quebec|montreal|montréal|toronto|ontario|vancouver|calgary)\b", re.I
+)
 PROVINCE_MARKERS = {
     "QC": re.compile(r"\b(?i:québec|quebec|montreal|montréal)\b|\bQC\b"),
     "ON": re.compile(r"\b(?i:ontario|toronto|ottawa)\b|\bON\b"),
     "BC": re.compile(r"\b(?i:british columbia|vancouver|victoria)\b|\bBC\b"),
     "AB": re.compile(r"\b(?i:alberta|calgary|edmonton)\b|\bAB\b"),
 }
+
+
 def parse_arvine_receipt(
     path: Path,
     use_llm: bool = False,
@@ -43,7 +46,9 @@ def parse_arvine_receipt(
             parsed = llm
     apply_missing_date_fallback(parsed, path, raw_text)
     if method == "empty":
-        parsed.review_note = append_note(parsed.review_note, "No extractable text/OCR output; review manually.")
+        parsed.review_note = append_note(
+            parsed.review_note, "No extractable text/OCR output; review manually."
+        )
     normalize_arvine_line_items(parsed)
     for item in parsed.line_items:
         item.included = True
@@ -64,8 +69,14 @@ def heuristic_parse_arvine_receipt(path: Path, raw_text: str) -> Expense:
     expense.gst_hst_number = find_registration_number(raw_text, "gst")
     expense.qst_number = find_registration_number(raw_text, "qst")
     expense.subtotal = find_subtotal(raw_text)
-    if expense.subtotal is None and expense.amount is not None and (expense.gst_hst is not None or expense.qst is not None):
-        expense.subtotal = round(expense.amount - (expense.gst_hst or 0.0) - (expense.qst or 0.0), 2)
+    if (
+        expense.subtotal is None
+        and expense.amount is not None
+        and (expense.gst_hst is not None or expense.qst is not None)
+    ):
+        expense.subtotal = round(
+            expense.amount - (expense.gst_hst or 0.0) - (expense.qst or 0.0), 2
+        )
     expense.country, expense.province = infer_location(raw_text, expense.currency)
     normalize_arvine_line_items(expense)
     expense.tax_documentation_status = tax_documentation_status(expense)
@@ -97,20 +108,28 @@ def normalize_arvine_line_items(expense: Expense) -> None:
     extracted_tax_lines: dict[str, LineItem] = {}
     purchase_items = []
     for item in expense.line_items:
-        kind = item.line_type if item.line_type in SYSTEM_TAX_LINES else tax_line_type(item.description)
+        kind = (
+            item.line_type
+            if item.line_type in SYSTEM_TAX_LINES
+            else tax_line_type(item.description)
+        )
         if kind:
             extracted_tax_lines.setdefault(kind, item)
-        elif (
-            expense.expense_type == "meal"
-            and item.description not in {"Unreconciled meal item - review", "Alcohol adjustment - manual"}
-        ):
+        elif expense.expense_type == "meal" and item.description not in {
+            "Unreconciled meal item - review",
+            "Alcohol adjustment - manual",
+        }:
             purchase_items.append(item)
 
     items = purchase_items
     for kind, label in SYSTEM_TAX_LINES.items():
         structured_amount = getattr(expense, kind)
-        extracted_amount = extracted_tax_lines.get(kind).amount if extracted_tax_lines.get(kind) else None
-        amount = round(float(structured_amount if structured_amount is not None else extracted_amount or 0), 2)
+        extracted_amount = (
+            extracted_tax_lines.get(kind).amount if extracted_tax_lines.get(kind) else None
+        )
+        amount = round(
+            float(structured_amount if structured_amount is not None else extracted_amount or 0), 2
+        )
         setattr(expense, kind, amount)
         items.append(
             LineItem(
@@ -152,7 +171,9 @@ def find_tax_amount(text: str, label_pattern: str) -> float | None:
             continue
         if re.search(r"\b(?:no|number|registration|reg)\b", line, re.I):
             continue
-        values = [match.amount for match in money_matches_in_line(line) if abs(match.amount) < 100000]
+        values = [
+            match.amount for match in money_matches_in_line(line) if abs(match.amount) < 100000
+        ]
         if values:
             return round(values[-1], 2)
     return None
@@ -230,7 +251,9 @@ def arvine_quality_score(expense: Expense) -> float:
     score += 1.5 if expense.supplier_name and expense.supplier_name != "Unknown supplier" else 0.0
     score += 1.5 if expense.amount is not None else 0.0
     score += 1.0 if expense.currency in SUPPORTED_CURRENCIES else 0.0
-    score += 0.5 if expense.expense_type in {"flight", "hotel", "transport", "meal", "other"} else 0.0
+    score += (
+        0.5 if expense.expense_type in {"flight", "hotel", "transport", "meal", "other"} else 0.0
+    )
     score += min(expense.confidence, 1.0)
     return score
 
@@ -326,7 +349,14 @@ def llm_parse_arvine_receipt(
                 },
                 {"role": "user", "content": content},
             ],
-            text={"format": {"type": "json_schema", "name": "arvine_receipt", "strict": True, "schema": schema}},
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "arvine_receipt",
+                    "strict": True,
+                    "schema": schema,
+                }
+            },
         )
         data = json.loads(response.output_text)
     except Exception:
@@ -347,9 +377,7 @@ def llm_parse_arvine_receipt(
                 amount=item.get("amount"),
                 included=True,
                 confidence=float(data.get("confidence") or 0.75),
-                review_note=(
-                    "Review OpenAI-extracted line item." if include_images else ""
-                ),
+                review_note=("Review OpenAI-extracted line item." if include_images else ""),
             )
             for item in data.get("line_items", [])
         ],

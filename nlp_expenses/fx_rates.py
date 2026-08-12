@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import json
-import os
-import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from nlp_expenses.storage import write_json_atomic
 
 FX_CACHE_FILE = ".nlp-expenses-fx-rates.json"
 BANK_OF_CANADA_API_BASE = "https://www.bankofcanada.ca/valet/observations"
@@ -71,7 +70,7 @@ class WeeklyCadFxResolver:
                 source="Transaction currency is CAD",
                 source_urls=[],
                 observations=[],
-                fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                fetched_at=datetime.now(UTC).isoformat(timespec="seconds"),
             )
 
         key = cache_key(normalized_currency, week_start)
@@ -88,7 +87,7 @@ class WeeklyCadFxResolver:
         return rate
 
     def _fetch_rate(self, currency: str, week_start: date, week_end: date) -> WeeklyCadRate:
-        fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        fetched_at = datetime.now(UTC).isoformat(timespec="seconds")
         if currency == "QAR":
             usd_rate, observations, api_url = self._bank_of_canada_weekly_average(
                 "USD",
@@ -139,7 +138,14 @@ class WeeklyCadFxResolver:
         )
         try:
             payload = self.fetch_json(api_url)
-        except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as exc:
+        except (
+            HTTPError,
+            URLError,
+            TimeoutError,
+            OSError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
             raise FxRateUnavailable(
                 f"Bank of Canada did not provide a weekly {currency}/CAD rate for "
                 f"{week_start.isoformat()} to {week_end.isoformat()}."
@@ -186,16 +192,7 @@ def load_fx_cache(path: Path) -> dict:
 
 
 def save_fx_cache(path: Path, cache: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.parent / f".{FX_CACHE_FILE}.{uuid.uuid4().hex}.tmp"
-    try:
-        temporary.write_text(
-            json.dumps(cache, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    write_json_atomic(path, cache)
 
 
 def weekly_rate_from_dict(value: dict) -> WeeklyCadRate:

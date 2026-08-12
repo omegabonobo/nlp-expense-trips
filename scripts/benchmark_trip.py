@@ -47,7 +47,9 @@ def main() -> None:
     root = Path.cwd().resolve()
     trip = args.trip.resolve()
     if trip.parent != root / "trips" or not trip.is_dir():
-        raise SystemExit("Benchmark trip must be an existing folder directly under this project's trips/.")
+        raise SystemExit(
+            "Benchmark trip must be an existing folder directly under this project's trips/."
+        )
     if trip_mode(trip) != "ivado":
         raise SystemExit("This benchmark command currently supports IVADO trips only.")
     qualities = args.qualities or ["basic", "best"]
@@ -108,7 +110,9 @@ def run_quality(root: Path, trip: Path, quality: str, run_stamp: str) -> dict:
     apply_line_item_review(trip, expenses, require_fresh=True)
 
     transactions = parse_all_statements(trip_statements_dir(trip))
-    output = unique_path(trip / f"expense_review_{trip.name}_ivado_{run_stamp}_{quality}-benchmark.xlsx")
+    output = unique_path(
+        trip / f"expense_review_{trip.name}_ivado_{run_stamp}_{quality}-benchmark.xlsx"
+    )
     build_workbook(trip, expenses, transactions, output_path=output)
     openai_success_count = sum(
         1
@@ -117,7 +121,9 @@ def run_quality(root: Path, trip: Path, quality: str, run_stamp: str) -> dict:
     )
     fallback_only = quality == "best" and openai_success_count == 0
     if fallback_only:
-        fallback_output = unique_path(output.with_name(output.name.replace("_best-benchmark", "_best-fallback-benchmark")))
+        fallback_output = unique_path(
+            output.with_name(output.name.replace("_best-benchmark", "_best-fallback-benchmark"))
+        )
         output.replace(fallback_output)
         output = fallback_output
     record_generated_workbook(root, trip, output)
@@ -130,7 +136,9 @@ def run_quality(root: Path, trip: Path, quality: str, run_stamp: str) -> dict:
     matched = [row for row in transactions if row.expense_id]
     suggested = [row for row in transactions if row.suggested_expense_id]
     return {
-        "status": "fallback_only" if fallback_only else ("complete_with_warnings" if warnings else "complete"),
+        "status": "fallback_only"
+        if fallback_only
+        else ("complete_with_warnings" if warnings else "complete"),
         "elapsed_seconds": round(time.perf_counter() - started, 2),
         "workbook": output.name,
         "workbook_bytes": output.stat().st_size,
@@ -141,7 +149,8 @@ def run_quality(root: Path, trip: Path, quality: str, run_stamp: str) -> dict:
         "vendor_coverage": sum(
             1
             for row in receipt_rows
-            if row.get("vendor") and str(row["vendor"]).lower() not in {"unknown", "unknown supplier"}
+            if row.get("vendor")
+            and str(row["vendor"]).lower() not in {"unknown", "unknown supplier"}
         ),
         "total_coverage": count_number(receipt_rows, "receipt_total"),
         "currency_coverage": count_present(receipt_rows, "currency"),
@@ -194,7 +203,10 @@ def compare_results(results: dict[str, dict]) -> dict:
             "reason": "Run both Basic and Best quality in the same benchmark before comparing fields.",
         }
     if basic.get("status") == "error" or best.get("status") == "error":
-        return {"available": False, "reason": "Both runs must complete before fields can be compared."}
+        return {
+            "available": False,
+            "reason": "Both runs must complete before fields can be compared.",
+        }
     if best.get("openai_success_receipt_count", 0) == 0:
         return {
             "available": False,
@@ -205,7 +217,15 @@ def compare_results(results: dict[str, dict]) -> dict:
         }
     basic_receipts = basic.get("receipts", {})
     best_receipts = best.get("receipts", {})
-    fields = ["date", "vendor", "expense_type", "receipt_total", "currency", "line_count", "alcohol_lines"]
+    fields = [
+        "date",
+        "vendor",
+        "expense_type",
+        "receipt_total",
+        "currency",
+        "line_count",
+        "alcohol_lines",
+    ]
     differences = {}
     for field in fields:
         changed = [

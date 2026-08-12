@@ -50,7 +50,9 @@ def meal_expense(path: Path) -> Expense:
                 alcohol_reason="recognized cocktail",
                 alcohol_matched_term="french 75",
             ),
-            LineItem(description="GST/HST", amount=5.0, included=True, confidence=1.0, synthetic=True),
+            LineItem(
+                description="GST/HST", amount=5.0, included=True, confidence=1.0, synthetic=True
+            ),
             LineItem(description="QST", amount=10.0, included=True, confidence=1.0, synthetic=True),
         ],
     )
@@ -99,7 +101,9 @@ class LineItemReviewTests(unittest.TestCase):
             )["receipts"][0]
             self.assertEqual(changed["status"], "ok")
             self.assertFalse(changed["reviewed"])
-            changed_line = next(item for item in changed["line_items"] if item["line_id"] == first_line["line_id"])
+            changed_line = next(
+                item for item in changed["line_items"] if item["line_id"] == first_line["line_id"]
+            )
             self.assertFalse(changed_line["reviewed"])
 
     def test_default_payer_override_survives_rescan_and_reset_restores_default(self):
@@ -209,7 +213,9 @@ class LineItemReviewTests(unittest.TestCase):
 
             view = line_item_review_view(trip)
             cocktail = next(
-                item for item in view["receipts"][0]["line_items"] if item["description"] == "French 75"
+                item
+                for item in view["receipts"][0]["line_items"]
+                if item["description"] == "French 75"
             )
             self.assertTrue(cocktail["is_alcohol"])
             self.assertFalse(cocktail["included"])
@@ -230,7 +236,9 @@ class LineItemReviewTests(unittest.TestCase):
                 {"is_alcohol": False},
             )
             cocktail = next(
-                item for item in updated["receipts"][0]["line_items"] if item["description"] == "French 75"
+                item
+                for item in updated["receipts"][0]["line_items"]
+                if item["description"] == "French 75"
             )
             self.assertFalse(cocktail["is_alcohol"])
             self.assertTrue(cocktail["included"])
@@ -245,7 +253,9 @@ class LineItemReviewTests(unittest.TestCase):
 
             reset = reset_receipt_review(trip, receipt.name)
             cocktail = next(
-                item for item in reset["receipts"][0]["line_items"] if item["description"] == "French 75"
+                item
+                for item in reset["receipts"][0]["line_items"]
+                if item["description"] == "French 75"
             )
             self.assertFalse(cocktail["included"])
             self.assertFalse(cocktail["inclusion_overridden"])
@@ -301,7 +311,9 @@ class LineItemReviewTests(unittest.TestCase):
             save_line_item_review(trip, [expense])
 
             reviewed = line_item_review_view(trip)["receipts"][0]
-            tax_lines = {item["system_type"]: item for item in reviewed["line_items"] if item["system_type"]}
+            tax_lines = {
+                item["system_type"]: item for item in reviewed["line_items"] if item["system_type"]
+            }
             self.assertEqual(set(tax_lines), {"gst_hst", "qst"})
             self.assertEqual(tax_lines["gst_hst"]["description"], "GST/HST")
             self.assertEqual(tax_lines["gst_hst"]["amount"], 0.80)
@@ -310,7 +322,9 @@ class LineItemReviewTests(unittest.TestCase):
             updated = set_expense_review(trip, receipt.name, {"gst_hst": 1.00, "qst": ""})[
                 "receipts"
             ][0]
-            tax_lines = {item["system_type"]: item for item in updated["line_items"] if item["system_type"]}
+            tax_lines = {
+                item["system_type"]: item for item in updated["line_items"] if item["system_type"]
+            }
             self.assertEqual(updated["gst_hst"], 1.00)
             self.assertEqual(updated["qst"], 0.0)
             self.assertEqual(tax_lines["gst_hst"]["amount"], 1.00)
@@ -411,7 +425,9 @@ class LineItemReviewTests(unittest.TestCase):
             self.assertEqual([receipt["source_file"] for receipt in view["receipts"]], [first.name])
 
             dinner = next(
-                item for item in view["receipts"][0]["line_items"] if item["description"] == "Dinner"
+                item
+                for item in view["receipts"][0]["line_items"]
+                if item["description"] == "Dinner"
             )
             updated = set_line_item_review(
                 trip,
@@ -471,7 +487,9 @@ class LineItemReviewTests(unittest.TestCase):
             save_line_item_review(trip, [meal_expense(receipt)])
             view = line_item_review_view(trip)
             cocktail = next(
-                item for item in view["receipts"][0]["line_items"] if item["description"] == "French 75"
+                item
+                for item in view["receipts"][0]["line_items"]
+                if item["description"] == "French 75"
             )
             self.assertTrue(cocktail["included"])
             self.assertFalse(cocktail["is_alcohol"])
@@ -507,7 +525,9 @@ class LineItemReviewTests(unittest.TestCase):
             ]
             save_line_item_review(trip, [first], llm_mode="required")
             reviewed = line_item_review_view(trip)
-            alcohol = next(item for item in reviewed["receipts"][0]["line_items"] if item["is_alcohol"])
+            alcohol = next(
+                item for item in reviewed["receipts"][0]["line_items"] if item["is_alcohol"]
+            )
             set_line_item_review(
                 trip,
                 receipt.name,
@@ -607,7 +627,9 @@ class LineItemReviewTests(unittest.TestCase):
             save_line_item_review(arvine, [expense])
             view = line_item_review_view(arvine)
             cocktail = next(
-                item for item in view["receipts"][0]["line_items"] if item["description"] == "French 75"
+                item
+                for item in view["receipts"][0]["line_items"]
+                if item["description"] == "French 75"
             )
             with self.assertRaisesRegex(ValueError, "Arvine includes every receipt line"):
                 set_line_item_review(

@@ -3,20 +3,24 @@ from __future__ import annotations
 import os
 import subprocess
 import uuid
+from contextlib import suppress
 from datetime import date, datetime
 from pathlib import Path
 
 from openpyxl import Workbook
 from openpyxl.formatting.rule import CellIsRule, FormulaRule
-from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Protection, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 
-from nlp_expenses.matching import apply_manual_matches, match_normalized_transactions, match_transactions
+from nlp_expenses.matching import (
+    apply_manual_matches,
+    match_normalized_transactions,
+    match_transactions,
+)
 from nlp_expenses.models import Expense, NormalizedTransaction, StatementTransaction
 from nlp_expenses.trip_metadata import trip_metadata
 from nlp_expenses.trips import source_file_key
-
 
 EXPENSE_HEADERS = [
     "expense_id",
@@ -265,21 +269,29 @@ def save_workbook_atomic(workbook: Workbook, out_path: Path) -> Path:
 
 def expense_line_review_values(expense: Expense) -> dict:
     amounts = [item.amount for item in expense.line_items if item.amount is not None]
-    included = [item.amount for item in expense.line_items if item.included and item.amount is not None]
+    included = [
+        item.amount for item in expense.line_items if item.included and item.amount is not None
+    ]
     line_total = (
         expense.line_item_total
         if expense.line_item_total is not None
-        else round(sum(amounts), 2) if amounts else None
+        else round(sum(amounts), 2)
+        if amounts
+        else None
     )
     included_total = (
         expense.included_line_total
         if expense.included_line_total is not None
-        else round(sum(included), 2) if amounts else None
+        else round(sum(included), 2)
+        if amounts
+        else None
     )
     excluded_total = (
         expense.excluded_line_total
         if expense.excluded_line_total is not None
-        else round((line_total or 0) - (included_total or 0), 2) if amounts else None
+        else round((line_total or 0) - (included_total or 0), 2)
+        if amounts
+        else None
     )
     if expense.line_item_review_status:
         ratio = expense.claimable_ratio
@@ -307,16 +319,16 @@ def write_arvine_detail_sheet(ws, expenses: list[Expense], accounting_profile: d
         line_review = expense_line_review_values(expense)
         is_meal = str(expense.expense_type or "").startswith("meal")
         claimable_formula = (
-            f'=IF($A{row}=FALSE,0,IF(COUNTIFS(expense_line_items!$A:$A,$B{row},'
+            f"=IF($A{row}=FALSE,0,IF(COUNTIFS(expense_line_items!$A:$A,$B{row},"
             f'expense_line_items!$I:$I,FALSE,expense_line_items!$F:$F,">0")>0,'
             f'IF(OR($AL{row}="",$AL{row}=0),1/MAX(1,$AP{row}),'
-            f'MAX(0,MIN(1,$AM{row}/$AL{row}/MAX(1,$AP{row})))),'
-            f'1/MAX(1,$AP{row})))'
+            f"MAX(0,MIN(1,$AM{row}/$AL{row}/MAX(1,$AP{row})))),"
+            f"1/MAX(1,$AP{row})))"
         )
         claimable_original_formula = (
-            f'IF(COUNTIFS(expense_line_items!$A:$A,$B{row},'
+            f"IF(COUNTIFS(expense_line_items!$A:$A,$B{row},"
             f'expense_line_items!$I:$I,FALSE,expense_line_items!$F:$F,">0")>0,'
-            f'$AM{row}/MAX(1,$AP{row}),$I{row}/MAX(1,$AP{row}))'
+            f"$AM{row}/MAX(1,$AP{row}),$I{row}/MAX(1,$AP{row}))"
         )
         commercial_use = accounting_profile["commercial_use_pct"]
         deductible_pct = (
@@ -353,16 +365,16 @@ def write_arvine_detail_sheet(ws, expenses: list[Expense], accounting_profile: d
                 deductible_pct,
                 tax_credit_pct,
                 (
-                    f'=IF(COUNTIFS(\'card_statements\'!$T$2:$T${statement_end},$B{row},\'card_statements\'!$M$2:$M${statement_end},TRUE)=0,"",'
-                    f'IF(COUNTIFS(\'card_statements\'!$T$2:$T${statement_end},$B{row},\'card_statements\'!$M$2:$M${statement_end},TRUE,'
+                    f"=IF(COUNTIFS('card_statements'!$T$2:$T${statement_end},$B{row},'card_statements'!$M$2:$M${statement_end},TRUE)=0,\"\","
+                    f"IF(COUNTIFS('card_statements'!$T$2:$T${statement_end},$B{row},'card_statements'!$M$2:$M${statement_end},TRUE,"
                     f'\'card_statements\'!$S$2:$S${statement_end},"<>complete")>0,"",'
-                    f'SUMIFS(\'card_statements\'!$R$2:$R${statement_end},\'card_statements\'!$T$2:$T${statement_end},$B{row},'
-                    f'\'card_statements\'!$M$2:$M${statement_end},TRUE)))'
+                    f"SUMIFS('card_statements'!$R$2:$R${statement_end},'card_statements'!$T$2:$T${statement_end},$B{row},"
+                    f"'card_statements'!$M$2:$M${statement_end},TRUE)))"
                 ),
                 (
                     f'=IF($T{row}<>"","manual",'
-                    f'IF(COUNTIFS(\'card_statements\'!$T$2:$T${statement_end},$B{row},\'card_statements\'!$M$2:$M${statement_end},TRUE)=0,"missing",'
-                    f'IF(COUNTIFS(\'card_statements\'!$T$2:$T${statement_end},$B{row},\'card_statements\'!$M$2:$M${statement_end},TRUE,'
+                    f"IF(COUNTIFS('card_statements'!$T$2:$T${statement_end},$B{row},'card_statements'!$M$2:$M${statement_end},TRUE)=0,\"missing\","
+                    f"IF(COUNTIFS('card_statements'!$T$2:$T${statement_end},$B{row},'card_statements'!$M$2:$M${statement_end},TRUE,"
                     f'\'card_statements\'!$S$2:$S${statement_end},"<>complete")>0,"incomplete","complete")))'
                 ),
                 expense.manual_cad_override,
@@ -370,9 +382,9 @@ def write_arvine_detail_sheet(ws, expenses: list[Expense], accounting_profile: d
                     f'=IF($T{row}<>"",ROUND($T{row}*${claimable_col}{row},2),'
                     f'IF(AND($R{row}<>"",$AS{row}<>""),'
                     f'ROUND(IF($AT{row}="statement_person_share",'
-                    f'$R{row}*${claimable_col}{row}*MAX(1,$AP{row}),'
+                    f"$R{row}*${claimable_col}{row}*MAX(1,$AP{row}),"
                     f'IF(OR($AT{row}="statement_receipt_total",$AT{row}="statement_aggregated"),'
-                    f'$R{row}*${claimable_col}{row},$R{row}/$AS{row}*{claimable_original_formula})),2),'
+                    f"$R{row}*${claimable_col}{row},$R{row}/$AS{row}*{claimable_original_formula})),2),"
                     f'IF($J{row}="CAD",ROUND($I{row}*${claimable_col}{row},2),"")))'
                 ),
                 (
@@ -391,11 +403,11 @@ def write_arvine_detail_sheet(ws, expenses: list[Expense], accounting_profile: d
                 source_file_key(expense.source_file),
                 arvine_extraction_status(expense),
                 (
-                    f'=IF(COUNTIF(\'card_statements\'!$T$2:$T${statement_end},$B{row})=0,"unmatched",'
-                    f'IF(COUNTIFS(\'card_statements\'!$T$2:$T${statement_end},$B{row},\'card_statements\'!$V$2:$V${statement_end},"auto")+'
-                    f'COUNTIFS(\'card_statements\'!$T$2:$T${statement_end},$B{row},\'card_statements\'!$V$2:$V${statement_end},"manual")+'
-                    f'COUNTIFS(\'card_statements\'!$T$2:$T${statement_end},$B{row},\'card_statements\'!$V$2:$V${statement_end},"allocation")+'
-                    f'COUNTIFS(\'card_statements\'!$T$2:$T${statement_end},$B{row},\'card_statements\'!$V$2:$V${statement_end},"matched")'
+                    f"=IF(COUNTIF('card_statements'!$T$2:$T${statement_end},$B{row})=0,\"unmatched\","
+                    f"IF(COUNTIFS('card_statements'!$T$2:$T${statement_end},$B{row},'card_statements'!$V$2:$V${statement_end},\"auto\")+"
+                    f"COUNTIFS('card_statements'!$T$2:$T${statement_end},$B{row},'card_statements'!$V$2:$V${statement_end},\"manual\")+"
+                    f"COUNTIFS('card_statements'!$T$2:$T${statement_end},$B{row},'card_statements'!$V$2:$V${statement_end},\"allocation\")+"
+                    f"COUNTIFS('card_statements'!$T$2:$T${statement_end},$B{row},'card_statements'!$V$2:$V${statement_end},\"matched\")"
                     f'>0,"matched","review"))'
                 ),
                 expense.tax_documentation_status or "review",
@@ -407,45 +419,45 @@ def write_arvine_detail_sheet(ws, expenses: list[Expense], accounting_profile: d
                 line_review["status"],
                 (
                     f'=IF(COUNTIF(expense_line_items!$A:$A,$B{row})=0,"",'
-                    f'SUMIFS(expense_line_items!$F:$F,expense_line_items!$A:$A,$B{row}))'
+                    f"SUMIFS(expense_line_items!$F:$F,expense_line_items!$A:$A,$B{row}))"
                 ),
                 (
                     f'=IF($AL{row}="","",SUMIFS(expense_line_items!$F:$F,'
-                    f'expense_line_items!$A:$A,$B{row},expense_line_items!$I:$I,TRUE))'
+                    f"expense_line_items!$A:$A,$B{row},expense_line_items!$I:$I,TRUE))"
                 ),
                 f'=IF($AL{row}="","",$AL{row}-$AM{row})',
                 claimable_formula,
                 max(1, int(expense.number_of_people or 1)),
                 (
-                    f'=IF(COUNTIFS(\'card_statements\'!$T$2:$T${statement_end},$B{row},'
-                    f'\'card_statements\'!$M$2:$M${statement_end},TRUE,'
+                    f"=IF(COUNTIFS('card_statements'!$T$2:$T${statement_end},$B{row},"
+                    f"'card_statements'!$M$2:$M${statement_end},TRUE,"
                     f'\'card_statements\'!$N$2:$N${statement_end},"<>")=0,"",'
-                    f'SUMIFS(\'card_statements\'!$N$2:$N${statement_end},'
-                    f'\'card_statements\'!$T$2:$T${statement_end},$B{row},'
-                    f'\'card_statements\'!$M$2:$M${statement_end},TRUE))'
+                    f"SUMIFS('card_statements'!$N$2:$N${statement_end},"
+                    f"'card_statements'!$T$2:$T${statement_end},$B{row},"
+                    f"'card_statements'!$M$2:$M${statement_end},TRUE))"
                 ),
                 (
                     f'=IF($AQ{row}="","",IFERROR(INDEX(\'card_statements\'!$O$2:$O${statement_end},'
-                    f'MATCH($B{row},\'card_statements\'!$T$2:$T${statement_end},0)),""))'
+                    f"MATCH($B{row},'card_statements'!$T$2:$T${statement_end},0)),\"\"))"
                 ),
                 (
                     f'=IF(OR($I{row}="",$I{row}=0),"",IF($T{row}<>"",$I{row},'
                     f'IF(AND($AQ{row}<>"",$AQ{row}<>0,$AR{row}=$J{row},'
-                    f'OR(COUNTIFS(\'card_statements\'!$T$2:$T${statement_end},$B{row},'
-                    f'\'card_statements\'!$M$2:$M${statement_end},TRUE)>1,'
-                    f'OR(ABS($AQ{row}-$I{row})<=MAX(2,ABS($I{row})*0.08),'
-                    f'AND($AP{row}>1,ABS($AQ{row}-$I{row}/$AP{row})'
-                    f'<=MAX(2,ABS($I{row}/$AP{row})*0.08))))),$AQ{row},$I{row})))'
+                    f"OR(COUNTIFS('card_statements'!$T$2:$T${statement_end},$B{row},"
+                    f"'card_statements'!$M$2:$M${statement_end},TRUE)>1,"
+                    f"OR(ABS($AQ{row}-$I{row})<=MAX(2,ABS($I{row})*0.08),"
+                    f"AND($AP{row}>1,ABS($AQ{row}-$I{row}/$AP{row})"
+                    f"<=MAX(2,ABS($I{row}/$AP{row})*0.08))))),$AQ{row},$I{row})))"
                 ),
                 (
                     f'=IF(OR($I{row}="",$I{row}=0),"unavailable",IF($T{row}<>"","manual_receipt_total",'
                     f'IF(OR($AQ{row}="",$AQ{row}=0),"receipt_total",'
                     f'IF($AR{row}<>$J{row},"receipt_fallback_currency",'
-                    f'IF(COUNTIFS(\'card_statements\'!$T$2:$T${statement_end},$B{row},'
-                    f'\'card_statements\'!$M$2:$M${statement_end},TRUE)>1,"statement_aggregated",'
+                    f"IF(COUNTIFS('card_statements'!$T$2:$T${statement_end},$B{row},"
+                    f"'card_statements'!$M$2:$M${statement_end},TRUE)>1,\"statement_aggregated\","
                     f'IF(ABS($AQ{row}-$I{row})<=MAX(2,ABS($I{row})*0.08),"statement_receipt_total",'
-                    f'IF(AND($AP{row}>1,ABS($AQ{row}-$I{row}/$AP{row})'
-                    f'<=MAX(2,ABS($I{row}/$AP{row})*0.08)),'
+                    f"IF(AND($AP{row}>1,ABS($AQ{row}-$I{row}/$AP{row})"
+                    f"<=MAX(2,ABS($I{row}/$AP{row})*0.08)),"
                     f'"statement_person_share","receipt_fallback_mismatch")))))))'
                 ),
             ],
@@ -463,7 +475,54 @@ def write_arvine_detail_sheet(ws, expenses: list[Expense], accounting_profile: d
     add_arvine_detail_validations(ws, detail_end)
     style_arvine_detail_rows(ws, detail_end)
     add_arvine_detail_highlights(ws, detail_end)
-    widths = [10, 20, 13, 24, 24, 14, 15, 10, 15, 10, 16, 14, 20, 19, 18, 17, 15, 18, 19, 20, 17, 12, 14, 13, 20, 17, 17, 16, 19, 25, 25, 26, 18, 21, 22, 48, 20, 16, 18, 18, 14, 18, 20, 18, 20, 26]
+    widths = [
+        10,
+        20,
+        13,
+        24,
+        24,
+        14,
+        15,
+        10,
+        15,
+        10,
+        16,
+        14,
+        20,
+        19,
+        18,
+        17,
+        15,
+        18,
+        19,
+        20,
+        17,
+        12,
+        14,
+        13,
+        20,
+        17,
+        17,
+        16,
+        19,
+        25,
+        25,
+        26,
+        18,
+        21,
+        22,
+        48,
+        20,
+        16,
+        18,
+        18,
+        14,
+        18,
+        20,
+        18,
+        20,
+        26,
+    ]
     set_widths(ws, widths)
 
 
@@ -575,7 +634,9 @@ def write_arvine_summary_sheet(ws, trip_dir: Path, accounting_profile: dict) -> 
             ws.cell(
                 warning_row,
                 23,
-                f"Exception: {warning['exception_note']}" if warning["resolved"] else "Needs review",
+                f"Exception: {warning['exception_note']}"
+                if warning["resolved"]
+                else "Needs review",
             )
     else:
         ws["V27"] = "No policy warnings"
@@ -599,20 +660,28 @@ def write_arvine_summary_sheet(ws, trip_dir: Path, accounting_profile: dict) -> 
 
     mapping = accounting_profile["account_mapping"]
     accounts = [
-        ("Airfare, accommodation, transport and other non-meal expense, excluding recoverable GST/QST", mapping["non_meal"]),
+        (
+            "Airfare, accommodation, transport and other non-meal expense, excluding recoverable GST/QST",
+            mapping["non_meal"],
+        ),
         ("Meal deductible portion, excluding recoverable GST/QST", mapping["meal_deductible"]),
-        ("Meal non-deductible portion, excluding recoverable GST/QST", mapping["meal_nondeductible"]),
+        (
+            "Meal non-deductible portion, excluding recoverable GST/QST",
+            mapping["meal_nondeductible"],
+        ),
         ("Recoverable GST/HST paid on travel and meals", mapping["gst_hst_receivable"]),
         ("Recoverable QST paid on travel and meals", mapping["qst_receivable"]),
     ]
     amount_formulas = [
-        '=SUMIFS(\'expense_detail\'!$AA$2:$AA$5000,\'expense_detail\'!$A$2:$A$5000,TRUE,\'expense_detail\'!$F$2:$F$5000,"<>meal")',
-        '=SUMIFS(\'expense_detail\'!$AB$2:$AB$5000,\'expense_detail\'!$A$2:$A$5000,TRUE,\'expense_detail\'!$F$2:$F$5000,"meal")',
-        '=SUMIFS(\'expense_detail\'!$AC$2:$AC$5000,\'expense_detail\'!$A$2:$A$5000,TRUE,\'expense_detail\'!$F$2:$F$5000,"meal")',
-        '=SUMIFS(\'expense_detail\'!$Y$2:$Y$5000,\'expense_detail\'!$A$2:$A$5000,TRUE)',
-        '=SUMIFS(\'expense_detail\'!$Z$2:$Z$5000,\'expense_detail\'!$A$2:$A$5000,TRUE)',
+        "=SUMIFS('expense_detail'!$AA$2:$AA$5000,'expense_detail'!$A$2:$A$5000,TRUE,'expense_detail'!$F$2:$F$5000,\"<>meal\")",
+        "=SUMIFS('expense_detail'!$AB$2:$AB$5000,'expense_detail'!$A$2:$A$5000,TRUE,'expense_detail'!$F$2:$F$5000,\"meal\")",
+        "=SUMIFS('expense_detail'!$AC$2:$AC$5000,'expense_detail'!$A$2:$A$5000,TRUE,'expense_detail'!$F$2:$F$5000,\"meal\")",
+        "=SUMIFS('expense_detail'!$Y$2:$Y$5000,'expense_detail'!$A$2:$A$5000,TRUE)",
+        "=SUMIFS('expense_detail'!$Z$2:$Z$5000,'expense_detail'!$A$2:$A$5000,TRUE)",
     ]
-    for offset, ((description, account), amount_formula) in enumerate(zip(accounts, amount_formulas), start=10):
+    for offset, ((description, account), amount_formula) in enumerate(
+        zip(accounts, amount_formulas, strict=True), start=10
+    ):
         ws.cell(offset, 1, "=$B$1")
         ws.cell(offset, 2, '=IF($B$3="","Expense report – "&$B$2,$B$3)')
         ws.cell(offset, 3, description)
@@ -634,16 +703,32 @@ def write_arvine_summary_sheet(ws, trip_dir: Path, accounting_profile: dict) -> 
     ws["A18"].font = Font(size=14, bold=True, color="1F4E78")
     checks = [
         ("Journal debits", "=O15", ""),
-        ("Shareholder reimbursement", '=SUMIFS(\'expense_detail\'!$U$2:$U$5000,\'expense_detail\'!$A$2:$A$5000,TRUE)', ""),
+        (
+            "Shareholder reimbursement",
+            "=SUMIFS('expense_detail'!$U$2:$U$5000,'expense_detail'!$A$2:$A$5000,TRUE)",
+            "",
+        ),
         ("Journal balance difference", "=B20-B21", '=IF(ABS(B22)<0.01,"OK","REVIEW")'),
-        ("Included receipts without a complete CAD amount", '=COUNTIFS(\'expense_detail\'!$A$2:$A$5000,TRUE,\'expense_detail\'!$U$2:$U$5000,"")', '=IF(B23=0,"OK","REVIEW")'),
+        (
+            "Included receipts without a complete CAD amount",
+            "=COUNTIFS('expense_detail'!$A$2:$A$5000,TRUE,'expense_detail'!$U$2:$U$5000,\"\")",
+            '=IF(B23=0,"OK","REVIEW")',
+        ),
         (
             "Included receipts without an acceptable statement match or manual override",
-            '=COUNTIFS(\'expense_detail\'!$A$2:$A$5000,TRUE,\'expense_detail\'!$T$2:$T$5000,"",\'expense_detail\'!$AH$2:$AH$5000,"<>matched")',
+            "=COUNTIFS('expense_detail'!$A$2:$A$5000,TRUE,'expense_detail'!$T$2:$T$5000,\"\",'expense_detail'!$AH$2:$AH$5000,\"<>matched\")",
             '=IF(B24=0,"OK","REVIEW")',
         ),
-        ("Tax-documentation warnings", '=COUNTIFS(\'expense_detail\'!$A$2:$A$5000,TRUE,\'expense_detail\'!$AI$2:$AI$5000,"review")', '=IF(B25=0,"OK","REVIEW")'),
-        ("Receipt-extraction warnings", '=COUNTIFS(\'expense_detail\'!$A$2:$A$5000,TRUE,\'expense_detail\'!$AG$2:$AG$5000,"<>ok")', '=IF(B26=0,"OK","REVIEW")'),
+        (
+            "Tax-documentation warnings",
+            "=COUNTIFS('expense_detail'!$A$2:$A$5000,TRUE,'expense_detail'!$AI$2:$AI$5000,\"review\")",
+            '=IF(B25=0,"OK","REVIEW")',
+        ),
+        (
+            "Receipt-extraction warnings",
+            "=COUNTIFS('expense_detail'!$A$2:$A$5000,TRUE,'expense_detail'!$AG$2:$AG$5000,\"<>ok\")",
+            '=IF(B26=0,"OK","REVIEW")',
+        ),
     ]
     for col, header in enumerate(("Check", "Value", "Status"), start=1):
         ws.cell(19, col, header)
@@ -672,7 +757,9 @@ def write_arvine_summary_sheet(ws, trip_dir: Path, accounting_profile: dict) -> 
         ws.cell(row, 1).font = Font(bold=True, color="1F4E78")
         ws.cell(row, 2).fill = input_fill
         ws.cell(row, 2).font = Font(color="0070C0")
-    ws.conditional_formatting.add("C22:C26", FormulaRule(formula=['$C22="REVIEW"'], fill=CHECK_FILL))
+    ws.conditional_formatting.add(
+        "C22:C26", FormulaRule(formula=['$C22="REVIEW"'], fill=CHECK_FILL)
+    )
     ws.freeze_panes = "A9"
     ws.sheet_view.showGridLines = False
     ws.auto_filter.ref = "A9:Q15"
@@ -706,7 +793,9 @@ def write_arvine_statement_sheet(
     expenses: list[Expense] | None = None,
 ) -> None:
     allocations_by_group = allocations_by_group or {}
-    expenses_by_file = {source_file_key(expense.source_file): expense for expense in (expenses or [])}
+    expenses_by_file = {
+        source_file_key(expense.source_file): expense for expense in (expenses or [])
+    }
     ws.append(ARVINE_STATEMENT_HEADERS)
     previous_group = None
     group_fill = None
@@ -786,7 +875,9 @@ def write_arvine_statement_sheet(
         )
         for allocation in allocations:
             expense = expenses_by_file.get(str(allocation.get("invoice_file") or ""))
-            reimbursable = allocation.get("type") in {"purchase", "refund", "fee"} and expense is not None
+            reimbursable = (
+                allocation.get("type") in {"purchase", "refund", "fee"} and expense is not None
+            )
             note_parts = [
                 f"Allocation {allocation.get('allocation_id')} ({allocation.get('type')}).",
                 str(allocation.get("note") or allocation.get("category") or "").strip(),
@@ -860,7 +951,10 @@ def write_arvine_statement_sheet(
         if any(ws.cell(row, col).value for col in (27, 33, 34)):
             ws.row_dimensions[row].height = 32
     if transactions or allocations_by_group:
-        status_validation = DataValidation(type="list", formula1='"unmatched,suggested,auto,manual,matched,ignored,allocation,allocated_raw"')
+        status_validation = DataValidation(
+            type="list",
+            formula1='"unmatched,suggested,auto,manual,matched,ignored,allocation,allocated_raw"',
+        )
         ws.add_data_validation(status_validation)
         status_validation.add(f"V2:V{end_row}")
     ws.conditional_formatting.add(
@@ -869,7 +963,10 @@ def write_arvine_statement_sheet(
     )
     ws.conditional_formatting.add(
         f"S2:S{end_row}",
-        FormulaRule(formula=['OR($S2="partial",$S2="incomplete")'], fill=PatternFill("solid", fgColor="FCE4D6")),
+        FormulaRule(
+            formula=['OR($S2="partial",$S2="incomplete")'],
+            fill=PatternFill("solid", fgColor="FCE4D6"),
+        ),
     )
     ws.conditional_formatting.add(
         f"Z2:Z{end_row}",
@@ -885,8 +982,40 @@ def write_arvine_statement_sheet(
     set_widths(
         ws,
         [
-            27, 31, 14, 14, 12, 14, 20, 32, 18, 16, 14, 12, 14, 17, 15, 18, 17,
-            15, 18, 22, 22, 16, 16, 28, 12, 20, 55, 19, 14, 14, 28, 18, 48, 60,
+            27,
+            31,
+            14,
+            14,
+            12,
+            14,
+            20,
+            32,
+            18,
+            16,
+            14,
+            12,
+            14,
+            17,
+            15,
+            18,
+            17,
+            15,
+            18,
+            22,
+            22,
+            16,
+            16,
+            28,
+            12,
+            20,
+            55,
+            19,
+            14,
+            14,
+            28,
+            18,
+            48,
+            60,
         ],
     )
 
@@ -896,9 +1025,13 @@ def add_arvine_detail_validations(ws, end_row: int) -> None:
         return
     boolean_validation = DataValidation(type="list", formula1='"TRUE,FALSE"')
     type_validation = DataValidation(type="list", formula1='"flight,hotel,transport,meal,other"')
-    currency_validation = DataValidation(type="list", formula1='"CAD,USD,AUD,EUR,GBP,IDR,VND,QAR,HKD,CHF"')
+    currency_validation = DataValidation(
+        type="list", formula1='"CAD,USD,AUD,EUR,GBP,IDR,VND,QAR,HKD,CHF"'
+    )
     pct_validation = DataValidation(type="decimal", operator="between", formula1="0", formula2="1")
-    people_validation = DataValidation(type="whole", operator="between", formula1="1", formula2="99")
+    people_validation = DataValidation(
+        type="whole", operator="between", formula1="1", formula2="99"
+    )
     for validation, target in [
         (boolean_validation, f"A2:A{end_row}"),
         (type_validation, f"F2:F{end_row}"),
@@ -913,7 +1046,27 @@ def add_arvine_detail_validations(ws, end_row: int) -> None:
 def style_arvine_detail_rows(ws, end_row: int) -> None:
     input_columns = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 20, 30, 31, 35, 36, 42}
     formula_columns = {
-        13, 18, 19, 21, 22, 23, 24, 25, 26, 27, 28, 29, 34, 38, 39, 40, 41, 43, 44, 45, 46
+        13,
+        18,
+        19,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        34,
+        38,
+        39,
+        40,
+        41,
+        43,
+        44,
+        45,
+        46,
     }
     for row in range(2, end_row + 1):
         for col in input_columns:
@@ -921,7 +1074,9 @@ def style_arvine_detail_rows(ws, end_row: int) -> None:
             ws.cell(row, col).font = Font(color="0070C0")
         for col in formula_columns:
             ws.cell(row, col).font = (
-                Font(color="008000") if col in {18, 19, 34, 38, 39, 40, 41} else Font(color="000000")
+                Font(color="008000")
+                if col in {18, 19, 34, 38, 39, 40, 41}
+                else Font(color="000000")
             )
         ws.cell(row, 3).number_format = "yyyy-mm-dd"
         for col in (9, 11, 12, 13, 18, 20, 21, 23, 24, 25, 26, 27, 28, 29, 43, 45):
@@ -933,13 +1088,18 @@ def style_arvine_detail_rows(ws, end_row: int) -> None:
         ws.cell(row, 41).number_format = "0.00%"
         ws.cell(row, 22).number_format = "0.000000"
         for col in range(1, len(ARVINE_DETAIL_HEADERS) + 1):
-            ws.cell(row, col).alignment = Alignment(vertical="top", wrap_text=col in {5, 30, 31, 36})
+            ws.cell(row, col).alignment = Alignment(
+                vertical="top", wrap_text=col in {5, 30, 31, 36}
+            )
 
 
 def add_arvine_detail_highlights(ws, end_row: int) -> None:
     ws.conditional_formatting.add(
         f"S2:S{end_row}",
-        FormulaRule(formula=['OR($S2="missing",$S2="incomplete")'], fill=PatternFill("solid", fgColor="FCE4D6")),
+        FormulaRule(
+            formula=['OR($S2="missing",$S2="incomplete")'],
+            fill=PatternFill("solid", fgColor="FCE4D6"),
+        ),
     )
     ws.conditional_formatting.add(
         f"AH2:AH{end_row}",
@@ -955,7 +1115,10 @@ def add_arvine_detail_highlights(ws, end_row: int) -> None:
     )
     ws.conditional_formatting.add(
         f"AK2:AK{end_row}",
-        FormulaRule(formula=['OR($AK2="review",$AK2="not_available")'], fill=PatternFill("solid", fgColor="FFF2CC")),
+        FormulaRule(
+            formula=['OR($AK2="review",$AK2="not_available")'],
+            fill=PatternFill("solid", fgColor="FFF2CC"),
+        ),
     )
     ws.conditional_formatting.add(
         f"AT2:AT{end_row}",
@@ -1016,14 +1179,14 @@ def write_expense_sheet(ws, expenses: list[Expense]) -> None:
     for idx, expense in enumerate(expenses, start=2):
         corrected_original_formula = (
             f'=IF($Q{idx}=FALSE,0,IF($F{idx}="","",'
-            f'IF(COUNTIFS(expense_line_items!$A:$A,$A{idx},expense_line_items!$I:$I,FALSE,'
+            f"IF(COUNTIFS(expense_line_items!$A:$A,$A{idx},expense_line_items!$I:$I,FALSE,"
             f'expense_line_items!$F:$F,">0")>0,'
-            f'SUMIFS(expense_line_items!$F:$F,expense_line_items!$A:$A,$A{idx},'
+            f"SUMIFS(expense_line_items!$F:$F,expense_line_items!$A:$A,$A{idx},"
             f'expense_line_items!$I:$I,TRUE)/IF(OR($I{idx}="",$I{idx}=0),1,$I{idx}),'
             f'$F{idx}/IF(OR($I{idx}="",$I{idx}=0),1,$I{idx}))))'
         )
         line_ratio_formula = (
-            f'IF(COUNTIFS(expense_line_items!$A:$A,$A{idx},expense_line_items!$I:$I,FALSE,'
+            f"IF(COUNTIFS(expense_line_items!$A:$A,$A{idx},expense_line_items!$I:$I,FALSE,"
             f'expense_line_items!$F:$F,">0")>0,'
             f'IF(OR($E{idx}="",$E{idx}=0),1,$J{idx}*MAX(1,$I{idx})/$E{idx}),1)'
         )
@@ -1045,7 +1208,7 @@ def write_expense_sheet(ws, expenses: list[Expense]) -> None:
                 corrected_original_formula,
                 (
                     f'=IF($R{idx}<>"",$R{idx},IF(COUNTIF(card_statements!$D:$D,$A{idx})=0,"",'
-                    f'SUMIFS(card_statements!$C:$C,card_statements!$D:$D,$A{idx})))'
+                    f"SUMIFS(card_statements!$C:$C,card_statements!$D:$D,$A{idx})))"
                 ),
                 (
                     f'=IF(OR($K{idx}="",$K{idx}=0),"",'
@@ -1055,7 +1218,7 @@ def write_expense_sheet(ws, expenses: list[Expense]) -> None:
                     f'=IF(OR($J{idx}="",$L{idx}=""),"",'
                     f'IF($W{idx}="statement_person_share",$K{idx}*{line_ratio_formula},'
                     f'IF(OR($W{idx}="statement_receipt_total",$W{idx}="statement_aggregated"),'
-                    f'$K{idx}*{line_ratio_formula}/MAX(1,$I{idx}),$J{idx}*$L{idx})))'
+                    f"$K{idx}*{line_ratio_formula}/MAX(1,$I{idx}),$J{idx}*$L{idx})))"
                 ),
                 source_file_key(expense.source_file),
                 extraction_status(expense),
@@ -1066,9 +1229,9 @@ def write_expense_sheet(ws, expenses: list[Expense]) -> None:
                 (
                     f'=IF($H{idx}="CAD",'
                     f'IF(COUNTIF(card_statements!$D:$D,$A{idx})=0,"",'
-                    f'SUMIFS(card_statements!$C:$C,card_statements!$D:$D,$A{idx})),'
+                    f"SUMIFS(card_statements!$C:$C,card_statements!$D:$D,$A{idx})),"
                     f'IF(COUNTIFS(card_statements!$D:$D,$A{idx},card_statements!$H:$H,">0")=0,"",'
-                    f'SUMIFS(card_statements!$H:$H,card_statements!$D:$D,$A{idx})))'
+                    f"SUMIFS(card_statements!$H:$H,card_statements!$D:$D,$A{idx})))"
                 ),
                 (
                     f'=IF($T{idx}="","",IF($H{idx}="CAD","CAD",'
@@ -1078,11 +1241,11 @@ def write_expense_sheet(ws, expenses: list[Expense]) -> None:
                     f'=IF($R{idx}<>"",IF(AND($F{idx}<>"",$F{idx}<>0),$F{idx},$E{idx}),'
                     f'IF(OR($F{idx}="",$F{idx}=0),$E{idx},'
                     f'IF(OR($T{idx}="",$T{idx}=0),$F{idx},'
-                    f'IF($U{idx}<>$H{idx},$F{idx},'
-                    f'IF(OR(COUNTIF(card_statements!$D:$D,$A{idx})>1,'
-                    f'ABS($T{idx}-$F{idx})<=MAX(2,ABS($F{idx})*0.08),'
-                    f'AND($I{idx}>1,ABS($T{idx}-$F{idx}/$I{idx})'
-                    f'<=MAX(2,ABS($F{idx}/$I{idx})*0.08))),$T{idx},$F{idx})))))'
+                    f"IF($U{idx}<>$H{idx},$F{idx},"
+                    f"IF(OR(COUNTIF(card_statements!$D:$D,$A{idx})>1,"
+                    f"ABS($T{idx}-$F{idx})<=MAX(2,ABS($F{idx})*0.08),"
+                    f"AND($I{idx}>1,ABS($T{idx}-$F{idx}/$I{idx})"
+                    f"<=MAX(2,ABS($F{idx}/$I{idx})*0.08))),$T{idx},$F{idx})))))"
                 ),
                 (
                     f'=IF($R{idx}<>"","manual_receipt_total",'
@@ -1090,16 +1253,18 @@ def write_expense_sheet(ws, expenses: list[Expense]) -> None:
                     f'IF($U{idx}<>$H{idx},"receipt_fallback_currency",'
                     f'IF(COUNTIF(card_statements!$D:$D,$A{idx})>1,"statement_aggregated",'
                     f'IF(ABS($T{idx}-$F{idx})<=MAX(2,ABS($F{idx})*0.08),"statement_receipt_total",'
-                    f'IF(AND($I{idx}>1,ABS($T{idx}-$F{idx}/$I{idx})'
-                    f'<=MAX(2,ABS($F{idx}/$I{idx})*0.08)),'
+                    f"IF(AND($I{idx}>1,ABS($T{idx}-$F{idx}/$I{idx})"
+                    f"<=MAX(2,ABS($F{idx}/$I{idx})*0.08)),"
                     f'"statement_person_share","receipt_fallback_mismatch"))))))'
                 ),
-            ]
+            ],
         )
     set_filter_range(ws, len(EXPENSE_HEADERS), max(len(expenses) + 1, 2))
     ws.freeze_panes = "A2"
     if expenses:
-        validation = DataValidation(type="whole", operator="between", formula1="1", formula2="99", allow_blank=False)
+        validation = DataValidation(
+            type="whole", operator="between", formula1="1", formula2="99", allow_blank=False
+        )
         validation.error = "Enter a whole number from 1 to 99."
         validation.errorTitle = "Invalid number of persons"
         ws.add_data_validation(validation)
@@ -1149,7 +1314,7 @@ def write_line_sheet(ws, expenses: list[Expense]) -> None:
                     source_file_key(expense.source_file),
                     item.confidence,
                     item.review_note,
-                ]
+                ],
             )
             row_count += 1
     set_filter_range(ws, len(LINE_HEADERS), max(row_count + 1, 2))
@@ -1180,7 +1345,7 @@ def write_statement_sheet(ws, transactions: list[StatementTransaction]) -> None:
                 transaction.source_file.name,
                 transaction.foreign_amount,
                 transaction.foreign_currency,
-            ]
+            ],
         )
     set_filter_range(ws, len(STATEMENT_HEADERS), max(len(transactions) + 1, 2))
     ws.freeze_panes = "A2"
@@ -1257,7 +1422,9 @@ def mark_review(cell) -> None:
 
 def fallback_line_item(expense: Expense):
     class FallbackLineItem:
-        description = "Receipt total" if expense.amount is not None else "Receipt total missing - review"
+        description = (
+            "Receipt total" if expense.amount is not None else "Receipt total missing - review"
+        )
         amount = expense.amount
         is_alcohol = False
         included = True
@@ -1290,14 +1457,15 @@ def set_filter_range(ws, width: int, height: int) -> None:
 
 def remove_macos_metadata(path: Path) -> None:
     for attr in ("com.apple.quarantine", "com.apple.provenance", "com.apple.lastuseddate#PS"):
-        try:
+        with suppress(AttributeError, OSError):
             os.removexattr(path, attr)
-        except (AttributeError, OSError):
-            pass
-        try:
-            subprocess.run(["xattr", "-d", attr, str(path)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
+        with suppress(OSError):
+            subprocess.run(
+                ["xattr", "-d", attr, str(path)],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
 
 
 def build_reimbursement_report_workbook(
@@ -1536,25 +1704,29 @@ def write_ivado_expense_report_sheet(ws, report: dict, receipts: list[dict]) -> 
         description = str(receipt.get("description") or receipt.get("expense_type") or "Expense")
         if float(receipt.get("ivado_excluded_cad") or 0) > 0.005:
             description = f"{description} — removed items in Receipt Items"
-        values = [
-            sequence,
-            receipt.get("document_date"),
-            receipt.get("vendor"),
-            description,
-            ivado_location(receipt),
-            "Yes",
-            (
-                ivado_original_claim_amount(receipt)
-                if str(receipt.get("currency") or "").upper() != "CAD"
-                else None
-            ),
-            claim_cad,
-        ] + [0.0] * 9 + [
-            tax_values["gst"],
-            tax_values["qst"],
-            tax_values["hst"],
-            tax_values["other"],
-        ]
+        values = (
+            [
+                sequence,
+                receipt.get("document_date"),
+                receipt.get("vendor"),
+                description,
+                ivado_location(receipt),
+                "Yes",
+                (
+                    ivado_original_claim_amount(receipt)
+                    if str(receipt.get("currency") or "").upper() != "CAD"
+                    else None
+                ),
+                claim_cad,
+            ]
+            + [0.0] * 9
+            + [
+                tax_values["gst"],
+                tax_values["qst"],
+                tax_values["hst"],
+                tax_values["other"],
+            ]
+        )
         values[category_column - 1] = category_amount
         for column, value in enumerate(values, start=1):
             ws.cell(row, column, value)
@@ -1602,8 +1774,7 @@ def write_consolidated_statement_sheet(ws, trip_dir: Path) -> None:
                 transaction.get("cad_conversion_route"),
                 transaction.get("cad_conversion_source"),
                 ", ".join(
-                    str(value)
-                    for value in transaction.get("cad_conversion_source_urls", [])
+                    str(value) for value in transaction.get("cad_conversion_source_urls", [])
                 ),
             ]
         )
@@ -1617,9 +1788,7 @@ def write_consolidated_statement_sheet(ws, trip_dir: Path) -> None:
 
 def write_ivado_receipt_items_sheet(ws, receipts: list[dict]) -> None:
     ws.append(IVADO_ITEM_HEADERS)
-    sequence = 0
-    for receipt in receipts:
-        sequence += 1
+    for sequence, receipt in enumerate(receipts, start=1):
         people = max(1, int(receipt.get("number_of_people") or 1))
         items = receipt.get("line_items") or [
             {
@@ -1638,12 +1807,16 @@ def write_ivado_receipt_items_sheet(ws, receipts: list[dict]) -> None:
             for item in items
             if item.get("included_in_arvine", True) and not item.get("included_in_ivado", True)
         ]
-        removed_original_total = sum(float(item.get("amount") or 0) / people for item in removed_items)
+        removed_original_total = sum(
+            float(item.get("amount") or 0) / people for item in removed_items
+        )
         removed_cad_total = float(receipt.get("ivado_excluded_cad") or 0)
         for item in items:
             amount = float(item.get("amount") or 0)
             share_amount = round(amount / people, 2)
-            removed = item.get("included_in_arvine", True) and not item.get("included_in_ivado", True)
+            removed = item.get("included_in_arvine", True) and not item.get(
+                "included_in_ivado", True
+            )
             removed_original = share_amount if removed else 0.0
             removed_cad = (
                 round(removed_cad_total * (removed_original / removed_original_total), 2)
@@ -1714,7 +1887,19 @@ def ivado_tax_values(receipt: dict, claim_cad: float) -> dict[str, float]:
     gst_hst_cad = round(float(receipt.get("gst") or 0) * fx_rate * claim_ratio, 2)
     qst_cad = round(float(receipt.get("qst") or 0) * fx_rate * claim_ratio, 2)
     province = str(receipt.get("province") or "").strip().upper()
-    if province in {"ON", "ONTARIO", "NB", "NEW BRUNSWICK", "NL", "NEWFOUNDLAND", "NS", "NOVA SCOTIA", "PE", "PEI", "PRINCE EDWARD ISLAND"}:
+    if province in {
+        "ON",
+        "ONTARIO",
+        "NB",
+        "NEW BRUNSWICK",
+        "NL",
+        "NEWFOUNDLAND",
+        "NS",
+        "NOVA SCOTIA",
+        "PE",
+        "PEI",
+        "PRINCE EDWARD ISLAND",
+    }:
         result["hst"] = min(claim_cad, gst_hst_cad)
     else:
         result["gst"] = min(claim_cad, gst_hst_cad)
@@ -1772,7 +1957,10 @@ def ivado_category_column(expense_type: object) -> int:
         return 12
     if "meal" in value or "food" in value or "restaurant" in value:
         return 14
-    if any(token in value for token in ("flight", "hotel", "transport", "taxi", "uber", "parking", "travel")):
+    if any(
+        token in value
+        for token in ("flight", "hotel", "transport", "taxi", "uber", "parking", "travel")
+    ):
         return 13
     if "office" in value:
         return 9
@@ -1806,13 +1994,13 @@ def style_minimal_report_workbook(workbook: Workbook) -> None:
         cell.fill = PatternFill("solid", fgColor="D9EAF7")
     for column in (9, 10, 11, 13, 14, 15, 16):
         for cell in report_ws[get_column_letter(column)][7:]:
-            cell.number_format = '#,##0.00;[Red]-#,##0.00'
+            cell.number_format = "#,##0.00;[Red]-#,##0.00"
     accounting_ws = workbook["Accounting Rows"]
     style_table_header(accounting_ws, 1, 2)
     accounting_ws.column_dimensions["A"].width = 28
     accounting_ws.column_dimensions["B"].width = 18
     for cell in accounting_ws["B"][1:]:
-        cell.number_format = '#,##0.00;[Red]-#,##0.00'
+        cell.number_format = "#,##0.00;[Red]-#,##0.00"
     workbook.calculation.fullCalcOnLoad = True
     workbook.calculation.forceFullCalc = True
     workbook.calculation.calcMode = "auto"
@@ -1847,7 +2035,7 @@ def style_ivado_workbook(workbook: Workbook) -> None:
         cell.fill = PatternFill("solid", fgColor="D9EAF7")
     for column in range(7, 24):
         for cell in report_ws[get_column_letter(column)][8:]:
-            cell.number_format = '#,##0.00;[Red]-#,##0.00'
+            cell.number_format = "#,##0.00;[Red]-#,##0.00"
     report_ws.conditional_formatting.add(
         f"W9:W{total_row}",
         CellIsRule(
@@ -1865,7 +2053,7 @@ def style_ivado_workbook(workbook: Workbook) -> None:
         style_table_header(ws, 1, header_count)
         for column in money_columns:
             for cell in ws[get_column_letter(column)][1:]:
-                cell.number_format = '#,##0.00;[Red]-#,##0.00'
+                cell.number_format = "#,##0.00;[Red]-#,##0.00"
         if ws_name == "Card Statements":
             for cell in ws["K"][1:]:
                 cell.number_format = "0.00000000"

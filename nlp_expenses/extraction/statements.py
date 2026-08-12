@@ -12,10 +12,11 @@ from nlp_expenses.models import StatementTransaction
 
 from .text import extract_text
 
-
 DATE_RE = re.compile(r"\b(\d{1,2})\s+([A-Za-z]{3,9})\.?\s+(20\d{2})\b")
 MONEY_RE = re.compile(r"^-?\$?\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})$")
-FOREIGN_RE = re.compile(r"(?P<amount>-?\d{1,3}(?:,\d{3})*(?:\.\d{2})|-?\d+)\s+(?P<currency>[A-Z ]+)")
+FOREIGN_RE = re.compile(
+    r"(?P<amount>-?\d{1,3}(?:,\d{3})*(?:\.\d{2})|-?\d+)\s+(?P<currency>[A-Z ]+)"
+)
 
 
 def parse_statement_file(path: Path) -> list[StatementTransaction]:
@@ -62,7 +63,9 @@ def parse_xlsx_statement(path: Path) -> list[StatementTransaction]:
     headers = [str(v or "").strip() for v in rows[header_index]]
     dict_rows = []
     for row in rows[header_index + 1 :]:
-        dict_rows.append({headers[i]: row[i] if i < len(row) else None for i in range(len(headers))})
+        dict_rows.append(
+            {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}
+        )
     return rows_to_transactions(path, dict_rows)
 
 
@@ -78,7 +81,9 @@ def parse_xls_statement(path: Path) -> list[StatementTransaction]:
     headers = [str(v or "").strip() for v in rows[header_index]]
     dict_rows = []
     for row in rows[header_index + 1 :]:
-        dict_rows.append({headers[i]: row[i] if i < len(row) else None for i in range(len(headers))})
+        dict_rows.append(
+            {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}
+        )
     return rows_to_transactions(path, dict_rows)
 
 
@@ -86,10 +91,18 @@ def rows_to_transactions(path: Path, rows: list[dict]) -> list[StatementTransact
     transactions: list[StatementTransaction] = []
     for row in rows:
         normalized = {normalize_key(k): v for k, v in row.items()}
-        date = first_value(normalized, ["date", "transaction_date", "posted_date", "date_processed"])
-        description = first_value(normalized, ["description", "merchant", "details", "transaction", "name"])
-        amount = first_value(normalized, ["amount", "cad_amount", "debit", "charge", "charges_adjustments"])
-        foreign = first_value(normalized, ["foreign_spend_amount", "foreign_amount", "original_amount"])
+        date = first_value(
+            normalized, ["date", "transaction_date", "posted_date", "date_processed"]
+        )
+        description = first_value(
+            normalized, ["description", "merchant", "details", "transaction", "name"]
+        )
+        amount = first_value(
+            normalized, ["amount", "cad_amount", "debit", "charge", "charges_adjustments"]
+        )
+        foreign = first_value(
+            normalized, ["foreign_spend_amount", "foreign_amount", "original_amount"]
+        )
         parsed_amount = parse_money(amount)
         if parsed_amount is None:
             continue
@@ -162,7 +175,9 @@ def parse_text_cad_amount(line: str) -> float | None:
 
 def strings_text(path: Path) -> str:
     try:
-        result = subprocess.run(["strings", "-n", "3", str(path)], check=True, capture_output=True, text=True)
+        result = subprocess.run(
+            ["strings", "-n", "3", str(path)], check=True, capture_output=True, text=True
+        )
         return result.stdout
     except Exception:
         return ""
@@ -243,11 +258,10 @@ def parse_date(value) -> str | None:
     match = DATE_RE.search(text)
     if match:
         day, month, year = match.groups()
-        for fmt in ("%d %b %Y", "%d %B %Y"):
-            try:
-                return datetime.strptime(f"{day} {month[:3]} {year}", "%d %b %Y").strftime("%Y-%m-%d")
-            except ValueError:
-                continue
+        try:
+            return datetime.strptime(f"{day} {month[:3]} {year}", "%d %b %Y").strftime("%Y-%m-%d")
+        except ValueError:
+            pass
     return None
 
 
@@ -256,4 +270,6 @@ def looks_like_description(line: str) -> bool:
         return False
     if re.match(r"^\d+(?:\.\d+)?$", line):
         return False
-    return bool(re.search(r"[A-Za-z]{3}", line)) and not re.search(r"summary|total|account|cardmember", line, re.I)
+    return bool(re.search(r"[A-Za-z]{3}", line)) and not re.search(
+        r"summary|total|account|cardmember", line, re.I
+    )
