@@ -25,17 +25,19 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: |
+            pyproject.toml
+            constraints-runtime.txt
 
       - name: Install development dependencies
-        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+        run: python -m pip install --upgrade pip && python -m pip install -c constraints-runtime.txt -e ".[dev]"
 
       - name: Check source and tests
-        run: make check
+        run: make PYTHON=python RUFF=ruff check
 
       - name: Build distributions
         if: matrix.python-version == '3.14'
-        run: make package-check
+        run: make PYTHON=python package-check
 
       - name: Smoke-test wheel contents outside the checkout
         if: matrix.python-version == '3.14'
