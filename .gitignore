@@ -6,6 +6,9 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
 .mypy_cache/
 .ruff_cache/
 build/
@@ -13,6 +16,7 @@ dist/
 *.egg-info/
 trips/
 *.xlsx
+!nlp_expenses/static/ivado_expense_report_template.xlsx
 *.xls
 *.pdf
 *.csv

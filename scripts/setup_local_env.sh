@@ -4,26 +4,38 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
-CODEX_PYTHON="/Users/florent/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3"
-if [[ -x "$CODEX_PYTHON" ]]; then
-  PYTHON_BIN="$CODEX_PYTHON"
-else
-  PYTHON_BIN="${PYTHON_BIN:-python3}"
+PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || true)}"
+if [[ -z "$PYTHON_BIN" || ! -x "$PYTHON_BIN" ]]; then
+  echo "Python 3.11 or newer is required. Install it from python.org or with Homebrew:"
+  echo "  brew install python@3.12"
+  exit 1
 fi
 
-echo "Using Python: $("$PYTHON_BIN" --version) at $PYTHON_BIN"
+if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then
+  echo "Python 3.11 or newer is required. Found: $($PYTHON_BIN --version)"
+  exit 1
+fi
 
-"$PYTHON_BIN" -m venv .venv
+echo "Using Python: $($PYTHON_BIN --version) at $PYTHON_BIN"
+
+if [[ ! -x .venv/bin/python ]]; then
+  "$PYTHON_BIN" -m venv .venv
+fi
 .venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -e ".[test]"
+.venv/bin/python -m pip install -c constraints-runtime.txt -e .
+
+if ! command -v tesseract >/dev/null 2>&1; then
+  echo
+  echo "Warning: Tesseract OCR is not installed. Basic/offline extraction of scans will be limited."
+  echo "Install it with: brew install tesseract"
+fi
 
 cat <<'EOF'
 
 Local environment ready.
 
-Run:
-  .venv/bin/python -m nlp_expenses generate trips/202606_melbourne
+Open the local interface:
+  .venv/bin/nlp-expenses ui
 
-Or:
-  .venv/bin/nlp-expenses generate trips/202606_melbourne
+Or double-click "NLP Expenses.command" in Finder.
 EOF

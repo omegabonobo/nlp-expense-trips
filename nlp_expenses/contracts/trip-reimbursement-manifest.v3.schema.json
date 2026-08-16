@@ -1,0 +1,318 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:arvine-labs:expenses:trip-reimbursement-manifest:3.0.0",
+  "title": "Minimal Arvine trip reimbursement manifest record",
+  "description": "One reviewed receipt or one trip total exchanged from nlp-expenses to arvine-accounting-expenses.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/receipt"
+    },
+    {
+      "$ref": "#/$defs/tripReport"
+    }
+  ],
+  "$defs": {
+    "claimProgram": {
+      "type": "string",
+      "enum": [
+        "arvine_only",
+        "ivado_sponsored"
+      ]
+    },
+    "paidBy": {
+      "type": "string",
+      "enum": [
+        "employee_personal",
+        "arvine_corporate_bmo"
+      ]
+    },
+    "nullableMoney": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "lineItem": {
+      "type": "object",
+      "required": [
+        "line_id",
+        "description",
+        "amount",
+        "is_alcohol",
+        "included_in_arvine",
+        "included_in_ivado"
+      ],
+      "properties": {
+        "line_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string"
+        },
+        "amount": {
+          "type": "number",
+          "description": "Signed line amount; promotions, discounts and credits are negative."
+        },
+        "is_alcohol": {
+          "type": "boolean"
+        },
+        "included_in_arvine": {
+          "type": "boolean"
+        },
+        "included_in_ivado": {
+          "type": "boolean"
+        },
+        "ivado_exclusion_reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "alcohol",
+            "non_business",
+            "policy_cap",
+            "missing_documentation",
+            "other",
+            null
+          ]
+        },
+        "review_note": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "accountingSummary": {
+      "type": "object",
+      "required": [
+        "travel_non_meal_cad",
+        "meal_deductible_cad",
+        "meal_non_deductible_cad",
+        "gst_receivable_cad",
+        "qst_receivable_cad"
+      ],
+      "properties": {
+        "travel_non_meal_cad": {
+          "type": "number"
+        },
+        "meal_deductible_cad": {
+          "type": "number"
+        },
+        "meal_non_deductible_cad": {
+          "type": "number"
+        },
+        "gst_receivable_cad": {
+          "type": "number"
+        },
+        "qst_receivable_cad": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false
+    },
+    "receipt": {
+      "type": "object",
+      "required": [
+        "contract_version",
+        "kind",
+        "id",
+        "trip_id",
+        "document_date",
+        "vendor",
+        "description",
+        "expense_type",
+        "source_file",
+        "currency",
+        "total",
+        "total_cad",
+        "paid_by",
+        "number_of_people",
+        "included_in_arvine",
+        "included_in_ivado",
+        "arvine_reimbursable_cad",
+        "ivado_claimable_cad",
+        "ivado_excluded_cad",
+        "line_items"
+      ],
+      "properties": {
+        "contract_version": {
+          "const": "3.0.0"
+        },
+        "kind": {
+          "const": "receipt"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "trip_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "document_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "vendor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expense_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "country": {
+          "type": "string"
+        },
+        "province": {
+          "type": "string"
+        },
+        "currency": {
+          "type": "string",
+          "pattern": "^[A-Z]{3}$"
+        },
+        "subtotal": {
+          "$ref": "#/$defs/nullableMoney"
+        },
+        "gst": {
+          "$ref": "#/$defs/nullableMoney"
+        },
+        "qst": {
+          "$ref": "#/$defs/nullableMoney"
+        },
+        "total": {
+          "type": "number",
+          "minimum": 0
+        },
+        "total_cad": {
+          "type": "number",
+          "minimum": 0
+        },
+        "paid_by": {
+          "$ref": "#/$defs/paidBy"
+        },
+        "number_of_people": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 99
+        },
+        "included_in_arvine": {
+          "type": "boolean"
+        },
+        "included_in_ivado": {
+          "type": "boolean"
+        },
+        "arvine_reimbursable_cad": {
+          "type": "number",
+          "minimum": 0
+        },
+        "ivado_claimable_cad": {
+          "type": "number",
+          "minimum": 0
+        },
+        "ivado_excluded_cad": {
+          "type": "number",
+          "minimum": 0
+        },
+        "ivado_exclusion_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fx_rate": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "exclusiveMinimum": 0
+        },
+        "line_items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/lineItem"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "tripReport": {
+      "type": "object",
+      "required": [
+        "contract_version",
+        "kind",
+        "report_id",
+        "trip_id",
+        "report_date",
+        "claim_program",
+        "traveller",
+        "description",
+        "employee_reimbursement_total_cad",
+        "corporate_paid_total_cad",
+        "ivado_claim_total_cad",
+        "ivado_excluded_total_cad",
+        "accounting_summary"
+      ],
+      "properties": {
+        "contract_version": {
+          "const": "3.0.0"
+        },
+        "kind": {
+          "const": "trip_report"
+        },
+        "report_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "trip_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "report_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "claim_program": {
+          "$ref": "#/$defs/claimProgram"
+        },
+        "traveller": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "employee_reimbursement_total_cad": {
+          "type": "number",
+          "minimum": 0
+        },
+        "corporate_paid_total_cad": {
+          "type": "number",
+          "minimum": 0
+        },
+        "ivado_claim_total_cad": {
+          "type": "number",
+          "minimum": 0
+        },
+        "ivado_excluded_total_cad": {
+          "type": "number",
+          "minimum": 0
+        },
+        "accounting_summary": {
+          "$ref": "#/$defs/accountingSummary"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

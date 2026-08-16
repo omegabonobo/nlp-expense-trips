@@ -1,18 +1,38 @@
 from __future__ import annotations
 
-import os
-import subprocess
 from pathlib import Path
 
 from openpyxl import Workbook
 from openpyxl.formatting.rule import CellIsRule
-from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 
-from nlp_expenses.matching import match_transactions
-from nlp_expenses.models import Expense, StatementTransaction
-
+from nlp_expenses.matching import (
+    apply_manual_matches,
+    match_normalized_transactions,
+    match_transactions,
+)
+from nlp_expenses.models import Expense, NormalizedTransaction, StatementTransaction
+from nlp_expenses.trips import source_file_key
+from nlp_expenses.workbook_arvine import (
+    apply_allocations_to_workbook_transactions,
+    write_arvine_statement_sheet,
+    write_arvine_summary_sheet,
+)
+from nlp_expenses.workbook_arvine_detail import write_arvine_detail_sheet
+from nlp_expenses.workbook_common import (
+    append_clean,
+    configure_arvine_calculation,
+    save_workbook_atomic,
+    set_filter_range,
+)
+from nlp_expenses.workbook_reports import (
+    build_ivado_claim_workbook as build_ivado_claim_workbook,
+)
+from nlp_expenses.workbook_reports import (
+    build_reimbursement_report_workbook as build_reimbursement_report_workbook,
+)
 
 EXPENSE_HEADERS = [
     "expense_id",
@@ -31,6 +51,13 @@ EXPENSE_HEADERS = [
     "source_file",
     "extraction_status",
     "review_note",
+    "include",
+    "manual_CAD_override",
+    "manual_CAD_note",
+    "statement_purchase_amount",
+    "statement_purchase_currency",
+    "accounting_original_basis",
+    "accounting_basis_status",
 ]
 LINE_HEADERS = [
     "expense_id",
@@ -41,6 +68,13 @@ LINE_HEADERS = [
     "amount_in_currency",
     "currency",
     "is_alcohol",
+    "included",
+    "alcohol_detection_confidence",
+    "alcohol_detection_reason",
+    "alcohol_matched_term",
+    "inclusion_overridden",
+    "alcohol_overridden",
+    "inclusion_note",
     "source_file",
     "confidence",
     "review_note",
@@ -62,8 +96,15 @@ REVIEW_FONT = Font(color="FFFFFF", bold=True)
 CHECK_FILL = PatternFill("solid", fgColor="FFF2CC")
 
 
-def build_workbook(trip_dir: Path, expenses: list[Expense], transactions: list[StatementTransaction]) -> Path:
-    match_transactions(expenses, transactions)
+def build_workbook(
+    trip_dir: Path,
+    expenses: list[Expense],
+    transactions: list[StatementTransaction],
+    output_path: Path | None = None,
+    pre_matched: bool = False,
+) -> Path:
+    if not pre_matched:
+        match_transactions(expenses, transactions)
     wb = Workbook()
     expense_ws = wb.active
     expense_ws.title = "expense_list"
@@ -78,19 +119,63 @@ def build_workbook(trip_dir: Path, expenses: list[Expense], transactions: list[S
         style_sheet(ws)
     apply_review_highlights(expense_ws, line_ws, statement_ws)
 
-    out_path = trip_dir / f"expense_review_{trip_dir.name}.xlsx"
-    wb.save(out_path)
-    remove_macos_metadata(out_path)
-    return out_path
+    out_path = output_path or trip_dir / f"expense_review_{trip_dir.name}.xlsx"
+    return save_workbook_atomic(wb, out_path)
 
 
-def append_clean(ws, values: list) -> None:
-    ws.append([None if value == "" else value for value in values])
+def build_arvine_workbook(
+    trip_dir: Path,
+    expenses: list[Expense],
+    transactions: list[NormalizedTransaction],
+    output_path: Path | None = None,
+    manual_matches: dict[str, str | None] | None = None,
+    accounting_profile: dict | None = None,
+    transaction_allocations: dict[str, list[dict]] | None = None,
+) -> Path:
+    """Build the company accounting workbook without changing the IVADO workbook path."""
+    match_normalized_transactions(expenses, transactions)
+    if manual_matches:
+        apply_manual_matches(expenses, transactions, manual_matches)
+    transaction_allocations = transaction_allocations or {}
+    apply_allocations_to_workbook_transactions(transactions, transaction_allocations)
+    workbook = Workbook()
+    detail_ws = workbook.active
+    detail_ws.title = "expense_detail"
+    summary_ws = workbook.create_sheet("expense_summary")
+    statements_ws = workbook.create_sheet("card_statements")
+    line_ws = workbook.create_sheet("expense_line_items")
+
+    if accounting_profile is None:
+        from nlp_expenses.accounting import builtin_accounting_profile
+
+        accounting_profile = builtin_accounting_profile()
+    write_arvine_detail_sheet(detail_ws, expenses, accounting_profile)
+    write_arvine_summary_sheet(summary_ws, trip_dir, accounting_profile)
+    write_arvine_statement_sheet(statements_ws, transactions, transaction_allocations, expenses)
+    write_line_sheet(line_ws, expenses)
+    style_sheet(line_ws)
+    configure_arvine_calculation(workbook)
+
+    out_path = output_path or trip_dir / f"expense_review_{trip_dir.name}.xlsx"
+    return save_workbook_atomic(workbook, out_path)
 
 
 def write_expense_sheet(ws, expenses: list[Expense]) -> None:
     ws.append(EXPENSE_HEADERS)
     for idx, expense in enumerate(expenses, start=2):
+        corrected_original_formula = (
+            f'=IF($Q{idx}=FALSE,0,IF($F{idx}="","",'
+            f"IF(COUNTIFS(expense_line_items!$A:$A,$A{idx},expense_line_items!$I:$I,FALSE,"
+            f'expense_line_items!$F:$F,">0")>0,'
+            f"SUMIFS(expense_line_items!$F:$F,expense_line_items!$A:$A,$A{idx},"
+            f'expense_line_items!$I:$I,TRUE)/IF(OR($I{idx}="",$I{idx}=0),1,$I{idx}),'
+            f'$F{idx}/IF(OR($I{idx}="",$I{idx}=0),1,$I{idx}))))'
+        )
+        line_ratio_formula = (
+            f"IF(COUNTIFS(expense_line_items!$A:$A,$A{idx},expense_line_items!$I:$I,FALSE,"
+            f'expense_line_items!$F:$F,">0")>0,'
+            f'IF(OR($E{idx}="",$E{idx}=0),1,$J{idx}*MAX(1,$I{idx})/$E{idx}),1)'
+        )
         append_clean(
             ws,
             [
@@ -100,31 +185,89 @@ def write_expense_sheet(ws, expenses: list[Expense]) -> None:
                 expense.expense_type,
                 f'=IF(COUNTIFS(expense_line_items!$A:$A,$A{idx},expense_line_items!$F:$F,">0")=0,"",SUMIFS(expense_line_items!$F:$F,expense_line_items!$A:$A,$A{idx}))',
                 expense.amount,
-                f'=IF(OR($E{idx}="",$F{idx}=""),"missing",IF(ABS($E{idx}-$F{idx})<=MAX(0.05,$F{idx}*0.03),"ok","mismatch"))',
+                (
+                    f'=IF($F{idx}="","missing",IF($E{idx}="","receipt total used",'
+                    f'IF(ABS($E{idx}-$F{idx})<=MAX(0.05,$F{idx}*0.03),"ok","mismatch")))'
+                ),
                 expense.currency,
-                1,
-                f'=IF($E{idx}="","",($E{idx}-SUMIFS(expense_line_items!$F:$F,expense_line_items!$A:$A,$A{idx},expense_line_items!$H:$H,TRUE))/IF(OR($I{idx}="",$I{idx}=0),1,$I{idx}))',
-                f'=IFERROR(SUMIFS(card_statements!$C:$C,card_statements!$D:$D,$A{idx}),"")',
-                f'=IF(OR($K{idx}="",$E{idx}="",$E{idx}=0),"",$K{idx}/($E{idx}/IF(OR($I{idx}="",$I{idx}=0),1,$I{idx})))',
-                f'=IF(OR($J{idx}="",$L{idx}=""),"",$J{idx}*$L{idx})',
-                expense.source_file.name,
+                max(1, int(expense.number_of_people or 1)),
+                corrected_original_formula,
+                (
+                    f'=IF($R{idx}<>"",$R{idx},IF(COUNTIF(card_statements!$D:$D,$A{idx})=0,"",'
+                    f"SUMIFS(card_statements!$C:$C,card_statements!$D:$D,$A{idx})))"
+                ),
+                (
+                    f'=IF(OR($K{idx}="",$K{idx}=0),"",'
+                    f'IF($H{idx}="CAD",1,IF(OR($V{idx}="",$V{idx}=0),"",$K{idx}/$V{idx})))'
+                ),
+                (
+                    f'=IF(OR($J{idx}="",$L{idx}=""),"",'
+                    f'IF(OR($W{idx}="statement_person_share",$W{idx}="statement_person_share_includes_tip"),$K{idx}*{line_ratio_formula},'
+                    f'IF(OR($W{idx}="statement_receipt_total",$W{idx}="statement_includes_tip",$W{idx}="statement_aggregated"),'
+                    f"$K{idx}*{line_ratio_formula}/MAX(1,$I{idx}),$J{idx}*$L{idx})))"
+                ),
+                source_file_key(expense.source_file),
                 extraction_status(expense),
                 expense.review_note,
-            ]
+                expense.included,
+                expense.manual_cad_override,
+                expense.manual_cad_note,
+                (
+                    f'=IF($H{idx}="CAD",'
+                    f'IF(COUNTIF(card_statements!$D:$D,$A{idx})=0,"",'
+                    f"SUMIFS(card_statements!$C:$C,card_statements!$D:$D,$A{idx})),"
+                    f'IF(COUNTIFS(card_statements!$D:$D,$A{idx},card_statements!$H:$H,">0")=0,"",'
+                    f"SUMIFS(card_statements!$H:$H,card_statements!$D:$D,$A{idx})))"
+                ),
+                (
+                    f'=IF($T{idx}="","",IF($H{idx}="CAD","CAD",'
+                    f'IFERROR(INDEX(card_statements!$I:$I,MATCH($A{idx},card_statements!$D:$D,0)),"")))'
+                ),
+                (
+                    f'=IF($R{idx}<>"",IF(AND($F{idx}<>"",$F{idx}<>0),$F{idx},$E{idx}),'
+                    f'IF(OR($F{idx}="",$F{idx}=0),$E{idx},'
+                    f'IF(OR($T{idx}="",$T{idx}=0),$F{idx},'
+                    f"IF($U{idx}<>$H{idx},$F{idx},"
+                    f"IF(OR(COUNTIF(card_statements!$D:$D,$A{idx})>1,"
+                    f"ABS($T{idx}-$F{idx})<=MAX(2,ABS($F{idx})*0.08),"
+                    f"AND($T{idx}>$F{idx}+MAX(2,ABS($F{idx})*0.08),$T{idx}<=$F{idx}*1.35),"
+                    f"AND($I{idx}>1,ABS($T{idx}-$F{idx}/$I{idx})"
+                    f"<=MAX(2,ABS($F{idx}/$I{idx})*0.08)),"
+                    f"AND($I{idx}>1,$T{idx}>$F{idx}/$I{idx}+MAX(2,ABS($F{idx}/$I{idx})*0.08),"
+                    f"$T{idx}<=$F{idx}/$I{idx}*1.35)),$T{idx},$F{idx})))))"
+                ),
+                (
+                    f'=IF($R{idx}<>"","manual_receipt_total",'
+                    f'IF(OR($T{idx}="",$T{idx}=0),"receipt_total",'
+                    f'IF($U{idx}<>$H{idx},"receipt_fallback_currency",'
+                    f'IF(COUNTIF(card_statements!$D:$D,$A{idx})>1,"statement_aggregated",'
+                    f'IF(ABS($T{idx}-$F{idx})<=MAX(2,ABS($F{idx})*0.08),"statement_receipt_total",'
+                    f'IF(AND($T{idx}>$F{idx}+MAX(2,ABS($F{idx})*0.08),$T{idx}<=$F{idx}*1.35),"statement_includes_tip",'
+                    f"IF(AND($I{idx}>1,ABS($T{idx}-$F{idx}/$I{idx})"
+                    f"<=MAX(2,ABS($F{idx}/$I{idx})*0.08)),"
+                    f'"statement_person_share",IF(AND($I{idx}>1,$T{idx}>$F{idx}/$I{idx}+MAX(2,ABS($F{idx}/$I{idx})*0.08),'
+                    f'$T{idx}<=$F{idx}/$I{idx}*1.35),"statement_person_share_includes_tip","receipt_fallback_mismatch")))))))'
+                ),
+            ],
         )
     set_filter_range(ws, len(EXPENSE_HEADERS), max(len(expenses) + 1, 2))
     ws.freeze_panes = "A2"
     if expenses:
-        validation = DataValidation(type="whole", operator="between", formula1="1", formula2="99", allow_blank=False)
+        validation = DataValidation(
+            type="whole", operator="between", formula1="1", formula2="99", allow_blank=False
+        )
         validation.error = "Enter a whole number from 1 to 99."
         validation.errorTitle = "Invalid number of persons"
         ws.add_data_validation(validation)
         validation.add(f"I2:I{len(expenses) + 1}")
+        include_validation = DataValidation(type="list", formula1='"TRUE,FALSE"', allow_blank=False)
+        ws.add_data_validation(include_validation)
+        include_validation.add(f"Q2:Q{len(expenses) + 1}")
         ws.conditional_formatting.add(
             f"K2:K{len(expenses) + 1}",
             CellIsRule(operator="equal", formula=["0"], fill=REVIEW_FILL, font=REVIEW_FONT),
         )
-    for col in ["E", "F", "J", "K", "M"]:
+    for col in ["E", "F", "J", "K", "M", "T", "V"]:
         for cell in ws[col][1:]:
             if cell.value is not None:
                 cell.number_format = "#,##0.00"
@@ -152,10 +295,17 @@ def write_line_sheet(ws, expenses: list[Expense]) -> None:
                     item.amount,
                     expense.currency,
                     item.is_alcohol,
-                    expense.source_file.name,
+                    item.included,
+                    item.alcohol_confidence,
+                    item.alcohol_reason,
+                    item.alcohol_matched_term,
+                    item.inclusion_overridden,
+                    item.alcohol_overridden,
+                    item.inclusion_note,
+                    source_file_key(expense.source_file),
                     item.confidence,
                     item.review_note,
-                ]
+                ],
             )
             row_count += 1
     set_filter_range(ws, len(LINE_HEADERS), max(row_count + 1, 2))
@@ -163,6 +313,12 @@ def write_line_sheet(ws, expenses: list[Expense]) -> None:
     for cell in ws["F"][1:]:
         if cell.value is not None:
             cell.number_format = "#,##0.00"
+    if row_count:
+        validation = DataValidation(type="list", formula1='"TRUE,FALSE"', allow_blank=False)
+        validation.error = "Choose TRUE or FALSE."
+        validation.errorTitle = "Invalid line-item choice"
+        ws.add_data_validation(validation)
+        validation.add(f"H2:I{row_count + 1}")
 
 
 def write_statement_sheet(ws, transactions: list[StatementTransaction]) -> None:
@@ -180,7 +336,7 @@ def write_statement_sheet(ws, transactions: list[StatementTransaction]) -> None:
                 transaction.source_file.name,
                 transaction.foreign_amount,
                 transaction.foreign_currency,
-            ]
+            ],
         )
     set_filter_range(ws, len(STATEMENT_HEADERS), max(len(transactions) + 1, 2))
     ws.freeze_panes = "A2"
@@ -245,7 +401,7 @@ def apply_review_highlights(expense_ws, line_ws, statement_ws) -> None:
             cell = line_ws.cell(row, col)
             if cell.value in (None, ""):
                 mark_review(cell)
-        review_note = line_ws.cell(row, 11)
+        review_note = line_ws.cell(row, LINE_HEADERS.index("review_note") + 1)
         if review_note.value:
             review_note.fill = CHECK_FILL
 
@@ -257,9 +413,18 @@ def mark_review(cell) -> None:
 
 def fallback_line_item(expense: Expense):
     class FallbackLineItem:
-        description = "Receipt total" if expense.amount is not None else "Receipt total missing - review"
+        description = (
+            "Receipt total" if expense.amount is not None else "Receipt total missing - review"
+        )
         amount = expense.amount
         is_alcohol = False
+        included = True
+        alcohol_confidence = 0.0
+        alcohol_reason = "no line-item classification available"
+        alcohol_matched_term = ""
+        inclusion_overridden = False
+        alcohol_overridden = False
+        inclusion_note = ""
         confidence = 0.0
         review_note = "Generated workbook fallback line item."
 
@@ -274,20 +439,3 @@ def extraction_status(expense: Expense) -> str:
     if expense.review_note:
         return "review"
     return "ok"
-
-
-def set_filter_range(ws, width: int, height: int) -> None:
-    end_col = get_column_letter(width)
-    ws.auto_filter.ref = f"A1:{end_col}{height}"
-
-
-def remove_macos_metadata(path: Path) -> None:
-    for attr in ("com.apple.quarantine", "com.apple.provenance", "com.apple.lastuseddate#PS"):
-        try:
-            os.removexattr(path, attr)
-        except (AttributeError, OSError):
-            pass
-        try:
-            subprocess.run(["xattr", "-d", attr, str(path)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass

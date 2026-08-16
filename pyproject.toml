@@ -4,22 +4,33 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nlp-expenses"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Local CLI for converting trip receipt scans and card statements into editable CAD expense review workbooks."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "Flask>=3.1,<4",
     "openpyxl>=3.1.0",
     "pypdf>=4.0.0",
     "Pillow>=10.0.0",
+    "pillow-heif>=1.1,<2",
     "pytesseract>=0.3.10",
     "PyMuPDF>=1.24.0",
     "xlrd>=2.0.1",
     "openai>=1.0.0",
+    "jsonschema>=4.23,<5",
 ]
 
 [project.optional-dependencies]
-test = []
+test = [
+    "pytest>=8,<10",
+]
+dev = [
+    "build>=1.2,<2",
+    "pytest>=8,<10",
+    "pytest-cov>=6,<8",
+    "ruff>=0.12,<1",
+]
 
 [project.scripts]
 nlp-expenses = "nlp_expenses.cli:main"
@@ -27,3 +38,42 @@ nlp-expenses = "nlp_expenses.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["nlp_expenses*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "nlp_expenses.__version__"}
+
+[tool.setuptools.package-data]
+nlp_expenses = [
+    "contracts/*.json",
+    "templates/*.html",
+    "static/*.css",
+    "static/*.js",
+    "static/*.csv",
+    "static/*.xlsx",
+]
+
+[tool.pytest.ini_options]
+addopts = ["-ra", "--strict-config", "--strict-markers", "-m", "not integration"]
+testpaths = ["tests"]
+markers = [
+    "integration: opt-in tests that use local trip data or external system dependencies",
+]
+filterwarnings = [
+    "error",
+    "ignore:builtin type (SwigPyPacked|SwigPyObject|swigvarlink) has no __module__ attribute:DeprecationWarning",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["nlp_expenses"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM"]
