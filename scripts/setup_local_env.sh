@@ -22,7 +22,7 @@ if [[ ! -x .venv/bin/python ]]; then
   "$PYTHON_BIN" -m venv .venv
 fi
 .venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -e ".[test]"
+.venv/bin/python -m pip install -c constraints-runtime.txt -e .
 
 if ! command -v tesseract >/dev/null 2>&1; then
   echo

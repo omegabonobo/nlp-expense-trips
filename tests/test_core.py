@@ -346,6 +346,45 @@ class CoreTests(unittest.TestCase):
                 any("classic espresso" in description.lower() for description in items)
             )
 
+    def test_uber_eats_promotions_remain_negative_and_reconcile_the_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            file_path = Path(tmp) / "Receipt_09Jul2026_063952.pdf"
+            file_path.write_bytes(b"dummy")
+            text = "\n".join(
+                [
+                    "Here's your receipt for Restaurant Bombay Mahal (Mont-Royal).",
+                    "Total CA$47.50",
+                    "2 Poulet au Beurre / Butter Chicken CA$35.00",
+                    "2 Naal a l'Ail / Garlic Naan CA$8.00",
+                    "1 Riz Vapeur / Steamed Rice CA$4.50",
+                    "Tax CA$5.47",
+                    "Delivery Fee",
+                    "CA$0.99",
+                    "Service Fee",
+                    "CA$6.50",
+                    "Tip CA$5.49",
+                    "Promotion -CA$17.50",
+                    "Service Fee Discount -CA$0.95",
+                    "American Express ••••1003 CA$47.50",
+                    "Uber Delivery",
+                ]
+            )
+
+            expense = heuristic_parse_receipt(file_path, text)
+            items = {item.description: item.amount for item in expense.line_items}
+
+            self.assertEqual(expense.expense_type, "meal-dinner")
+            self.assertEqual(items["Delivery Fee"], 0.99)
+            self.assertEqual(items["Service Fee"], 6.50)
+            self.assertEqual(items["Tip"], 5.49)
+            self.assertEqual(items["Promotion"], -17.50)
+            self.assertEqual(items["Service Fee Discount"], -0.95)
+            self.assertNotIn("American Express ••••", items)
+            self.assertAlmostEqual(
+                sum(item.amount or 0 for item in expense.line_items if not item.synthetic),
+                47.50,
+            )
+
     def test_ocr_decimal_variants_and_payment_total_are_parsed(self):
         with tempfile.TemporaryDirectory() as tmp:
             file_path = Path(tmp) / "Scanned_20260602-1936.pdf"
@@ -543,6 +582,36 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(transaction.expense_id, expense.expense_id)
         self.assertEqual(transaction.match_status, "auto")
         self.assertGreaterEqual(transaction.match_confidence, 0.72)
+
+    def test_shared_receipt_auto_matches_the_per_employee_card_amount(self):
+        expense = Expense(
+            source_file=Path("receipt.pdf"),
+            expense_id="EXP-SHARED",
+            date="2026-07-10",
+            supplier_name="Team Dinner",
+            amount=314.0,
+            currency="CAD",
+            number_of_people=2,
+        )
+        transaction = NormalizedTransaction(
+            source_file=Path("card.csv"),
+            source_row=2,
+            provider="amex",
+            transaction_group_id="TX-SHARED",
+            funding_leg_id="TX-SHARED:1",
+            transaction_date="2026-07-10",
+            description="TEAM DINNER",
+            match_eligible=True,
+            purchase_amount=157.0,
+            purchase_currency="CAD",
+            cad_amount=157.0,
+            cad_completeness="complete",
+        )
+
+        match_normalized_transactions([expense], [transaction])
+
+        self.assertEqual(transaction.expense_id, expense.expense_id)
+        self.assertEqual(transaction.match_status, "auto")
 
     def test_same_restaurant_date_with_receipt_thirty_percent_lower_is_review_suggestion(self):
         expense = Expense(

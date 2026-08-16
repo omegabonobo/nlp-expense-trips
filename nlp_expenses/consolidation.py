@@ -10,7 +10,7 @@ from nlp_expenses.lifecycle import review_input_snapshot
 from nlp_expenses.line_items import line_item_review_view
 from nlp_expenses.reconciliation import accounting_basis, reconciliation_view
 from nlp_expenses.storage import write_json_atomic
-from nlp_expenses.trip_metadata import required_metadata_gaps, trip_metadata
+from nlp_expenses.trip_metadata import normalize_paid_by, required_metadata_gaps, trip_metadata
 from nlp_expenses.trips import trip_mode, trip_statements_dir
 
 FINALIZATION_FILE = ".nlp-expenses-finalization.json"
@@ -96,7 +96,7 @@ def consolidation_view(root: Path, trip_dir: Path) -> dict:
                         "statement_mapping",
                         "blocking",
                         f"{transaction.get('description') or 'Statement transaction'} needs a mapping or CAD review.",
-                        "statement-mappings",
+                        "unmatched-statements",
                         transaction.get("group_id"),
                     )
             for warning in reconciliation.get("policy_warnings", []):
@@ -155,7 +155,7 @@ def consolidation_view(root: Path, trip_dir: Path) -> dict:
                 receipt["source_file"],
             )
         if (
-            claim_program == "ivado_sponsored"
+            claim_program == "ivado_reimbursed"
             and receipt.get("included_in_arvine", True)
             and not receipt.get("included_in_ivado", True)
             and not receipt.get("ivado_exclusion_reason")
@@ -170,7 +170,7 @@ def consolidation_view(root: Path, trip_dir: Path) -> dict:
             )
         for item in receipt.get("line_items", []):
             if (
-                claim_program == "ivado_sponsored"
+                claim_program == "ivado_reimbursed"
                 and item.get("included_in_arvine", True)
                 and not item.get("included_in_ivado", True)
                 and not item.get("ivado_exclusion_reason")
@@ -197,10 +197,14 @@ def consolidation_view(root: Path, trip_dir: Path) -> dict:
     corporate_paid = round(sum(item["corporate_paid_cad"] or 0 for item in expenses), 2)
     ivado_claim = round(sum(item["ivado_claimable_cad"] or 0 for item in expenses), 2)
     ivado_excluded = round(sum(item["ivado_excluded_cad"] or 0 for item in expenses), 2)
-    payer_control = round(reviewed_total - employee_reimbursement - corporate_paid, 2)
+    payer_exclusions = ivado_excluded if claim_program == "ivado_reimbursed" else 0.0
+    payer_control = round(
+        reviewed_total - employee_reimbursement - corporate_paid - payer_exclusions,
+        2,
+    )
     ivado_control = (
         round(reviewed_total - ivado_claim - ivado_excluded, 2)
-        if claim_program == "ivado_sponsored"
+        if claim_program == "ivado_reimbursed"
         else 0.0
     )
     accounting_control = round(accounting["journal_total"] - employee_reimbursement, 2)
@@ -208,7 +212,10 @@ def consolidation_view(root: Path, trip_dir: Path) -> dict:
         (
             "payer_control",
             payer_control,
-            "Reviewed total does not equal employee plus corporate-paid amounts",
+            (
+                "Reviewed total does not equal traveller reimbursement, company-paid amounts, "
+                "and program exclusions"
+            ),
         ),
         (
             "ivado_control",
@@ -218,7 +225,7 @@ def consolidation_view(root: Path, trip_dir: Path) -> dict:
         (
             "accounting_control",
             accounting_control,
-            "Accounting components do not equal employee reimbursement",
+            "Accounting components do not equal traveller reimbursement",
         ),
     ):
         if abs(difference) > 0.02:
@@ -287,7 +294,7 @@ def calculate_expense_result(
     included_in_ivado = (
         bool(receipt.get("included_in_ivado", receipt.get("included", True))) and included_in_arvine
     )
-    paid_by = str(receipt.get("paid_by") or "employee_personal")
+    paid_by = normalize_paid_by(receipt.get("paid_by") or "traveller_personal")
     people = max(1, int(receipt.get("number_of_people") or 1))
     amount = numeric(receipt.get("amount"))
     line_total = numeric(receipt.get("line_total"))
@@ -376,19 +383,21 @@ def calculate_expense_result(
         round(arvine_original_basis / people, 2) if included_in_arvine else 0.0
     )
     ivado_claimable_original = round(ivado_original_basis / people, 2) if included_in_ivado else 0.0
-    direct_statement_statuses = {
-        "statement_receipt_total",
-        "statement_person_share",
-        "statement_aggregated",
-    }
+    statement_amount_basis = str(reconciled.get("statement_amount_basis") or "")
+    if statement_amount_basis not in {"full_receipt", "personal_share"}:
+        statement_amount_basis = (
+            "personal_share"
+            if fx_basis_status in {"statement_person_share", "statement_person_share_includes_tip"}
+            else "full_receipt"
+        )
     arvine_total_cad = program_cad_amount(
         included_in_arvine,
         cad_amount,
         manual_cad,
-        fx_basis_status,
-        direct_statement_statuses,
-        arvine_line_ratio,
+        cad_source,
+        statement_amount_basis,
         arvine_claim_ratio,
+        arvine_line_ratio,
         arvine_claimable_original,
         fx_rate,
     )
@@ -396,14 +405,14 @@ def calculate_expense_result(
         included_in_ivado,
         cad_amount,
         manual_cad,
-        fx_basis_status,
-        direct_statement_statuses,
-        ivado_line_ratio,
+        cad_source,
+        statement_amount_basis,
         ivado_claim_ratio,
+        ivado_line_ratio,
         ivado_claimable_original,
         fx_rate,
     )
-    if claim_program != "ivado_sponsored":
+    if claim_program != "ivado_reimbursed":
         ivado_claimable_cad = 0.0
         ivado_excluded_cad = 0.0
     else:
@@ -412,9 +421,18 @@ def calculate_expense_result(
             ivado_claimable_cad or 0.0,
         )
         ivado_excluded_cad = round((arvine_total_cad or 0.0) - ivado_claimable_cad, 2)
-    arvine_reimbursable_cad = arvine_total_cad if paid_by == "employee_personal" else 0.0
-    corporate_paid_cad = arvine_total_cad if paid_by == "arvine_corporate_bmo" else 0.0
-    claimable_cad = ivado_claimable_cad if claim_program == "ivado_sponsored" else arvine_total_cad
+    claimable_cad = ivado_claimable_cad if claim_program == "ivado_reimbursed" else arvine_total_cad
+    reimbursement_cad = claimable_cad
+    arvine_reimbursable_cad = reimbursement_cad if paid_by == "traveller_personal" else 0.0
+    corporate_paid_cad = reimbursement_cad if paid_by == "company_card" else 0.0
+    active_claim_ratio = (
+        ivado_claim_ratio if claim_program == "ivado_reimbursed" else arvine_claim_ratio
+    )
+    active_claimable_original = (
+        ivado_claimable_original
+        if claim_program == "ivado_reimbursed"
+        else arvine_claimable_original
+    )
     return {
         "receipt_id": receipt.get("receipt_id"),
         "source_file": receipt["source_file"],
@@ -440,8 +458,8 @@ def calculate_expense_result(
         "ivado_included_line_total": ivado_included_line_total,
         "arvine_claimable_ratio": round(arvine_claim_ratio, 8),
         "ivado_claimable_ratio": round(ivado_claim_ratio, 8),
-        "claimable_ratio": round(arvine_claim_ratio, 8),
-        "claimable_original": arvine_claimable_original,
+        "claimable_ratio": round(active_claim_ratio, 8),
+        "claimable_original": active_claimable_original,
         "arvine_claimable_original": arvine_claimable_original,
         "ivado_claimable_original": ivado_claimable_original,
         "cad_amount_used": cad_amount,
@@ -451,6 +469,10 @@ def calculate_expense_result(
         "fx_basis_status": fx_basis_status,
         "statement_purchase_amount_used": statement_purchase_amount,
         "statement_purchase_currency": statement_purchase_currency or None,
+        "statement_amount_basis": statement_amount_basis,
+        "statement_amount_basis_explicit": bool(reconciled.get("statement_amount_basis_explicit")),
+        "statement_basis_updated_at": reconciled.get("statement_basis_updated_at"),
+        "statement_receipt_difference": numeric(reconciled.get("statement_receipt_difference")),
         "claimable_cad": claimable_cad,
         "total_cad": arvine_total_cad,
         "arvine_reimbursable_cad": arvine_reimbursable_cad,
@@ -494,22 +516,36 @@ def program_cad_amount(
     included: bool,
     cad_amount: float | None,
     manual_cad: float | None,
-    fx_basis_status: str,
-    direct_statement_statuses: set[str],
-    line_ratio: float,
+    cad_source: str,
+    statement_amount_basis: str,
     claim_ratio: float,
+    personal_share_ratio: float,
     claimable_original: float,
     fx_rate: float | None,
 ) -> float | None:
     if not included:
         return 0.0
+    if manual_cad is not None:
+        # A manual CAD override replaces the full-receipt CAD basis. Apply the
+        # reviewed traveller/program ratio directly so high-denomination
+        # currencies cannot drift through a rounded display FX rate.
+        return round(manual_cad * claim_ratio, 2)
     if (
         cad_amount is not None
         and manual_cad is None
-        and fx_basis_status in direct_statement_statuses
+        and cad_source
+        in {
+            "statement",
+            "statement_aggregated",
+            "allocation",
+            "allocation_aggregated",
+        }
     ):
+        # Exact statement CAD is the settlement authority. The ratio only
+        # determines how much of that charge belongs to this traveller/program;
+        # it must never be reconstructed through a rounded display FX rate.
         settlement_ratio = (
-            line_ratio if fx_basis_status == "statement_person_share" else claim_ratio
+            personal_share_ratio if statement_amount_basis == "personal_share" else claim_ratio
         )
         return round(cad_amount * settlement_ratio, 2)
     return round(claimable_original * fx_rate, 2) if fx_rate is not None else None
@@ -520,14 +556,23 @@ def calculate_accounting_summary(expenses: list[dict], profile: dict, mode: str)
     tax_recoverable = 0.0
     for expense in expenses:
         claimable = expense.get("arvine_reimbursable_cad")
-        if claimable is None or not expense["included_in_arvine"]:
+        included = (
+            expense.get("included_in_ivado", False)
+            if mode == "ivado"
+            else expense.get("included_in_arvine", False)
+        )
+        if claimable is None or not included:
             continue
         is_meal = str(expense.get("expense_type") or "").startswith("meal")
         recovery_pct = (
             profile["meal_tax_recovery_pct"] if is_meal else profile["normal_tax_recovery_pct"]
         ) * profile["commercial_use_pct"]
         fx = expense.get("fx_rate") or (1.0 if expense.get("currency") == "CAD" else 0.0)
-        share = expense["arvine_claimable_ratio"]
+        share = (
+            expense["ivado_claimable_ratio"]
+            if mode == "ivado"
+            else expense["arvine_claimable_ratio"]
+        )
         gst_cad = round((expense.get("gst_hst") or 0) * fx * share, 2)
         qst_cad = round((expense.get("qst") or 0) * fx * share, 2)
         recoverable_gst = gst_cad * recovery_pct if profile["gst_hst_registrant"] else 0.0
@@ -547,20 +592,46 @@ def calculate_accounting_summary(expenses: list[dict], profile: dict, mode: str)
         for account, amount in accounts.items()
         if abs(amount) >= 0.005
     ]
-    journal_total = round(sum(row["amount_cad"] for row in rows), 2)
     claim_total = round(
         sum(expense.get("arvine_reimbursable_cad") or 0 for expense in expenses),
         2,
     )
+    pre_adjustment_journal_total = round(sum(row["amount_cad"] for row in rows), 2)
+    pre_adjustment_difference = round(pre_adjustment_journal_total - claim_total, 2)
+    proposed_rounding_adjustment = round(-pre_adjustment_difference, 2)
+    rounding_adjustment = 0.0
+    rounding_adjustment_account = None
+    if 0.005 <= abs(proposed_rounding_adjustment) <= 0.05 and rows:
+        rounding_adjustment = proposed_rounding_adjustment
+        preferred_accounts = (
+            profile["account_mapping"]["meal_nondeductible"],
+            profile["account_mapping"]["non_meal"],
+            profile["account_mapping"]["meal_deductible"],
+        )
+        target = next(
+            (row for account in preferred_accounts for row in rows if row["account"] == account),
+            rows[0],
+        )
+        target["amount_cad"] = round(target["amount_cad"] + rounding_adjustment, 2)
+        target["rounding_adjustment_cad"] = rounding_adjustment
+        rounding_adjustment_account = target["account"]
+    journal_total = round(sum(row["amount_cad"] for row in rows), 2)
     return {
         "available": True,
         "rows": rows,
         "journal_total": journal_total,
         "claim_total": claim_total,
         "balance_difference": round(journal_total - claim_total, 2),
+        "pre_adjustment_journal_total": pre_adjustment_journal_total,
+        "pre_adjustment_difference": pre_adjustment_difference,
+        "rounding_adjustment_cad": rounding_adjustment,
+        "rounding_adjustment_account": rounding_adjustment_account,
         "recoverable_tax_cad": round(tax_recoverable, 2),
         "profile_version": profile["version"],
         "counter_account": profile["counter_account"],
+        "commercial_use_pct": profile["commercial_use_pct"],
+        "meal_deduction_pct": profile["meal_deduction_pct"],
+        "meal_tax_recovery_pct": profile["meal_tax_recovery_pct"],
     }
 
 
@@ -640,9 +711,13 @@ def add_issue(
 def transaction_needs_review(transaction: dict) -> bool:
     if transaction.get("allocations"):
         return transaction.get("allocation_status") != "balanced"
+    # An unmatched card row is informational: personal and unrelated charges are
+    # expected on a statement and remain visible in the unmatched list. Only a
+    # transaction that is actually used by this trip can block finalization.
+    if not transaction.get("expense_file"):
+        return False
     return bool(
-        not transaction.get("expense_file")
-        or transaction.get("normalization_status") in {"review", "possible_duplicate"}
+        transaction.get("normalization_status") in {"review", "possible_duplicate"}
         or (
             transaction.get("cad_completeness") != "complete"
             and transaction.get("cad_source") != "manual"

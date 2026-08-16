@@ -52,7 +52,7 @@
         },
         "amount": {
           "type": "number",
-          "minimum": 0
+          "description": "Signed line amount; promotions, discounts and credits are negative."
         },
         "is_alcohol": {
           "type": "boolean"

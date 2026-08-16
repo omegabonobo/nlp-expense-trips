@@ -8,7 +8,14 @@ from pathlib import Path
 from nlp_expenses import __version__
 from nlp_expenses.config import configure_openai
 from nlp_expenses.generator import generate_review
-from nlp_expenses.trips import TRIP_MODES, ensure_trip, list_trips, trip_mode, validate_trip_name
+from nlp_expenses.trips import (
+    TRIP_MODES,
+    ensure_trip,
+    list_trips,
+    normalize_trip_mode,
+    trip_mode,
+    validate_trip_name,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,7 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     create.add_argument("name", help="Trip folder name, e.g. 202606_melbourne")
     create.add_argument(
-        "--mode", choices=sorted(TRIP_MODES), default="ivado", help="Trip processing mode."
+        "--mode",
+        type=normalize_trip_mode,
+        choices=sorted(TRIP_MODES),
+        default="ivado",
+        help="Trip processing mode.",
     )
 
     generate = sub.add_parser(
@@ -44,7 +55,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="ask prompts whether to use an OpenAI API key; off uses heuristics only; required forces OpenAI extraction.",
     )
     generate.add_argument(
-        "--mode", choices=sorted(TRIP_MODES), help="Override the trip's saved processing mode."
+        "--mode",
+        type=normalize_trip_mode,
+        choices=sorted(TRIP_MODES),
+        help="Override the trip's saved processing mode.",
     )
     generate.add_argument(
         "--statements-complete",
@@ -54,9 +68,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     reconcile = sub.add_parser(
         "reconcile",
-        help="Extract and sync an Arvine trip's invoices with its current statement files.",
+        help="Extract and sync a company trip's invoices with its current statement files.",
     )
-    reconcile.add_argument("trip", type=Path, help="Path to a saved Arvine trip folder.")
+    reconcile.add_argument("trip", type=Path, help="Path to a saved company trip folder.")
     reconcile.add_argument(
         "--llm",
         choices=["ask", "off", "required"],
@@ -94,8 +108,8 @@ def main(argv: list[str] | None = None) -> None:
         if not validate_trip_name(trip.name):
             raise SystemExit("Trip folder must be named like YYYYMM_tripName.")
         selected_mode = args.mode or trip_mode(trip)
-        if selected_mode == "arvine" and not args.statements_complete and not sys.stdin.isatty():
-            raise SystemExit("Non-interactive Arvine generation requires --statements-complete.")
+        if selected_mode == "company" and not args.statements_complete and not sys.stdin.isatty():
+            raise SystemExit("Non-interactive company generation requires --statements-complete.")
         output = generate_review(
             trip,
             root,
@@ -145,7 +159,7 @@ def interactive_menu(root: Path) -> None:
     choice = input("Choose 1 or 2: ").strip()
     if choice == "1":
         name = input("Trip name (YYYYMM_tripName): ").strip()
-        mode = input("Mode [ivado/arvine] (default ivado): ").strip().lower() or "ivado"
+        mode = input("Mode [ivado/company] (default ivado): ").strip().lower() or "ivado"
         trip = ensure_trip(root, name, mode=mode)
         print(f"Created {trip}")
         return

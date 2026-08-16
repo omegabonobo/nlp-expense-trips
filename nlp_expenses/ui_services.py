@@ -18,11 +18,16 @@ from nlp_expenses.accounting import trip_accounting_profile
 from nlp_expenses.extraction.text import validate_receipt_content
 from nlp_expenses.generator import SUPPORTED_RECEIPTS
 from nlp_expenses.lifecycle import list_packages, trip_lifecycle
-from nlp_expenses.line_items import line_item_review_view, persist_review_after_receipt_removal
+from nlp_expenses.line_items import (
+    line_item_review_view,
+    persist_review_after_receipt_removal,
+    receipt_scan_status,
+)
 from nlp_expenses.statement_normalizer import preflight_statement_files
 from nlp_expenses.trip_manifest import CONTRACT_FILENAME
 from nlp_expenses.trip_metadata import (
     CLAIM_PROGRAMS,
+    normalize_claim_program,
     required_metadata_gaps,
     save_trip_metadata,
     trip_metadata,
@@ -33,6 +38,7 @@ from nlp_expenses.trips import (
     list_receipt_files,
     list_trips,
     load_trip_config,
+    normalize_trip_mode,
     relative_source_name,
     save_trip_mode,
     trip_mode,
@@ -42,8 +48,8 @@ from nlp_expenses.trips import (
     validate_trip_name,
 )
 
-ARVINE_STATEMENTS = {".csv", ".xls", ".xlsx"}
-IVADO_STATEMENTS = ARVINE_STATEMENTS | {".pdf"}
+COMPANY_STATEMENTS = {".csv", ".xls", ".xlsx"}
+IVADO_STATEMENTS = COMPANY_STATEMENTS | {".pdf"}
 FILE_KINDS = {"receipts", "statements"}
 
 
@@ -73,15 +79,17 @@ def create_trip(
     root: Path,
     month: str,
     description: str,
-    mode: str = "arvine",
+    mode: str = "company",
     claim_program: str | None = None,
 ) -> Path:
+    claim_program = normalize_claim_program(claim_program) if claim_program is not None else None
+    mode = normalize_trip_mode(mode)
     if claim_program is not None and claim_program not in CLAIM_PROGRAMS:
-        raise ValueError("Choose either Arvine only or IVADO sponsored.")
+        raise ValueError("Choose own-company reimbursement or IVADO-reimbursed trip.")
     if claim_program:
-        mode = "ivado" if claim_program == "ivado_sponsored" else "arvine"
+        mode = "ivado" if claim_program == "ivado_reimbursed" else "company"
     if mode not in TRIP_MODES:
-        raise ValueError("Choose either Arvine or IVADO mode.")
+        raise ValueError("Choose either own-company or IVADO reimbursement.")
     name = create_trip_name(month, description)
     trip = root.resolve() / "trips" / name
     if trip.exists():
@@ -90,7 +98,7 @@ def create_trip(
     if claim_program:
         metadata = trip_metadata(trip)
         metadata["claim_program"] = claim_program
-        if claim_program == "ivado_sponsored" and not metadata["sponsor"]:
+        if claim_program == "ivado_reimbursed" and not metadata["sponsor"]:
             metadata["sponsor"] = "IVADO Labs"
         save_trip_metadata(trip, metadata)
     return trip
@@ -118,26 +126,28 @@ def delete_trip(root: Path, name: str, confirmation: str) -> None:
 
 
 def change_trip_mode(root: Path, name: str, mode: str) -> None:
+    mode = normalize_trip_mode(mode)
     if mode not in TRIP_MODES:
-        raise ValueError("Choose either Arvine or IVADO mode.")
+        raise ValueError("Choose either own-company or IVADO reimbursement.")
     save_trip_mode(resolve_trip(root, name), mode)
 
 
 def change_trip_claim_program(root: Path, name: str, claim_program: str) -> None:
+    claim_program = normalize_claim_program(claim_program)
     if claim_program not in CLAIM_PROGRAMS:
-        raise ValueError("Choose either Arvine only or IVADO sponsored.")
+        raise ValueError("Choose own-company reimbursement or IVADO-reimbursed trip.")
     trip = resolve_trip(root, name)
     metadata = trip_metadata(trip)
     metadata["claim_program"] = claim_program
-    if claim_program == "ivado_sponsored" and not metadata["sponsor"]:
+    if claim_program == "ivado_reimbursed" and not metadata["sponsor"]:
         metadata["sponsor"] = "IVADO Labs"
     save_trip_metadata(trip, metadata)
-    save_trip_mode(trip, "ivado" if claim_program == "ivado_sponsored" else "arvine")
+    save_trip_mode(trip, "ivado" if claim_program == "ivado_reimbursed" else "company")
 
 
 def trip_summaries(root: Path, include_archived: bool = False) -> list[dict]:
     summaries = []
-    for trip in reversed(list_trips(root.resolve())):
+    for trip in list_trips(root.resolve()):
         archived = bool(load_trip_config(trip).get("archived"))
         if archived and not include_archived:
             continue
@@ -150,19 +160,25 @@ def trip_summaries(root: Path, include_archived: bool = False) -> list[dict]:
                 "archived": archived,
                 "receipt_count": len(list_receipt_files(trip_receipts_dir(trip))),
                 "statement_count": len(list_source_files(trip_statements_dir(trip))),
+                "modified": trip_last_modified(trip),
             }
         )
-    return summaries
+    return sorted(summaries, key=lambda item: (item["modified"], item["name"]), reverse=True)
 
 
 def trip_details(root: Path, name: str) -> dict:
     trip = resolve_trip(root, name)
+    from nlp_expenses.reconciliation import repair_reconciliation_after_missing_receipts
+
+    repair_reconciliation_after_missing_receipts(trip)
     selected_mode = trip_mode(trip)
     receipts_folder = trip_receipts_dir(trip)
     receipts = list_receipt_files(receipts_folder)
+    scan_status = receipt_scan_status(trip)
+    scan_by_source = {item["source_file"]: item for item in scan_status["receipts"]}
     statements = list_source_files(trip_statements_dir(trip))
     statement_reports: dict[str, dict] = {}
-    if selected_mode == "arvine":
+    if selected_mode == "company":
         for report in preflight_statement_files(statements):
             statement_reports[report.source_file.name] = {
                 "provider": report.provider,
@@ -186,7 +202,17 @@ def trip_details(root: Path, name: str) -> dict:
         "receipts_path": str(trip_receipts_dir(trip)),
         "statements_path": str(trip_statements_dir(trip)),
         "file_state": source_file_state(receipts, statements),
-        "receipts": [file_details(path, receipts_folder) for path in receipts],
+        "receipts": [
+            {
+                **file_details(path, receipts_folder),
+                "scan": scan_by_source.get(
+                    relative_source_name(receipts_folder, path),
+                    {"status": "not_scanned", "quality": None, "scanned_at": None},
+                ),
+            }
+            for path in receipts
+        ],
+        "receipt_scan": scan_status,
         "statements": [
             {**file_details(path), "validation": statement_reports.get(path.name)}
             for path in statements
@@ -234,7 +260,7 @@ def allowed_extensions(mode: str, kind: str) -> set[str]:
         return SUPPORTED_RECEIPTS
     if kind != "statements":
         raise ValueError("Unknown upload type.")
-    return ARVINE_STATEMENTS if mode == "arvine" else IVADO_STATEMENTS
+    return COMPANY_STATEMENTS if mode == "company" else IVADO_STATEMENTS
 
 
 def store_upload(
@@ -300,6 +326,9 @@ def remove_source_file(root: Path, trip_name: str, kind: str, filename: str) -> 
     target.unlink()
     if kind == "receipts":
         persist_review_after_receipt_removal(trip)
+        from nlp_expenses.reconciliation import persist_reconciliation_after_receipt_removal
+
+        persist_reconciliation_after_receipt_removal(trip, filename)
 
 
 def resolve_receipt(root: Path, trip_name: str, filename: str) -> Path:
@@ -313,6 +342,7 @@ def resolve_receipt(root: Path, trip_name: str, filename: str) -> Path:
 
 
 def versioned_output_path(trip: Path, mode: str, now: datetime | None = None) -> Path:
+    mode = normalize_trip_mode(mode)
     if mode not in TRIP_MODES:
         raise ValueError("Unknown trip mode.")
     timestamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
@@ -398,6 +428,18 @@ def file_details(path: Path, source_root: Path | None = None) -> dict:
         "size": stat.st_size,
         "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
     }
+
+
+def trip_last_modified(trip: Path) -> str:
+    """Return the latest modification time anywhere inside a trip folder."""
+
+    latest = trip.stat().st_mtime
+    for path in trip.rglob("*"):
+        try:
+            latest = max(latest, path.stat().st_mtime)
+        except FileNotFoundError:
+            continue
+    return datetime.fromtimestamp(latest).isoformat(timespec="seconds")
 
 
 def list_source_files(folder: Path) -> list[Path]:

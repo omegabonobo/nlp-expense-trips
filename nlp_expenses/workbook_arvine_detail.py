@@ -180,9 +180,9 @@ def write_arvine_detail_sheet(ws, expenses: list[Expense], accounting_profile: d
                 (
                     f'=IF($T{row}<>"",ROUND($T{row}*${claimable_col}{row},2),'
                     f'IF(AND($R{row}<>"",$AS{row}<>""),'
-                    f'ROUND(IF($AT{row}="statement_person_share",'
+                    f'ROUND(IF(OR($AT{row}="statement_person_share",$AT{row}="statement_person_share_includes_tip"),'
                     f"$R{row}*${claimable_col}{row}*MAX(1,$AP{row}),"
-                    f'IF(OR($AT{row}="statement_receipt_total",$AT{row}="statement_aggregated"),'
+                    f'IF(OR($AT{row}="statement_receipt_total",$AT{row}="statement_includes_tip",$AT{row}="statement_aggregated"),'
                     f"$R{row}*${claimable_col}{row},$R{row}/$AS{row}*{claimable_original_formula})),2),"
                     f'IF($J{row}="CAD",ROUND($I{row}*${claimable_col}{row},2),"")))'
                 ),
@@ -245,8 +245,11 @@ def write_arvine_detail_sheet(ws, expenses: list[Expense], accounting_profile: d
                     f"OR(COUNTIFS('card_statements'!$T$2:$T${statement_end},$B{row},"
                     f"'card_statements'!$M$2:$M${statement_end},TRUE)>1,"
                     f"OR(ABS($AQ{row}-$I{row})<=MAX(2,ABS($I{row})*0.08),"
+                    f"AND($AQ{row}>$I{row}+MAX(2,ABS($I{row})*0.08),$AQ{row}<=$I{row}*1.35),"
                     f"AND($AP{row}>1,ABS($AQ{row}-$I{row}/$AP{row})"
-                    f"<=MAX(2,ABS($I{row}/$AP{row})*0.08))))),$AQ{row},$I{row})))"
+                    f"<=MAX(2,ABS($I{row}/$AP{row})*0.08)),"
+                    f"AND($AP{row}>1,$AQ{row}>$I{row}/$AP{row}+MAX(2,ABS($I{row}/$AP{row})*0.08),"
+                    f"$AQ{row}<=$I{row}/$AP{row}*1.35)))),$AQ{row},$I{row})))"
                 ),
                 (
                     f'=IF(OR($I{row}="",$I{row}=0),"unavailable",IF($T{row}<>"","manual_receipt_total",'
@@ -255,9 +258,11 @@ def write_arvine_detail_sheet(ws, expenses: list[Expense], accounting_profile: d
                     f"IF(COUNTIFS('card_statements'!$T$2:$T${statement_end},$B{row},"
                     f"'card_statements'!$M$2:$M${statement_end},TRUE)>1,\"statement_aggregated\","
                     f'IF(ABS($AQ{row}-$I{row})<=MAX(2,ABS($I{row})*0.08),"statement_receipt_total",'
+                    f'IF(AND($AQ{row}>$I{row}+MAX(2,ABS($I{row})*0.08),$AQ{row}<=$I{row}*1.35),"statement_includes_tip",'
                     f"IF(AND($AP{row}>1,ABS($AQ{row}-$I{row}/$AP{row})"
                     f"<=MAX(2,ABS($I{row}/$AP{row})*0.08)),"
-                    f'"statement_person_share","receipt_fallback_mismatch")))))))'
+                    f'"statement_person_share",IF(AND($AP{row}>1,$AQ{row}>$I{row}/$AP{row}+MAX(2,ABS($I{row}/$AP{row})*0.08),'
+                    f'$AQ{row}<=$I{row}/$AP{row}*1.35),"statement_person_share_includes_tip","receipt_fallback_mismatch"))))))))'
                 ),
             ],
         )

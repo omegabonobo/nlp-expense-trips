@@ -9,6 +9,7 @@ from nlp_expenses.accounting import save_trip_accounting_profile
 from nlp_expenses.consolidation import (
     consolidation_view,
 )
+from nlp_expenses.currencies import CURRENCY_OPTIONS
 from nlp_expenses.jobs import JobManager
 from nlp_expenses.lifecycle import (
     approve_trip,
@@ -20,6 +21,7 @@ from nlp_expenses.reconciliation import (
 )
 from nlp_expenses.statement_normalizer import set_statement_date_convention
 from nlp_expenses.trip_metadata import (
+    normalize_claim_program,
     save_policy_exception,
     save_trip_metadata,
     trip_metadata,
@@ -61,6 +63,25 @@ def index():
     selected_trip = resolve_trip(root, selected_name) if selected_name and selected else None
     reconciliation = reconciliation_view(selected_trip) if selected_trip else None
     consolidation = consolidation_view(root, selected_trip) if selected_trip else None
+    line_review = selected.get("line_item_review") if selected else None
+    receipt_scan = selected.get("receipt_scan") if selected else None
+    reconciliation_summary = (reconciliation or {}).get("summary", {})
+    line_review_summary = (line_review or {}).get("summary", {})
+    consolidation_summary = (consolidation or {}).get("summary", {})
+    process_summary = {
+        "receipt_total": (receipt_scan or {}).get("total_count", 0),
+        "receipt_scanned": (receipt_scan or {}).get("scanned_count", 0),
+        "receipt_reviewed": line_review_summary.get("reviewed_count", 0),
+        "receipt_review_total": line_review_summary.get("receipt_count", 0)
+        or (receipt_scan or {}).get("total_count", 0),
+        "matched_receipts": reconciliation_summary.get("matched_invoice_count", 0),
+        "matched_receipt_total": reconciliation_summary.get("invoice_count", 0)
+        or (receipt_scan or {}).get("total_count", 0),
+        "matched_transactions": reconciliation_summary.get("matched_transaction_count", 0),
+        "transaction_total": reconciliation_summary.get("transaction_count", 0),
+        "reviewed_total_cad": consolidation_summary.get("reviewed_total_cad", 0),
+        "claimable_total_cad": consolidation_summary.get("claimable_cad", 0),
+    }
     state = {
         "trips": trips,
         "selected": selected,
@@ -70,8 +91,10 @@ def index():
         "active_job": active_job.to_dict() if active_job else None,
         "reconciliation": reconciliation,
         "consolidation": consolidation,
+        "process_summary": process_summary,
         "system": system_status(root),
         "show_archived": show_archived,
+        "currencies": CURRENCY_OPTIONS,
     }
     return render_template("index.html", state=state, csrf_token=session["csrf_token"])
 
@@ -115,7 +138,7 @@ def create_trip_route():
     metadata = data.get("metadata", {})
     if not isinstance(metadata, dict):
         raise ValueError("Trip metadata must be submitted as an object.")
-    claim_program = str(data.get("claim_program", "")).lower()
+    claim_program = normalize_claim_program(data.get("claim_program", ""))
     metadata["claim_program"] = claim_program
     validate_trip_metadata(metadata)
     trip = create_trip(
@@ -222,10 +245,10 @@ def update_trip_metadata(trip_name: str):
     if not isinstance(metadata, dict):
         raise ValueError("Trip metadata must be submitted as an object.")
     with jobs.mutation_guard(trip_name):
-        claim_program = str(metadata.get("claim_program") or "")
+        claim_program = normalize_claim_program(metadata.get("claim_program") or "")
         if claim_program:
             change_trip_claim_program(root, trip_name, claim_program)
-            if claim_program == "ivado_sponsored" and not metadata.get("sponsor"):
+            if claim_program == "ivado_reimbursed" and not metadata.get("sponsor"):
                 metadata["sponsor"] = "IVADO Labs"
         save_trip_metadata(resolve_trip(root, trip_name), metadata)
     return jsonify(

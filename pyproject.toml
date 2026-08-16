@@ -49,6 +49,7 @@ nlp_expenses = [
     "static/*.css",
     "static/*.js",
     "static/*.csv",
+    "static/*.xlsx",
 ]
 
 [tool.pytest.ini_options]

@@ -70,12 +70,19 @@ class InterprojectContractTests(unittest.TestCase):
                 },
             ]
 
-            build_ivado_claim_workbook(trip, records, output)
+            build_ivado_claim_workbook(
+                trip,
+                records,
+                output,
+                include_detailed_reconciliation=True,
+            )
             workbook = load_workbook(output, data_only=False)
-            items = workbook["Receipt Items"]
-            self.assertEqual(items["G2"].value, "Personal detour")
-            self.assertEqual(items["O2"].value, 75.0)
-            self.assertEqual(items["P2"].value, "non_business")
+            reconciliation = workbook["Reconciliation"]
+            rows = list(reconciliation.iter_rows(values_only=True))
+            item_header = next(index for index, row in enumerate(rows) if "Receipt Line" in row)
+            taxi = next(row for row in rows[item_header + 1 :] if row[6] == "Personal detour")
+            self.assertEqual(taxi[13], 75.0)
+            self.assertEqual(taxi[14], "non_business")
 
     def test_ivado_workbook_applies_employee_share_and_keeps_removed_alcohol(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -99,7 +106,7 @@ class InterprojectContractTests(unittest.TestCase):
                     "paid_by": "employee_personal",
                     "included_in_arvine": True,
                     "included_in_ivado": True,
-                    "arvine_reimbursable_cad": 100.0,
+                    "arvine_reimbursable_cad": 90.0,
                     "ivado_claimable_cad": 90.0,
                     "ivado_excluded_cad": 10.0,
                     "fx_rate": 1.0,
@@ -138,18 +145,26 @@ class InterprojectContractTests(unittest.TestCase):
 
             build_ivado_claim_workbook(trip, records, output)
             workbook = load_workbook(output, data_only=False)
-            report = workbook["Expense Report"]
-            self.assertEqual(report["H9"].value, 90.0)
-            self.assertEqual(report["N9"].value, 90.0)
-            items = workbook["Receipt Items"]
-            wine = next(
-                row for row in items.iter_rows(min_row=2, values_only=True) if row[6] == "Wine"
+            report = workbook["modèle - Template FR EN"]
+            self.assertEqual(report["H15"].value, 90.0)
+            self.assertEqual(report["N15"].value, 90.0)
+            reconciliation = workbook["Reconciliation"]
+            rows = list(reconciliation.iter_rows(values_only=True))
+            receipt_header = next(index for index, row in enumerate(rows) if "Vendor" in row)
+            restaurant = next(row for row in rows[receipt_header + 1 :] if row[2] == "Restaurant")
+            self.assertEqual(restaurant[8], 3)
+            self.assertEqual(restaurant[14], 10.0)
+            self.assertNotIn("Receipt Line", {value for row in rows for value in row})
+            self.assertEqual(
+                workbook.sheetnames,
+                [
+                    "modèle - Template FR EN",
+                    "Card Statements",
+                    "Reconciliation",
+                    "Directives & instructions - FR",
+                    "Guidelines & Instructions - EN",
+                ],
             )
-            self.assertEqual(wine[4], 3)
-            self.assertEqual(wine[8], 10.0)
-            self.assertEqual(wine[10], "Yes")
-            self.assertEqual(wine[13], 10.0)
-            self.assertEqual(wine[14], 10.0)
 
     def test_contract_declares_independent_program_and_payer_enums(self):
         schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -163,7 +178,7 @@ class InterprojectContractTests(unittest.TestCase):
             ["employee_personal", "arvine_corporate_bmo"],
         )
 
-    def test_example_reconciles_full_employee_and_net_ivado_amounts(self):
+    def test_example_reconciles_net_employee_and_ivado_amounts(self):
         records = [
             json.loads(line)
             for line in EXAMPLE_PATH.read_text(encoding="utf-8").splitlines()
@@ -189,7 +204,7 @@ class InterprojectContractTests(unittest.TestCase):
         )
         self.assertAlmostEqual(
             report["employee_reimbursement_total_cad"],
-            report["ivado_claim_total_cad"] + report["ivado_excluded_total_cad"],
+            report["ivado_claim_total_cad"],
             places=2,
         )
 
@@ -214,7 +229,7 @@ class InterprojectContractTests(unittest.TestCase):
                 trip,
                 {
                     "claim_program": "ivado_sponsored",
-                    "traveller": "Florent Voumard",
+                    "traveller": "Example Traveller",
                     "start_date": "2026-07-20",
                     "end_date": "2026-07-22",
                     "business_purpose": "Montreal business trip",
@@ -241,7 +256,7 @@ class InterprojectContractTests(unittest.TestCase):
                         "included_in_ivado": True,
                         "number_of_people": 1,
                         "total_cad": 115.0,
-                        "arvine_reimbursable_cad": 115.0,
+                        "arvine_reimbursable_cad": 95.0,
                         "corporate_paid_cad": 0.0,
                         "ivado_claimable_cad": 95.0,
                         "ivado_excluded_cad": 20.0,
@@ -268,11 +283,19 @@ class InterprojectContractTests(unittest.TestCase):
                                 "included_in_ivado": False,
                                 "ivado_exclusion_reason": "alcohol",
                             },
+                            {
+                                "line_id": "promotion",
+                                "description": "Promotion",
+                                "amount": -5.0,
+                                "is_alcohol": False,
+                                "included_in_arvine": True,
+                                "included_in_ivado": True,
+                            },
                         ],
                     }
                 ],
                 "summary": {
-                    "employee_reimbursement_total_cad": 115.0,
+                    "employee_reimbursement_total_cad": 95.0,
                     "corporate_paid_total_cad": 0.0,
                     "ivado_claim_total_cad": 95.0,
                     "ivado_excluded_total_cad": 20.0,
@@ -280,18 +303,26 @@ class InterprojectContractTests(unittest.TestCase):
                 },
                 "accounting": {
                     "rows": [
-                        {"account": "Meals – Deductible (50%)", "amount_cad": 57.5},
-                        {"account": "Meals – Non-deductible (50%)", "amount_cad": 57.5},
+                        {"account": "Meals – Deductible (50%)", "amount_cad": 47.5},
+                        {"account": "Meals – Non-deductible (50%)", "amount_cad": 47.5},
                     ]
                 },
             }
             records = build_trip_manifest_records(root, trip, view=view)
             validate_manifest_records(records)
             self.assertEqual([record["kind"] for record in records], ["receipt", "trip_report"])
-            self.assertEqual(records[0]["arvine_reimbursable_cad"], 115.0)
+            self.assertEqual(records[0]["arvine_reimbursable_cad"], 95.0)
             self.assertEqual(records[0]["ivado_claimable_cad"], 95.0)
             self.assertEqual(records[0]["number_of_people"], 1)
-            self.assertEqual(records[1]["traveller"], "Florent Voumard")
+            self.assertEqual(
+                next(
+                    item["amount"]
+                    for item in records[0]["line_items"]
+                    if item["line_id"] == "promotion"
+                ),
+                -5.0,
+            )
+            self.assertEqual(records[1]["traveller"], "Example Traveller")
             self.assertNotIn("settlement_legs", records[1])
             self.assertNotIn("company", records[1])
             self.assertNotIn("sponsor", records[1])
@@ -307,7 +338,12 @@ class InterprojectContractTests(unittest.TestCase):
                 / "lib"
                 / "manifest.mjs"
             )
-            if consumer_parser.is_file():
+            consumer_supports_net_ivado_reimbursement = (
+                consumer_parser.is_file()
+                and "IVADO claim plus exclusions must equal the reviewed trip total"
+                not in consumer_parser.read_text(encoding="utf-8")
+            )
+            if consumer_supports_net_ivado_reimbursement:
                 script = (
                     "import { parseManifestFile } from "
                     f"{json.dumps(consumer_parser.as_uri())};"

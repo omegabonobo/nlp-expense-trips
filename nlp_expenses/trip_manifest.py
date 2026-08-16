@@ -11,6 +11,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 from nlp_expenses.accounting import trip_accounting_profile
 from nlp_expenses.consolidation import consolidation_view
 from nlp_expenses.storage import write_text_atomic
+from nlp_expenses.trip_metadata import normalize_claim_program, normalize_paid_by
 
 CONTRACT_VERSION = "3.0.0"
 CONTRACT_FILENAME = "trip-reimbursement-manifest.v3.ndjson"
@@ -18,6 +19,14 @@ CONTRACT_SCHEMA = files("nlp_expenses.contracts").joinpath(
     "trip-reimbursement-manifest.v3.schema.json"
 )
 CONTROL_TOLERANCE_CAD = 0.02
+V3_CLAIM_PROGRAM = {
+    "company_reimbursed": "arvine_only",
+    "ivado_reimbursed": "ivado_sponsored",
+}
+V3_PAID_BY = {
+    "traveller_personal": "employee_personal",
+    "company_card": "arvine_corporate_bmo",
+}
 
 
 def manifest_output_path(trip_dir: Path) -> Path:
@@ -39,9 +48,12 @@ def build_trip_manifest_records(
         raise ValueError(
             f"Resolve the {blocking} blocking review item(s) before building the reimbursement manifest."
         )
-    claim_program = str(view.get("claim_program") or "")
-    if claim_program not in {"arvine_only", "ivado_sponsored"}:
-        raise ValueError("Choose Arvine only or IVADO sponsored before building the manifest.")
+    current_claim_program = normalize_claim_program(view.get("claim_program"))
+    claim_program = V3_CLAIM_PROGRAM.get(current_claim_program)
+    if not claim_program:
+        raise ValueError(
+            "Choose own-company reimbursement or IVADO-reimbursed before building the manifest."
+        )
 
     metadata = view["metadata"]
     report_id = stable_report_id(trip_dir.name)
@@ -110,7 +122,7 @@ def receipt_manifest_record(
         "qst": money(expense.get("qst")),
         "total": total,
         "total_cad": total_cad,
-        "paid_by": expense.get("paid_by"),
+        "paid_by": V3_PAID_BY.get(normalize_paid_by(expense.get("paid_by"))),
         "number_of_people": max(1, int(expense.get("number_of_people") or 1)),
         "included_in_arvine": receipt_included_in_arvine,
         "included_in_ivado": receipt_included_in_ivado,
@@ -118,7 +130,7 @@ def receipt_manifest_record(
         "ivado_claimable_cad": money(expense.get("ivado_claimable_cad")) or 0.0,
         "ivado_excluded_cad": money(expense.get("ivado_excluded_cad")) or 0.0,
         "line_items": line_items,
-        "fx_rate": money(expense.get("fx_rate")),
+        "fx_rate": decimal_rate(expense.get("fx_rate")),
         "ivado_exclusion_reason": (
             expense.get("ivado_exclusion_reason")
             if claim_program == "ivado_sponsored"
@@ -230,9 +242,21 @@ def validate_manifest_records(records: list[dict]) -> None:
     if not records:
         raise ValueError("The reimbursement manifest cannot be empty.")
     schema = json.loads(CONTRACT_SCHEMA.read_text(encoding="utf-8"))
-    validator = Draft202012Validator(schema, format_checker=FormatChecker())
     errors: list[str] = []
     for index, record in enumerate(records, start=1):
+        definition_name = {
+            "receipt": "receipt",
+            "trip_report": "tripReport",
+        }.get(record.get("kind"))
+        if definition_name:
+            record_schema = {
+                "$schema": schema["$schema"],
+                "$defs": schema["$defs"],
+                **schema["$defs"][definition_name],
+            }
+        else:
+            record_schema = schema
+        validator = Draft202012Validator(record_schema, format_checker=FormatChecker())
         for error in sorted(validator.iter_errors(record), key=lambda item: list(item.path)):
             location = ".".join(str(value) for value in error.path) or "record"
             errors.append(f"Line {index} {location}: {error.message}")
@@ -247,13 +271,17 @@ def validate_manifest_records(records: list[dict]) -> None:
         raise ValueError("Receipt IDs must be unique within the reimbursement manifest.")
     report = reports[0]
     controls = {
-        "employee reimbursement": (
+        "traveller reimbursement": (
             sum(record["arvine_reimbursable_cad"] for record in receipts),
             report["employee_reimbursement_total_cad"],
         ),
         "corporate paid": (
             sum(
-                record["total_cad"]
+                (
+                    record["ivado_claimable_cad"]
+                    if report["claim_program"] == "ivado_sponsored"
+                    else record["total_cad"]
+                )
                 for record in receipts
                 if record["paid_by"] == "arvine_corporate_bmo"
             ),
@@ -275,15 +303,22 @@ def validate_manifest_records(records: list[dict]) -> None:
                 f"Manifest {label} detail differs from the trip report by {difference:.2f} CAD."
             )
     if report["claim_program"] == "ivado_sponsored":
-        reviewed_total = round(
+        reimbursed_total = round(
             report["employee_reimbursement_total_cad"] + report["corporate_paid_total_cad"],
             2,
         )
-        ivado_total = round(
+        difference = round(reimbursed_total - report["ivado_claim_total_cad"], 2)
+        if abs(difference) > CONTROL_TOLERANCE_CAD:
+            raise ValueError(
+                "Manifest traveller/company reimbursement differs from the IVADO claim "
+                f"by {difference:.2f} CAD."
+            )
+        reviewed_total = round(sum(record["total_cad"] for record in receipts), 2)
+        ivado_reviewed_total = round(
             report["ivado_claim_total_cad"] + report["ivado_excluded_total_cad"],
             2,
         )
-        difference = round(reviewed_total - ivado_total, 2)
+        difference = round(reviewed_total - ivado_reviewed_total, 2)
         if abs(difference) > CONTROL_TOLERANCE_CAD:
             raise ValueError(
                 "Manifest IVADO claim plus exclusions differ from the reviewed trip "
@@ -293,7 +328,7 @@ def validate_manifest_records(records: list[dict]) -> None:
     difference = round(component_total - report["employee_reimbursement_total_cad"], 2)
     if abs(difference) > CONTROL_TOLERANCE_CAD:
         raise ValueError(
-            f"Manifest accounting components differ from employee reimbursement by {difference:.2f} CAD."
+            f"Manifest accounting components differ from traveller reimbursement by {difference:.2f} CAD."
         )
 
 
@@ -329,5 +364,14 @@ def money(value: object) -> float | None:
         return None
     try:
         return round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def decimal_rate(value: object) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return round(float(value), 10)
     except (TypeError, ValueError):
         return None

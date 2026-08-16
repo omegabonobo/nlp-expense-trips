@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from openpyxl import load_workbook
 
@@ -12,12 +13,14 @@ from nlp_expenses.line_items import (
     ensure_line_item_review_ready,
     line_item_review_view,
     load_line_item_review_state,
+    receipt_scan_status,
     remove_line_item,
     reset_receipt_review,
     save_line_item_review,
     save_line_item_review_state,
     set_expense_review,
     set_line_item_review,
+    sync_line_item_review,
 )
 from nlp_expenses.models import Expense, LineItem, NormalizedTransaction
 from nlp_expenses.trip_metadata import save_trip_metadata
@@ -59,6 +62,46 @@ def meal_expense(path: Path) -> Expense:
 
 
 class LineItemReviewTests(unittest.TestCase):
+    def test_incremental_scan_extracts_only_new_receipts_and_preserves_existing_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202607_incremental-scan", mode="arvine")
+            first_path = trip / "expenses_receipts" / "first.pdf"
+            first_path.write_bytes(b"first")
+            with patch(
+                "nlp_expenses.generator.parse_arvine_receipt",
+                return_value=meal_expense(first_path),
+            ):
+                sync_line_item_review(trip, root, llm_mode="off", only_unscanned=True)
+
+            set_expense_review(trip, first_path.name, {"currency": "QAR"})
+            second_path = trip / "expenses_receipts" / "second.pdf"
+            second_path.write_bytes(b"second")
+            scan = receipt_scan_status(trip)
+            self.assertEqual(scan["scanned_count"], 1)
+            self.assertEqual(scan["unscanned_count"], 1)
+            self.assertEqual(
+                {item["source_file"]: item["status"] for item in scan["receipts"]},
+                {"first.pdf": "scanned", "second.pdf": "not_scanned"},
+            )
+
+            second_expense = meal_expense(second_path)
+            second_expense.supplier_name = "Second Bistro"
+            with patch(
+                "nlp_expenses.generator.parse_arvine_receipt",
+                return_value=second_expense,
+            ) as parser:
+                sync_line_item_review(trip, root, llm_mode="off", only_unscanned=True)
+            parser.assert_called_once()
+            self.assertEqual(parser.call_args.args[0], second_path)
+
+            review = line_item_review_view(trip)
+            self.assertFalse(review["stale"])
+            self.assertEqual(len(review["receipts"]), 2)
+            first = next(item for item in review["receipts"] if item["source_file"] == "first.pdf")
+            self.assertEqual(first["currency"], "QAR")
+            self.assertIn("currency", first["overridden_fields"])
+
     def test_explicit_line_and_receipt_review_moves_expense_to_ready(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -106,6 +149,42 @@ class LineItemReviewTests(unittest.TestCase):
             )
             self.assertFalse(changed_line["reviewed"])
 
+    def test_receipt_meal_classification_is_derived_from_editable_expense_type(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202607_meal-toggle", mode="arvine")
+            receipt = trip / "expenses_receipts" / "meal.pdf"
+            receipt.write_bytes(b"meal")
+            save_line_item_review(trip, [meal_expense(receipt)])
+
+            detected = line_item_review_view(trip)["receipts"][0]
+            self.assertTrue(detected["is_meal"])
+            self.assertEqual(detected["non_meal_expense_type"], "other")
+
+            non_meal = set_expense_review(trip, receipt.name, {"expense_type": "transport"})[
+                "receipts"
+            ][0]
+            self.assertFalse(non_meal["is_meal"])
+            self.assertEqual(non_meal["non_meal_expense_type"], "transport")
+
+            meal = set_expense_review(trip, receipt.name, {"expense_type": "meal"})["receipts"][0]
+            self.assertTrue(meal["is_meal"])
+            self.assertEqual(meal["non_meal_expense_type"], "transport")
+
+    def test_expense_currency_must_come_from_iso_currency_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202607_currency-list", mode="arvine")
+            receipt = trip / "expenses_receipts" / "meal.pdf"
+            receipt.write_bytes(b"meal")
+            save_line_item_review(trip, [meal_expense(receipt)])
+
+            with self.assertRaisesRegex(ValueError, "highlighted expense fields"):
+                set_expense_review(trip, receipt.name, {"currency": "ZZZ"})
+
+            qar = set_expense_review(trip, receipt.name, {"currency": "qar"})["receipts"][0]
+            self.assertEqual(qar["currency"], "QAR")
+
     def test_default_payer_override_survives_rescan_and_reset_restores_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -124,17 +203,17 @@ class LineItemReviewTests(unittest.TestCase):
             save_line_item_review(trip, [expense])
             self.assertEqual(
                 line_item_review_view(trip)["receipts"][0]["paid_by"],
-                "arvine_corporate_bmo",
+                "company_card",
             )
 
             set_expense_review(trip, receipt.name, {"paid_by": "employee_personal"})
             save_line_item_review(trip, [meal_expense(receipt)])
             rescanned = line_item_review_view(trip)["receipts"][0]
-            self.assertEqual(rescanned["paid_by"], "employee_personal")
+            self.assertEqual(rescanned["paid_by"], "traveller_personal")
             self.assertTrue(rescanned["paid_by_overridden"])
 
             reset = reset_receipt_review(trip, receipt.name)["receipts"][0]
-            self.assertEqual(reset["paid_by"], "arvine_corporate_bmo")
+            self.assertEqual(reset["paid_by"], "company_card")
             self.assertFalse(reset["paid_by_overridden"])
 
             save_trip_metadata(
@@ -146,8 +225,8 @@ class LineItemReviewTests(unittest.TestCase):
                 },
             )
             updated_default = line_item_review_view(trip)["receipts"][0]
-            self.assertEqual(updated_default["paid_by"], "employee_personal")
-            self.assertEqual(updated_default["auto_paid_by"], "employee_personal")
+            self.assertEqual(updated_default["paid_by"], "traveller_personal")
+            self.assertEqual(updated_default["auto_paid_by"], "traveller_personal")
 
     def test_whole_receipt_ivado_exclusion_keeps_a_reason(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -290,6 +369,34 @@ class LineItemReviewTests(unittest.TestCase):
             self.assertEqual(reviewed["arvine_included_total"], 115.0)
             self.assertEqual(reviewed["ivado_included_total"], 95.0)
 
+    def test_shared_receipt_exposes_full_and_per_employee_adjusted_totals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202607_shared-totals", mode="ivado")
+            receipt = trip / "expenses_receipts" / "meal.pdf"
+            receipt.write_bytes(b"meal")
+            expense = Expense(
+                source_file=receipt,
+                expense_id="",
+                expense_type="meal",
+                amount=314.0,
+                currency="CAD",
+                number_of_people=2,
+                line_items=[
+                    LineItem(description="Food", amount=222.0),
+                    LineItem(description="Alcohol", amount=92.0, is_alcohol=True),
+                ],
+            )
+
+            save_line_item_review(trip, [expense])
+            reviewed = line_item_review_view(trip)["receipts"][0]
+
+            self.assertEqual(reviewed["per_person_receipt_total"], 157.0)
+            self.assertEqual(reviewed["per_person_line_total"], 157.0)
+            self.assertEqual(reviewed["per_person_arvine_included_total"], 157.0)
+            self.assertEqual(reviewed["per_person_ivado_included_total"], 111.0)
+            self.assertEqual(reviewed["per_person_ivado_excluded_total"], 46.0)
+
     def test_tax_fields_and_protected_tax_lines_stay_synchronized(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -347,6 +454,97 @@ class LineItemReviewTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "cannot be removed"):
                 remove_line_item(trip, receipt.name, tax_lines["gst_hst"]["line_id"])
 
+            with self.assertRaisesRegex(ValueError, "Tax amount cannot be negative"):
+                set_line_item_review(
+                    trip,
+                    receipt.name,
+                    tax_lines["gst_hst"]["line_id"],
+                    {"amount": -1.0},
+                )
+
+    def test_promotions_can_be_added_and_edited_as_negative_line_items(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202607_promotion", mode="ivado")
+            receipt = trip / "expenses_receipts" / "meal.pdf"
+            receipt.write_bytes(b"meal")
+            expense = Expense(
+                source_file=receipt,
+                expense_id="",
+                expense_type="meal",
+                amount=10.0,
+                currency="CAD",
+                line_items=[LineItem(description="Food and fees", amount=15.0)],
+            )
+            save_line_item_review(trip, [expense])
+
+            added = add_line_item(
+                trip,
+                receipt.name,
+                "Promotion",
+                -5.0,
+                included=True,
+                is_alcohol=True,
+            )["receipts"][0]
+            promotion = next(
+                item for item in added["line_items"] if item["description"] == "Promotion"
+            )
+
+            self.assertEqual(promotion["amount"], -5.0)
+            self.assertFalse(promotion["is_alcohol"])
+            self.assertTrue(promotion["included_in_ivado"])
+            self.assertEqual(added["line_total"], 10.0)
+            self.assertTrue(added["reconciled"])
+
+            edited = set_line_item_review(
+                trip,
+                receipt.name,
+                promotion["line_id"],
+                {"amount": -4.5},
+            )["receipts"][0]
+            promotion = next(
+                item for item in edited["line_items"] if item["description"] == "Promotion"
+            )
+            self.assertEqual(promotion["amount"], -4.5)
+
+            with self.assertRaisesRegex(ValueError, "valid line-item amount"):
+                add_line_item(trip, receipt.name, "Invalid", "nan")
+
+    def test_corrected_subtotal_updates_unchanged_ocr_receipt_total(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202607_corrected-total", mode="arvine")
+            receipt = trip / "expenses_receipts" / "cafe.pdf"
+            receipt.write_bytes(b"cafe")
+            expense = Expense(
+                source_file=receipt,
+                expense_id="",
+                expense_type="meal",
+                amount=67.0,
+                subtotal=67.0,
+                currency="QAR",
+                line_items=[LineItem(description="Cafe purchase", amount=67.0)],
+            )
+            save_line_item_review(trip, [expense])
+
+            corrected = set_expense_review(
+                trip,
+                receipt.name,
+                {"amount": 67.0, "subtotal": 57.0, "gst_hst": 0, "qst": 0},
+            )["receipts"][0]
+
+            self.assertEqual(corrected["subtotal"], 57.0)
+            self.assertEqual(corrected["amount"], 57.0)
+            self.assertEqual(corrected["receipt_total"], 57.0)
+            self.assertEqual(corrected["field_overrides"]["amount"], 57.0)
+
+            explicitly_distinct = set_expense_review(
+                trip,
+                receipt.name,
+                {"amount": 60.0, "subtotal": 55.0},
+            )["receipts"][0]
+            self.assertEqual(explicitly_distinct["amount"], 60.0)
+
     def test_every_expense_has_zero_default_tax_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -377,7 +575,7 @@ class LineItemReviewTests(unittest.TestCase):
                 [("GST/HST", 0.0), ("QST", 0.0)],
             )
 
-    def test_non_meal_receipt_with_a_line_total_difference_requires_review(self):
+    def test_non_meal_receipt_without_saved_purchase_lines_gets_a_balancing_subtotal(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             trip = ensure_trip(root, "202607_non-meal-gap", mode="arvine")
@@ -399,11 +597,48 @@ class LineItemReviewTests(unittest.TestCase):
             )
 
             reviewed = line_item_review_view(trip)["receipts"][0]
-            self.assertEqual(reviewed["line_total"], 0.0)
-            self.assertEqual(reviewed["difference"], -30.45)
-            self.assertFalse(reviewed["reconciled"])
-            self.assertEqual(reviewed["automatic_status"], "review")
-            self.assertEqual(reviewed["status"], "review")
+            self.assertEqual(reviewed["line_total"], 30.45)
+            self.assertEqual(reviewed["difference"], 0.0)
+            self.assertTrue(reviewed["reconciled"])
+            self.assertEqual(reviewed["automatic_status"], "not_applicable")
+            self.assertEqual(reviewed["status"], "ok")
+            self.assertEqual(
+                [item["description"] for item in reviewed["line_items"]],
+                ["Receipt subtotal", "GST/HST", "QST"],
+            )
+
+    def test_legacy_uber_tax_only_scan_uses_saved_subtotal_without_rescanning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202607_uber", mode="company")
+            receipt = trip / "expenses_receipts" / "uber.pdf"
+            receipt.write_bytes(b"uber")
+            save_line_item_review(
+                trip,
+                [
+                    Expense(
+                        source_file=receipt,
+                        expense_id="",
+                        date="2026-07-01",
+                        supplier_name="Uber",
+                        expense_type="transport",
+                        amount=16.56,
+                        subtotal=14.40,
+                        gst_hst=0.72,
+                        qst=1.44,
+                        currency="CAD",
+                    )
+                ],
+            )
+
+            reviewed = line_item_review_view(trip)["receipts"][0]
+
+            self.assertEqual(reviewed["line_total"], 16.56)
+            self.assertEqual(reviewed["difference"], 0.0)
+            self.assertEqual(
+                [(item["description"], item["amount"]) for item in reviewed["line_items"]],
+                [("Receipt subtotal", 14.40), ("GST/HST", 0.72), ("QST", 1.44)],
+            )
 
     def test_removed_receipt_does_not_lock_edits_for_remaining_receipts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -495,7 +730,7 @@ class LineItemReviewTests(unittest.TestCase):
             self.assertFalse(cocktail["is_alcohol"])
             self.assertEqual(cocktail["alcohol_reason"], "")
 
-            with self.assertRaisesRegex(ValueError, "Arvine includes every receipt line"):
+            with self.assertRaisesRegex(ValueError, "company report includes every receipt line"):
                 set_line_item_review(
                     trip,
                     receipt.name,
@@ -631,7 +866,7 @@ class LineItemReviewTests(unittest.TestCase):
                 for item in view["receipts"][0]["line_items"]
                 if item["description"] == "French 75"
             )
-            with self.assertRaisesRegex(ValueError, "Arvine includes every receipt line"):
+            with self.assertRaisesRegex(ValueError, "company report includes every receipt line"):
                 set_line_item_review(
                     arvine,
                     arvine_receipt.name,

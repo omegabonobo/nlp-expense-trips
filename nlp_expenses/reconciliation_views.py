@@ -4,6 +4,7 @@ from collections import defaultdict
 from difflib import SequenceMatcher
 from pathlib import Path
 
+from nlp_expenses.line_items import line_item_review_view
 from nlp_expenses.matching import (
     card_total_gap_percent,
     close_amount,
@@ -13,11 +14,33 @@ from nlp_expenses.matching import (
 from nlp_expenses.reconciliation_allocations import REIMBURSABLE_ALLOCATION_TYPES
 from nlp_expenses.reconciliation_coverage import statement_coverage_view
 from nlp_expenses.reconciliation_state import (
+    deserialize_statement_basis_overrides,
     load_reconciliation_state,
     reconciliation_input_fingerprint,
 )
 from nlp_expenses.trip_metadata import trip_policy_warnings
-from nlp_expenses.trips import trip_mode
+from nlp_expenses.trips import normalize_trip_mode, trip_mode
+
+RECONCILIATION_RECEIPT_FIELDS = {
+    "date",
+    "vendor",
+    "description",
+    "expense_type",
+    "amount",
+    "currency",
+    "country",
+    "province",
+    "gst_hst",
+    "qst",
+    "gst_hst_number",
+    "qst_number",
+    "business_purpose",
+    "attendees_client",
+    "tax_documentation_status",
+    "review_note",
+    "included",
+    "number_of_people",
+}
 
 
 def transaction_matches_expense(transaction: dict, source_file: str) -> bool:
@@ -45,6 +68,7 @@ def transaction_summary(transaction: dict) -> dict:
         "cad_completeness": transaction.get("cad_completeness"),
         "expense_file": transaction.get("expense_file"),
         "allocation_status": transaction.get("allocation_status"),
+        "match_status": transaction.get("match_status"),
     }
 
 
@@ -120,14 +144,16 @@ def serialized_card_total_gap_percent(expense: dict, transaction: dict) -> int |
     return None
 
 
+def serialized_merchant_similarity(expense: dict, transaction: dict) -> float:
+    vendor = str(expense.get("vendor") or "").lower()
+    description = str(transaction.get("description") or "").lower()
+    return SequenceMatcher(None, vendor, description).ratio() if vendor and description else 0.0
+
+
 def serialized_candidate_reason(expense: dict, transaction: dict) -> str:
     gap = serialized_card_total_gap_percent(expense, transaction)
     delta = days_between(expense.get("date"), transaction.get("transaction_date"))
-    vendor = str(expense.get("vendor") or "").lower()
-    description = str(transaction.get("description") or "").lower()
-    merchant_similarity = (
-        SequenceMatcher(None, vendor, description).ratio() if vendor and description else 0.0
-    )
+    merchant_similarity = serialized_merchant_similarity(expense, transaction)
     if gap is not None and delta == 0 and merchant_similarity >= 0.35:
         return (
             f"Same merchant and date; receipt is {gap}% below the card total, possibly tax or tip."
@@ -146,6 +172,7 @@ def reconciliation_view(trip_dir: Path, state: dict | None = None) -> dict:
             "available": False,
             "stale": False,
             "synced_at": None,
+            "sync_scope": None,
             "expenses": [],
             "transactions": [],
             "unmatched_expenses": [],
@@ -159,9 +186,18 @@ def reconciliation_view(trip_dir: Path, state: dict | None = None) -> dict:
         }
 
     expenses = [dict(expense) for expense in state.get("expenses", [])]
+    receipt_overrides = current_receipt_overrides(trip_dir)
+    for expense in expenses:
+        expense.update(receipt_overrides.get(str(expense.get("source_file") or ""), {}))
     expenses_by_file = {expense["source_file"]: expense for expense in expenses}
-    invoice_overrides = state.get("invoice_overrides", {})
+    invoice_overrides = {
+        source_file: dict(values)
+        for source_file, values in state.get("invoice_overrides", {}).items()
+    }
+    for source_file, values in receipt_overrides.items():
+        invoice_overrides.setdefault(source_file, {}).update(values)
     cad_overrides = state.get("manual_cad_overrides", {})
+    statement_basis_overrides = deserialize_statement_basis_overrides(state)
     for expense in expenses:
         source_file = expense["source_file"]
         expense["overridden_fields"] = sorted(invoice_overrides.get(source_file, {}))
@@ -277,12 +313,16 @@ def reconciliation_view(trip_dir: Path, state: dict | None = None) -> dict:
         and not transaction.get("ignored")
         and (
             (transaction.get("allocations") and transaction.get("allocation_status") != "balanced")
-            or (not transaction.get("allocations") and not transaction.get("expense_file"))
-            or transaction.get("normalization_status") in {"review", "possible_duplicate"}
             or (
                 not transaction.get("allocations")
-                and transaction.get("cad_completeness") != "complete"
-                and transaction.get("cad_source") != "manual"
+                and transaction.get("expense_file")
+                and (
+                    transaction.get("normalization_status") in {"review", "possible_duplicate"}
+                    or (
+                        transaction.get("cad_completeness") != "complete"
+                        and transaction.get("cad_source") != "manual"
+                    )
+                )
             )
         )
     )
@@ -339,39 +379,52 @@ def reconciliation_view(trip_dir: Path, state: dict | None = None) -> dict:
             expense["cad_amount_used"] = None
             expense["cad_source"] = "unavailable"
             expense["cad_source_note"] = ""
-        expense["fx_rate"] = accounting_rate(
+        statement_source = expense.get("cad_source") in {
+            "statement",
+            "statement_aggregated",
+            "allocation",
+            "allocation_aggregated",
+        }
+        expense["fx_basis_amount_used"], expense["fx_basis_status"] = accounting_basis(
             expense,
-            expense.get("cad_amount_used") or 0.0,
-            expense.get("cad_amount_used") is not None,
-            (
-                statement_purchase_amount
-                if expense.get("cad_source")
-                in {
-                    "statement",
-                    "statement_aggregated",
-                    "allocation",
-                    "allocation_aggregated",
-                }
-                else None
-            ),
+            statement_purchase_amount if statement_source else None,
             statement_purchase_currency,
             aggregated=group_counts_by_expense[source_file] > 1,
         )
-        expense["fx_basis_amount_used"], expense["fx_basis_status"] = accounting_basis(
+        basis_decision = statement_basis_overrides.get(source_file, {})
+        explicit_basis = basis_decision.get("basis")
+        people = max(1, int(expense.get("number_of_people") or 1))
+        receipt_amount = expense.get("amount")
+        if (
+            statement_source
+            and explicit_basis in {"full_receipt", "personal_share"}
+            and isinstance(receipt_amount, (int, float))
+            and receipt_amount
+        ):
+            expense["fx_basis_amount_used"] = abs(float(receipt_amount)) / (
+                people if explicit_basis == "personal_share" else 1
+            )
+            expense["fx_basis_status"] = f"statement_{explicit_basis}_explicit"
+        expense["statement_amount_basis"] = (
+            explicit_basis
+            if explicit_basis in {"full_receipt", "personal_share"}
+            else inferred_statement_amount_basis(expense["fx_basis_status"])
+        )
+        expense["statement_amount_basis_explicit"] = explicit_basis is not None
+        expense["statement_basis_updated_at"] = basis_decision.get("updated_at")
+        fx_basis = expense["fx_basis_amount_used"]
+        expense["fx_rate"] = (
+            round(abs(float(expense.get("cad_amount_used") or 0.0)) / abs(fx_basis), 6)
+            if expense.get("cad_amount_used") is not None
+            and isinstance(fx_basis, (int, float))
+            and fx_basis
+            else None
+        )
+        expense["statement_receipt_difference"] = statement_receipt_difference(
             expense,
-            (
-                statement_purchase_amount
-                if expense.get("cad_source")
-                in {
-                    "statement",
-                    "statement_aggregated",
-                    "allocation",
-                    "allocation_aggregated",
-                }
-                else None
-            ),
+            statement_purchase_amount,
             statement_purchase_currency,
-            aggregated=group_counts_by_expense[source_file] > 1,
+            expense["fx_basis_status"],
         )
         if expense.get("cad_source") == "manual":
             expense["fx_basis_status"] = f"manual_{expense['fx_basis_status']}"
@@ -422,6 +475,37 @@ def reconciliation_view(trip_dir: Path, state: dict | None = None) -> dict:
         expense["match_suggestions"] = [
             item for item in ranked if item["current"] or item["suggested"] or item["likely"]
         ][:12]
+        current_transactions = [
+            transaction
+            for transaction in transactions
+            if transaction_matches_expense(transaction, source_file)
+            and not transaction.get("allocations")
+        ]
+        current_scores = [
+            serialized_candidate_score(
+                expense,
+                transaction,
+                estimated_cad_by_expense.get(source_file),
+            )
+            for transaction in current_transactions
+        ]
+        if expense["extraction_status"] != "ok" or expense.get("cad_source") == "unavailable":
+            expense["review_status"] = "review"
+        elif any(
+            match.get("allocation_status") == "balanced" or match.get("match_status") == "manual"
+            for match in expense["statement_matches"]
+        ):
+            expense["review_status"] = "confirmed"
+        elif (
+            len(current_scores) == 1
+            and current_scores[0] >= 0.90
+            and serialized_merchant_similarity(expense, current_transactions[0]) >= 0.35
+        ):
+            expense["review_status"] = "assumed_ok"
+        elif expense["statement_matches"]:
+            expense["review_status"] = "review"
+        else:
+            expense["review_status"] = "review"
 
     policy_warnings = trip_policy_warnings(trip_dir, expenses, transactions)
     unresolved_policy_warnings = sum(1 for warning in policy_warnings if not warning["resolved"])
@@ -429,13 +513,27 @@ def reconciliation_view(trip_dir: Path, state: dict | None = None) -> dict:
     unmatched_expenses = [
         expense for expense in expenses if expense["source_file"] not in matched_files
     ]
+    unmatched_transactions = [
+        transaction
+        for transaction in transactions
+        if transaction.get("match_eligible")
+        and not transaction.get("ignored")
+        and not transaction.get("expense_file")
+        and not transaction.get("allocations")
+    ]
+    ignored_transactions = [
+        transaction for transaction in transactions if transaction.get("ignored")
+    ]
     return {
         "available": True,
         "stale": not reconciliation_is_fresh(trip_dir, state),
         "synced_at": state.get("synced_at"),
+        "sync_scope": state.get("sync_scope", "all"),
         "expenses": expenses,
         "transactions": transactions,
         "unmatched_expenses": unmatched_expenses,
+        "unmatched_transactions": unmatched_transactions,
+        "ignored_transactions": ignored_transactions,
         "warnings": list(state.get("warnings", [])),
         "policy_warnings": policy_warnings,
         "coverage": statement_coverage_view(trip_dir, state),
@@ -471,11 +569,47 @@ def reconciliation_view(trip_dir: Path, state: dict | None = None) -> dict:
 
 def reconciliation_is_fresh(trip_dir: Path, state: dict | None = None) -> bool:
     state = state if state is not None else load_reconciliation_state(trip_dir)
+    legacy_receipt_edit = bool(
+        state
+        and state.get("requires_resync")
+        and not state.get("requires_resync_reason")
+        and receipt_overrides_differ_from_snapshot(trip_dir, state)
+    )
     return bool(
         state
-        and state.get("mode") == trip_mode(trip_dir)
-        and not state.get("requires_resync")
+        and normalize_trip_mode(state.get("mode")) == trip_mode(trip_dir)
+        and (not state.get("requires_resync") or legacy_receipt_edit)
         and state.get("input_fingerprint") == reconciliation_input_fingerprint(trip_dir)
+    )
+
+
+def current_receipt_overrides(trip_dir: Path) -> dict[str, dict]:
+    """Return canonical receipt edits that should overlay an older card snapshot."""
+
+    review = line_item_review_view(trip_dir)
+    if not review.get("available") or review.get("stale"):
+        return {}
+    result: dict[str, dict] = {}
+    for receipt in review.get("receipts", []):
+        if not isinstance(receipt, dict):
+            continue
+        source_file = str(receipt.get("source_file") or "")
+        overridden = set(receipt.get("overridden_fields") or [])
+        values = {field: receipt.get(field) for field in overridden & RECONCILIATION_RECEIPT_FIELDS}
+        if values:
+            result[source_file] = values
+    return result
+
+
+def receipt_overrides_differ_from_snapshot(trip_dir: Path, state: dict) -> bool:
+    expenses = {
+        str(expense.get("source_file") or ""): expense
+        for expense in state.get("expenses", [])
+        if isinstance(expense, dict)
+    }
+    return any(
+        any(expenses.get(source_file, {}).get(field) != value for field, value in values.items())
+        for source_file, values in current_receipt_overrides(trip_dir).items()
     )
 
 
@@ -488,7 +622,7 @@ def serialized_extraction_status(expense: dict) -> str:
         or expense.get("vendor") == "Unknown supplier"
     ):
         return "review"
-    return "review" if expense.get("review_note") else "ok"
+    return "ok"
 
 
 def expense_label(expense: dict | None) -> str | None:
@@ -526,6 +660,16 @@ def accounting_rate(
     return round(abs(cad_amount) / abs(amount), 6)
 
 
+def inferred_statement_amount_basis(fx_basis_status: str) -> str:
+    if fx_basis_status in {
+        "statement_person_share",
+        "statement_person_share_includes_tip",
+        "statement_personal_share_explicit",
+    }:
+        return "personal_share"
+    return "full_receipt"
+
+
 def accounting_basis(
     expense: dict | None,
     statement_purchase_amount: float | None = None,
@@ -560,9 +704,45 @@ def accounting_basis(
     people = max(1, int(expense.get("number_of_people") or 1))
     if amounts_align(statement_amount, receipt_amount):
         return statement_amount, "statement_receipt_total"
+    if amount_includes_tip_or_adjustment(statement_amount, receipt_amount):
+        return statement_amount, "statement_includes_tip"
     if people > 1 and amounts_align(statement_amount, receipt_amount / people):
         return statement_amount, "statement_person_share"
+    if people > 1 and amount_includes_tip_or_adjustment(
+        statement_amount,
+        receipt_amount / people,
+    ):
+        return statement_amount, "statement_person_share_includes_tip"
     return receipt_amount, "receipt_fallback_mismatch"
+
+
+def statement_receipt_difference(
+    expense: dict | None,
+    statement_purchase_amount: float | None,
+    statement_purchase_currency: str | None,
+    basis_status: str,
+) -> float | None:
+    """Return the visible original-currency gap between a receipt and its card charge."""
+
+    if not expense or basis_status == "statement_aggregated":
+        return None
+    receipt_amount = expense.get("amount")
+    if not isinstance(receipt_amount, (int, float)) or not receipt_amount:
+        return None
+    if not isinstance(statement_purchase_amount, (int, float)):
+        return None
+    expense_currency = str(expense.get("currency") or "").upper()
+    statement_currency = str(statement_purchase_currency or "").upper()
+    if not expense_currency or expense_currency != statement_currency:
+        return None
+    people = max(1, int(expense.get("number_of_people") or 1))
+    expected = abs(float(receipt_amount))
+    if basis_status in {
+        "statement_person_share",
+        "statement_person_share_includes_tip",
+    } or (basis_status == "receipt_fallback_mismatch" and people > 1):
+        expected /= people
+    return round(abs(float(statement_purchase_amount)) - expected, 2)
 
 
 def transaction_accounting_basis(
@@ -591,3 +771,9 @@ def transaction_accounting_basis(
 
 def amounts_align(actual: float, expected: float) -> bool:
     return abs(actual - expected) <= max(2.0, abs(expected) * 0.08)
+
+
+def amount_includes_tip_or_adjustment(actual: float, expected: float) -> bool:
+    """Accept a moderate positive card/receipt gap without treating it as FX."""
+
+    return actual > expected + max(2.0, abs(expected) * 0.08) and actual <= expected * 1.35

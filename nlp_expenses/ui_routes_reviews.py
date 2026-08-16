@@ -27,6 +27,7 @@ from nlp_expenses.reconciliation import (
     set_coverage_settings,
     set_invoice_review,
     set_manual_match,
+    set_statement_basis,
     set_transaction_allocations,
     set_transaction_decision,
 )
@@ -51,11 +52,11 @@ def generate(trip_name: str):
     trip = resolve_trip(root, trip_name)
     if not details["receipts"]:
         raise ValueError("Add at least one receipt before generating the workbook.")
-    if details["mode"] == "arvine" and details["statement_errors"]:
+    if details["mode"] == "company" and details["statement_errors"]:
         raise ValueError("Fix the statement validation errors before generating the workbook.")
     ensure_reconciliation_ready(trip)
     ensure_consolidation_finalized(root, trip)
-    if details["mode"] == "arvine":
+    if details["mode"] == "company":
         # Statement completeness was confirmed as part of the finalized app review.
         statements_complete = True
     quality = receipt_quality(ensure_line_item_review_ready(trip))
@@ -69,6 +70,10 @@ def generate(trip_name: str):
 
 @review_routes.post("/api/trips/<trip_name>/reconcile")
 def reconcile(trip_name: str):
+    data = request.get_json(silent=True) or {}
+    only_unmatched = data.get("only_unmatched", True)
+    if not isinstance(only_unmatched, bool):
+        raise ValueError("only_unmatched must be true or false.")
     details = trip_details(root, trip_name)
     trip = resolve_trip(root, trip_name)
     if not details["receipts"]:
@@ -81,11 +86,11 @@ def reconcile(trip_name: str):
     if not review["available"] or review["stale"]:
         raise ValueError("Scan the current receipts in Step 3 before reconciliation.")
     quality = receipt_quality(review)
-    if quality == "best" and not system_status(root)["openai_configured"]:
-        raise ValueError(
-            "The receipt scan used Best quality. Restore the OpenAI API key before reconciling."
-        )
-    job = jobs.start_reconciliation(trip_name, quality)
+    job = jobs.start_reconciliation(
+        trip_name,
+        quality,
+        only_unmatched=only_unmatched,
+    )
     return jsonify({"job": job.to_dict()}), 202
 
 
@@ -98,7 +103,10 @@ def sync_line_items(trip_name: str):
         raise ValueError("Add at least one receipt before scanning line items.")
     if quality == "best" and not system_status(root)["openai_configured"]:
         raise ValueError("Save an OpenAI API key before selecting Best quality.")
-    job = jobs.start_line_item_review(trip_name, quality)
+    only_unscanned = data.get("only_unscanned", True)
+    if not isinstance(only_unscanned, bool):
+        raise ValueError("only_unscanned must be true or false.")
+    job = jobs.start_line_item_review(trip_name, quality, only_unscanned=only_unscanned)
     return jsonify({"job": job.to_dict()}), 202
 
 
@@ -192,7 +200,7 @@ def finalize_review(trip_name: str):
     data = request.get_json(silent=True) or {}
     with jobs.mutation_guard(trip_name):
         trip = resolve_trip(root, trip_name)
-        if trip_mode(trip) == "arvine":
+        if trip_mode(trip) == "company":
             if not bool(data.get("statements_complete")):
                 raise ValueError("Confirm that all card and bank statements have been added.")
             if trip_details(root, trip_name)["statements"]:
@@ -246,6 +254,21 @@ def update_reconciliation_invoice(trip_name: str):
             restore_extracted=bool(data.get("restore_extracted")),
             update_manual_cad=bool(data.get("update_manual_cad")),
             manual_cad=data.get("manual_cad"),
+        )
+    return jsonify({"reconciliation": view})
+
+
+@review_routes.post("/api/trips/<trip_name>/reconciliation/statement-basis")
+def update_reconciliation_statement_basis(trip_name: str):
+    data = request.get_json(silent=True) or {}
+    source_file = str(data.get("source_file", "")).strip()
+    if not source_file:
+        raise ValueError("Choose a receipt to update.")
+    with jobs.mutation_guard(trip_name):
+        view = set_statement_basis(
+            resolve_trip(root, trip_name),
+            source_file,
+            str(data.get("basis", "")),
         )
     return jsonify({"reconciliation": view})
 

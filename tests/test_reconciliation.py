@@ -10,10 +10,11 @@ from openpyxl import load_workbook
 
 from nlp_expenses.fx_rates import FxRateUnavailable
 from nlp_expenses.generator import generate_review
-from nlp_expenses.line_items import line_item_review_view
+from nlp_expenses.line_items import line_item_review_view, sync_line_item_review
 from nlp_expenses.models import Expense
 from nlp_expenses.reconciliation import (
     InvoiceValidationError,
+    accounting_basis,
     confirm_statement_coverage,
     ensure_reconciliation_ready,
     load_manual_matches,
@@ -25,10 +26,13 @@ from nlp_expenses.reconciliation import (
     set_manual_match,
     set_transaction_allocations,
     set_transaction_decision,
+    statement_receipt_difference,
     sync_reconciliation,
 )
+from nlp_expenses.reconciliation_state import load_reconciliation_state
 from nlp_expenses.statement_normalizer import set_statement_date_convention
 from nlp_expenses.trips import ensure_trip
+from nlp_expenses.ui_services import trip_details
 
 
 def write_generic_statement(path: Path) -> None:
@@ -40,6 +44,216 @@ def write_generic_statement(path: Path) -> None:
 
 
 class ReconciliationTests(unittest.TestCase):
+    def test_removing_scanned_receipt_cleans_matches_without_resync(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202607_remove-matched-receipt", mode="arvine")
+            hotel_path = trip / "expenses_receipts" / "hotel.pdf"
+            taxi_path = trip / "expenses_receipts" / "taxi.pdf"
+            hotel_path.write_bytes(b"hotel")
+            taxi_path.write_bytes(b"taxi")
+            write_generic_statement(trip / "card_statements" / "card.csv")
+
+            hotel = Expense(
+                source_file=hotel_path,
+                expense_id="",
+                date="2026-07-01",
+                supplier_name="Foreign Hotel",
+                expense_type="hotel",
+                amount=100,
+                currency="USD",
+            )
+            taxi = Expense(
+                source_file=taxi_path,
+                expense_id="",
+                date="2026-07-02",
+                supplier_name="Airport Taxi",
+                expense_type="transport",
+                amount=50,
+                currency="USD",
+            )
+            with patch(
+                "nlp_expenses.generator.parse_arvine_receipt",
+                side_effect=lambda path, **_kwargs: hotel if path.name == "hotel.pdf" else taxi,
+            ):
+                initial = sync_reconciliation(trip, root, llm_mode="off")
+
+            hotel_group = next(
+                item["group_id"]
+                for item in initial["transactions"]
+                if item["description"] == "FOREIGN HOTEL"
+            )
+            taxi_group = next(
+                item["group_id"]
+                for item in initial["transactions"]
+                if item["description"] == "AIRPORT TAXI"
+            )
+            set_manual_match(trip, hotel_group, hotel_path.name)
+            set_transaction_allocations(
+                trip,
+                taxi_group,
+                [
+                    {
+                        "type": "purchase",
+                        "invoice_file": taxi_path.name,
+                        "cad_amount": 65,
+                    }
+                ],
+            )
+
+            # Simulate the user's already-deleted receipt from before targeted cleanup existed.
+            taxi_path.unlink()
+            trip_details(root, trip.name)
+
+            updated = reconciliation_view(trip)
+            self.assertFalse(updated["stale"])
+            self.assertEqual(
+                [expense["source_file"] for expense in updated["expenses"]],
+                [hotel_path.name],
+            )
+            hotel_transaction = next(
+                item for item in updated["transactions"] if item["group_id"] == hotel_group
+            )
+            taxi_transaction = next(
+                item for item in updated["transactions"] if item["group_id"] == taxi_group
+            )
+            self.assertEqual(hotel_transaction["expense_file"], hotel_path.name)
+            self.assertEqual(hotel_transaction["match_status"], "manual")
+            self.assertEqual(taxi_transaction["allocations"], [])
+            self.assertIsNone(taxi_transaction["expense_file"])
+            self.assertEqual(taxi_transaction["match_status"], "unmatched")
+            self.assertNotIn(taxi_group, load_reconciliation_state(trip)["transaction_allocations"])
+            self.assertEqual(
+                [receipt["source_file"] for receipt in line_item_review_view(trip)["receipts"]],
+                [hotel_path.name],
+            )
+
+            remapped = set_manual_match(trip, taxi_group, hotel_path.name)
+            remapped_taxi = next(
+                item for item in remapped["transactions"] if item["group_id"] == taxi_group
+            )
+            self.assertEqual(remapped_taxi["expense_file"], hotel_path.name)
+
+    def test_incremental_auto_match_only_processes_unmatched_receipts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202607_incremental-auto-match", mode="arvine")
+            hotel_path = trip / "expenses_receipts" / "hotel.pdf"
+            hotel_path.write_bytes(b"hotel")
+            write_generic_statement(trip / "card_statements" / "card.csv")
+            hotel = Expense(
+                source_file=hotel_path,
+                expense_id="",
+                date="2026-07-01",
+                supplier_name="Foreign Hotel",
+                expense_type="hotel",
+                amount=100,
+                currency="USD",
+            )
+            with patch("nlp_expenses.generator.parse_arvine_receipt", return_value=hotel):
+                initial = sync_reconciliation(trip, root, llm_mode="off")
+            hotel_group = next(
+                item["group_id"]
+                for item in initial["transactions"]
+                if item["description"] == "FOREIGN HOTEL"
+            )
+            set_manual_match(trip, hotel_group, hotel_path.name)
+
+            taxi_path = trip / "expenses_receipts" / "taxi.pdf"
+            taxi_path.write_bytes(b"taxi")
+            taxi = Expense(
+                source_file=taxi_path,
+                expense_id="",
+                date="2026-07-02",
+                supplier_name="Airport Taxi",
+                expense_type="transport",
+                amount=50,
+                currency="USD",
+            )
+            with patch("nlp_expenses.generator.parse_arvine_receipt", return_value=taxi):
+                sync_line_item_review(trip, root, llm_mode="off", only_unscanned=True)
+
+            with patch(
+                "nlp_expenses.generator.parse_arvine_receipt",
+                side_effect=AssertionError("reconciliation must reuse the Step 3 receipt review"),
+            ):
+                updated = sync_reconciliation(
+                    trip,
+                    root,
+                    llm_mode="off",
+                    only_unmatched=True,
+                )
+
+            hotel_transaction = next(
+                item for item in updated["transactions"] if item["group_id"] == hotel_group
+            )
+            taxi_transaction = next(
+                item for item in updated["transactions"] if item["description"] == "AIRPORT TAXI"
+            )
+            self.assertEqual(hotel_transaction["expense_file"], hotel_path.name)
+            self.assertEqual(hotel_transaction["match_status"], "manual")
+            self.assertTrue(hotel_transaction["override_active"])
+            self.assertEqual(taxi_transaction["expense_file"], taxi_path.name)
+            self.assertEqual(taxi_transaction["match_status"], "auto")
+            self.assertEqual(updated["summary"]["matched_invoice_count"], 2)
+
+    def test_incremental_receipt_scan_preserves_statement_mapping_decisions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202607_incremental-reconcile", mode="arvine")
+            first_path = trip / "expenses_receipts" / "hotel.pdf"
+            first_path.write_bytes(b"hotel")
+            write_generic_statement(trip / "card_statements" / "card.csv")
+            first = Expense(
+                source_file=first_path,
+                expense_id="",
+                date="2026-07-01",
+                supplier_name="Foreign Hotel",
+                expense_type="hotel",
+                amount=100,
+                currency="USD",
+            )
+            with patch("nlp_expenses.generator.parse_arvine_receipt", return_value=first):
+                initial = sync_reconciliation(trip, root, llm_mode="off")
+            hotel_group = next(
+                item["group_id"]
+                for item in initial["transactions"]
+                if item["description"] == "FOREIGN HOTEL"
+            )
+            set_manual_match(trip, hotel_group, None)
+
+            second_path = trip / "expenses_receipts" / "taxi.pdf"
+            second_path.write_bytes(b"taxi")
+            second = Expense(
+                source_file=second_path,
+                expense_id="",
+                date="2026-07-02",
+                supplier_name="Airport Taxi",
+                expense_type="transport",
+                amount=50,
+                currency="USD",
+            )
+            with patch(
+                "nlp_expenses.generator.parse_arvine_receipt", return_value=second
+            ) as parser:
+                updated = sync_line_item_review(
+                    trip,
+                    root,
+                    llm_mode="off",
+                    only_unscanned=True,
+                )
+            parser.assert_called_once()
+            self.assertEqual(len(updated["receipts"]), 2)
+
+            reconciliation = reconciliation_view(trip)
+            self.assertFalse(reconciliation["stale"])
+            self.assertEqual(len(reconciliation["expenses"]), 2)
+            hotel = next(
+                item for item in reconciliation["transactions"] if item["group_id"] == hotel_group
+            )
+            self.assertTrue(hotel["override_active"])
+            self.assertIsNone(hotel["expense_file"])
+
     def test_receipt_matcher_ranks_same_date_merchant_with_tax_tip_gap(self):
         expense = {
             "date": "2026-07-10",
@@ -58,6 +272,22 @@ class ReconciliationTests(unittest.TestCase):
 
         self.assertGreaterEqual(serialized_candidate_score(expense, transaction, None), 0.72)
         self.assertIn("30% below the card total", serialized_candidate_reason(expense, transaction))
+
+    def test_card_amount_with_tip_is_an_explicit_statement_basis(self):
+        expense = {
+            "amount": 57.0,
+            "currency": "CAD",
+            "number_of_people": 1,
+        }
+
+        basis, status = accounting_basis(expense, 67.0, "CAD")
+
+        self.assertEqual(basis, 67.0)
+        self.assertEqual(status, "statement_includes_tip")
+        self.assertEqual(
+            statement_receipt_difference(expense, 67.0, "CAD", status),
+            10.0,
+        )
 
     def test_nested_receipt_folders_are_recursive_and_duplicate_basenames_stay_distinct(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -81,6 +311,7 @@ class ReconciliationTests(unittest.TestCase):
                         expense_type="hotel",
                         amount=100,
                         currency="USD",
+                        review_note="Structured with OpenAI receipt extraction.",
                     )
                 return Expense(
                     source_file=path,
@@ -108,6 +339,9 @@ class ReconciliationTests(unittest.TestCase):
                 expected_files,
             )
             self.assertEqual(view["summary"]["matched_invoice_count"], 2)
+            self.assertEqual(
+                {expense["review_status"] for expense in view["expenses"]}, {"assumed_ok"}
+            )
 
             hotel_transaction = next(
                 item for item in view["transactions"] if item["description"] == "FOREIGN HOTEL"
@@ -123,6 +357,12 @@ class ReconciliationTests(unittest.TestCase):
                 if item["group_id"] == hotel_transaction["group_id"]
             )
             self.assertEqual(changed["expense_file"], "travel/invoice.pdf")
+            confirmed_expense = next(
+                expense
+                for expense in manually_mapped["expenses"]
+                if expense["source_file"] == "travel/invoice.pdf"
+            )
+            self.assertEqual(confirmed_expense["review_status"], "confirmed")
 
             output = trip / "nested-receipts.xlsx"
             with patch("nlp_expenses.generator.parse_arvine_receipt", side_effect=parsed):
@@ -346,11 +586,7 @@ class ReconciliationTests(unittest.TestCase):
 
             with patch("nlp_expenses.generator.parse_arvine_receipt", side_effect=parsed):
                 initial = sync_reconciliation(trip, root, llm_mode="off")
-            initial_confidence = next(
-                item["match_confidence"]
-                for item in initial["transactions"]
-                if item["description"] == "FOREIGN HOTEL"
-            )
+            initial_score = initial["expenses"][0]["match_suggestions"][0]["score"]
 
             corrected = set_invoice_review(
                 trip,
@@ -372,22 +608,13 @@ class ReconciliationTests(unittest.TestCase):
                     "attendees_client": "",
                 },
             )
-            self.assertTrue(corrected["stale"])
+            self.assertFalse(corrected["stale"])
             reviewed_invoice = corrected["expenses"][0]
             self.assertEqual(reviewed_invoice["amount"], 90.0)
             self.assertEqual(reviewed_invoice["currency"], "EUR")
             self.assertIn("amount", reviewed_invoice["overridden_fields"])
-
-            with patch("nlp_expenses.generator.parse_arvine_receipt", side_effect=parsed):
-                resynced = sync_reconciliation(trip, root, llm_mode="off")
-            self.assertFalse(resynced["stale"])
-            self.assertEqual(resynced["expenses"][0]["vendor"], "Montreal Hotel")
-            updated_confidence = next(
-                item["match_confidence"]
-                for item in resynced["transactions"]
-                if item["description"] == "FOREIGN HOTEL"
-            )
-            self.assertNotEqual(updated_confidence, initial_confidence)
+            self.assertEqual(reviewed_invoice["vendor"], "Montreal Hotel")
+            self.assertNotEqual(reviewed_invoice["match_suggestions"][0]["score"], initial_score)
 
             overridden = set_invoice_review(
                 trip,
@@ -426,7 +653,7 @@ class ReconciliationTests(unittest.TestCase):
             )
             self.assertNotEqual(cleared["expenses"][0]["cad_source"], "manual")
             restored = set_invoice_review(trip, "hotel.pdf", restore_extracted=True)
-            self.assertTrue(restored["stale"])
+            self.assertFalse(restored["stale"])
             self.assertEqual(restored["expenses"][0]["vendor"], "Foreign Hotel")
             self.assertEqual(restored["expenses"][0]["amount"], 100)
             self.assertEqual(restored["expenses"][0]["overridden_fields"], [])
@@ -586,7 +813,7 @@ class ReconciliationTests(unittest.TestCase):
                 )
             duplicates = [item for item in initial["transactions"] if item["possible_duplicate"]]
             self.assertEqual(len(duplicates), 2)
-            self.assertEqual(initial["summary"]["needs_review_count"], 2)
+            self.assertEqual(initial["summary"]["needs_review_count"], 0)
             self.assertTrue(
                 any("Possible duplicate statement transactions" in warning for warning in warnings)
             )
@@ -601,7 +828,7 @@ class ReconciliationTests(unittest.TestCase):
                 "ignore",
                 "Overlapping export; second file is authoritative",
             )
-            self.assertEqual(ignored["summary"]["needs_review_count"], 1)
+            self.assertEqual(ignored["summary"]["needs_review_count"], 0)
             self.assertEqual(ignored["expenses"][0]["cad_amount_used"], 10)
             ignored_transaction = next(
                 item
@@ -609,6 +836,10 @@ class ReconciliationTests(unittest.TestCase):
                 if item["group_id"] == duplicates[0]["group_id"]
             )
             self.assertTrue(ignored_transaction["ignored"])
+            self.assertIn(
+                ignored_transaction["group_id"],
+                {item["group_id"] for item in ignored["ignored_transactions"]},
+            )
 
             confirmed = set_transaction_decision(trip, duplicates[1]["group_id"], "keep")
             self.assertEqual(confirmed["summary"]["needs_review_count"], 0)

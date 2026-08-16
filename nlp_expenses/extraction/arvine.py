@@ -43,6 +43,7 @@ def parse_arvine_receipt(
         include_images = method == "empty" or parsed.amount is None or parsed.confidence < 0.72
         llm = llm_parse_arvine_receipt(path, raw_text, parsed, model, include_images)
         if llm and (force_llm or arvine_quality_score(llm) >= arvine_quality_score(parsed)):
+            preserve_reconciled_heuristic_lines(llm, parsed)
             parsed = llm
     apply_missing_date_fallback(parsed, path, raw_text)
     if method == "empty":
@@ -103,7 +104,7 @@ def default_description(expense: Expense) -> str:
 
 
 def normalize_arvine_line_items(expense: Expense) -> None:
-    """Create exactly two canonical tax rows and retain meal purchases."""
+    """Create canonical tax rows and retain purchase lines for every expense type."""
 
     extracted_tax_lines: dict[str, LineItem] = {}
     purchase_items = []
@@ -115,7 +116,7 @@ def normalize_arvine_line_items(expense: Expense) -> None:
         )
         if kind:
             extracted_tax_lines.setdefault(kind, item)
-        elif expense.expense_type == "meal" and item.description not in {
+        elif not item.description.startswith("Receipt total") and item.description not in {
             "Unreconciled meal item - review",
             "Alcohol adjustment - manual",
         }:
@@ -142,16 +143,23 @@ def normalize_arvine_line_items(expense: Expense) -> None:
                 synthetic=True,
             )
         )
-    if expense.expense_type == "meal" and expense.amount is not None:
+    if expense.amount is not None:
         gap = round(expense.amount - sum(item.amount or 0 for item in items), 2)
         if gap > max(0.05, expense.amount * 0.03):
+            is_meal = expense.expense_type == "meal"
             items.append(
                 LineItem(
-                    description="Unreconciled meal item - review",
+                    description=(
+                        "Unreconciled meal item - review" if is_meal else "Receipt subtotal"
+                    ),
                     amount=gap,
                     included=True,
-                    confidence=0.0,
-                    review_note="Generated gap line because extracted meal items and tax did not add up to the receipt total.",
+                    confidence=0.0 if is_meal else 0.75,
+                    review_note=(
+                        "Generated gap line because extracted meal items and tax did not add up to the receipt total."
+                        if is_meal
+                        else "Generated from the receipt total less tax because no complete itemized non-meal breakdown was stored."
+                    ),
                     synthetic=True,
                 )
             )
@@ -164,29 +172,84 @@ def normalize_arvine_line_items(expense: Expense) -> None:
     expense.line_items = items
 
 
+def preserve_reconciled_heuristic_lines(preferred: Expense, heuristic: Expense) -> None:
+    """Keep a complete deterministic breakdown when OpenAI omits receipt adjustments."""
+
+    if not receipt_lines_reconcile(heuristic) or receipt_lines_reconcile(preferred):
+        return
+    structured_tax = round((preferred.gst_hst or 0) + (preferred.qst or 0), 2)
+    lines = []
+    for item in heuristic.line_items:
+        if (
+            structured_tax
+            and re.fullmatch(r"(?:sales\s+)?tax(?:es)?", item.description.strip(), re.I)
+            and item.amount is not None
+            and abs(float(item.amount) - structured_tax) <= 0.05
+        ):
+            continue
+        lines.append(item)
+    preferred.line_items = lines
+
+
+def receipt_lines_reconcile(expense: Expense) -> bool:
+    if expense.amount is None:
+        return False
+    reliable_lines = [
+        item
+        for item in expense.line_items
+        if item.line_type not in SYSTEM_TAX_LINES and not item.synthetic and item.amount is not None
+    ]
+    if len(reliable_lines) < 2:
+        return False
+    total = sum(float(item.amount or 0) for item in expense.line_items)
+    for kind in SYSTEM_TAX_LINES:
+        line_tax = sum(
+            float(item.amount or 0)
+            for item in expense.line_items
+            if item.line_type == kind or tax_line_type(item.description) == kind
+        )
+        total += float(getattr(expense, kind) or 0) - line_tax
+    return abs(round(total - float(expense.amount), 2)) <= 0.05
+
+
 def find_tax_amount(text: str, label_pattern: str) -> float | None:
     pattern = re.compile(label_pattern, re.I)
-    for line in text.splitlines():
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for index, line in enumerate(lines):
         if not pattern.search(line):
             continue
         if re.search(r"\b(?:no|number|registration|reg)\b", line, re.I):
             continue
-        values = [
-            match.amount for match in money_matches_in_line(line) if abs(match.amount) < 100000
-        ]
+        values = labeled_money_values(lines, index)
         if values:
             return round(values[-1], 2)
     return None
 
 
 def find_subtotal(text: str) -> float | None:
-    for line in text.splitlines():
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for index, line in enumerate(lines):
         if not re.search(r"\bsub\s*-?\s*total\b", line, re.I):
             continue
-        values = [match.amount for match in money_matches_in_line(line)]
+        values = labeled_money_values(lines, index)
         if values:
             return round(values[-1], 2)
     return None
+
+
+def labeled_money_values(lines: list[str], index: int) -> list[float]:
+    values = [
+        match.amount for match in money_matches_in_line(lines[index]) if abs(match.amount) < 100000
+    ]
+    if values or index + 1 >= len(lines):
+        return values
+    following = money_matches_in_line(lines[index + 1])
+    if len(following) != 1:
+        return values
+    match = following[0]
+    if lines[index + 1][: match.start].strip() or lines[index + 1][match.end :].strip():
+        return values
+    return [match.amount] if abs(match.amount) < 100000 else []
 
 
 def find_registration_number(text: str, tax: str) -> str:
@@ -338,10 +401,14 @@ def llm_parse_arvine_receipt(
                         "Use ISO date yyyy-mm-dd and one expense_type from flight, hotel, transport, meal, other. "
                         "Treat a date visible in the receipt or invoice as authoritative. Use a source-filename date "
                         "only when no reliable date is present in the receipt content, and never override a clear receipt date. "
+                        "Extract clearly itemized purchase, fare, fee, and service components for every receipt type. "
                         "For meal receipts, extract purchased food and drink line items without classifying them. "
+                        "For every receipt type, include promotions, discounts, coupons, rebates, and credits as negative "
+                        "line-item amounts exactly as shown; never make them positive or omit them. "
                         "Do not return GST, HST, QST, TPS, TVH, or TVQ as purchased line_items; return taxes only "
                         "in the structured gst_hst and qst fields. "
-                        "For non-meal receipts return an empty line_items array. "
+                        "For non-meal receipts, exclude totals and payment rows; return an empty line_items array only "
+                        "when the receipt has no reliable itemized pre-tax breakdown. "
                         "GST/HST includes GST, HST, TPS, or TVH; QST includes QST or TVQ. Copy tax registration numbers "
                         "only when visible and do not invent missing tax, location, or registration data. Use ISO currency codes. "
                         "province should be a Canadian two-letter abbreviation when known. Return only schema-valid data."

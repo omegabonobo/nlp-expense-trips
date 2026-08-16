@@ -8,7 +8,9 @@ from unittest.mock import patch
 
 from openpyxl import load_workbook
 
+from nlp_expenses.accounting import builtin_accounting_profile
 from nlp_expenses.consolidation import (
+    calculate_accounting_summary,
     calculate_expense_result,
     consolidation_view,
     finalize_consolidation,
@@ -25,9 +27,11 @@ from nlp_expenses.line_items import (
 from nlp_expenses.models import Expense, LineItem
 from nlp_expenses.reconciliation import (
     set_manual_match,
+    set_statement_basis,
     set_transaction_decision,
     sync_reconciliation,
 )
+from nlp_expenses.trip_manifest import receipt_manifest_record
 from nlp_expenses.trip_metadata import save_trip_metadata
 from nlp_expenses.trips import ensure_trip, trip_mode
 
@@ -74,6 +78,69 @@ def meal_expense(receipt: Path, currency: str = "CAD", amount: float = 120.0) ->
 
 
 class ConsolidationTests(unittest.TestCase):
+    def test_existing_melbourne_fixture_uses_reviewed_share_and_exact_cad(self):
+        root = Path(__file__).resolve().parents[1]
+        trip = root / "trips" / "202607_melb-flo-test"
+        if not trip.exists():
+            self.skipTest("Melbourne reconciliation fixture is not present")
+
+        preview = consolidation_view(root, trip)
+        by_source = {expense["source_file"]: expense for expense in preview["expenses"]}
+
+        self.assertEqual(by_source["Garuda - DPS to MEL.pdf"]["ivado_claimable_cad"], 1_659.90)
+        self.assertEqual(
+            by_source["Scanned_20260530 - Receipt - May 30 2026 - 9-27 PM.pdf"][
+                "ivado_claimable_cad"
+            ],
+            83.87,
+        )
+        self.assertEqual(
+            by_source["Scanned_20260531 - Receipt - May 31 2026 - 8-42 PM.pdf"][
+                "ivado_claimable_cad"
+            ],
+            106.83,
+        )
+        self.assertEqual(
+            by_source["Scanned_20260604-2259.pdf"]["ivado_claimable_cad"],
+            154.00,
+        )
+        # The exact statement charge for this non-shared receipt is 19.86,
+        # while the reference CSV contains 19.85. Keeping exact statement CAD
+        # authoritative makes the app total one cent above the CSV row sum.
+        self.assertEqual(
+            by_source["Scanned_20260603-1216.pdf"]["ivado_claimable_cad"],
+            19.86,
+        )
+        self.assertEqual(preview["summary"]["ivado_claim_total_cad"], 7_532.51)
+        self.assertEqual(preview["summary"]["employee_reimbursement_total_cad"], 7_532.51)
+
+    def test_accounting_rounding_residual_is_identified_and_balanced(self):
+        expense = {
+            "expense_type": "meal",
+            "currency": "CAD",
+            "included_in_arvine": True,
+            "arvine_reimbursable_cad": 1.01,
+            "arvine_claimable_ratio": 1.0,
+            "fx_rate": 1.0,
+            "gst_hst": 0.0,
+            "qst": 0.0,
+        }
+
+        accounting = calculate_accounting_summary(
+            [expense],
+            builtin_accounting_profile(),
+            "company",
+        )
+
+        self.assertEqual(accounting["pre_adjustment_difference"], 0.01)
+        self.assertEqual(accounting["rounding_adjustment_cad"], -0.01)
+        self.assertEqual(
+            accounting["rounding_adjustment_account"],
+            "Meals – Non-deductible (50%)",
+        )
+        self.assertEqual(accounting["journal_total"], 1.01)
+        self.assertEqual(accounting["balance_difference"], 0.0)
+
     def test_app_review_controls_people_lines_totals_and_finalization(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -175,9 +242,11 @@ class ConsolidationTests(unittest.TestCase):
             )
             unresolved = consolidation_view(root, trip)
             self.assertGreater(unresolved["summary"]["blocking_count"], 0)
-            self.assertTrue(
+            self.assertFalse(
                 any(issue["kind"] == "statement_mapping" for issue in unresolved["issues"])
             )
+            self.assertTrue(any(issue["kind"] == "cad_amount" for issue in unresolved["issues"]))
+            self.assertEqual(len(unresolved["expenses"]), 1)
 
     def test_statement_purchase_amount_prevents_double_dividing_a_shared_meal(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -237,6 +306,154 @@ class ConsolidationTests(unittest.TestCase):
             self.assertIn('"statement_person_share"', detail["M2"].value)
             self.assertIn("$K2*", detail["M2"].value)
 
+    def test_explicit_personal_share_statement_prevents_double_division(self):
+        receipt = {
+            "source_file": "shared.pdf",
+            "expense_type": "meal",
+            "amount": 300.0,
+            "currency": "AUD",
+            "included": True,
+            "included_in_ivado": True,
+            "number_of_people": 3,
+            "line_total": 300.0,
+            "arvine_included_total": 300.0,
+            "ivado_included_total": 300.0,
+            "arvine_excluded_total": 0.0,
+            "ivado_excluded_total": 0.0,
+        }
+        reconciled = {
+            "cad_amount_used": 110.0,
+            "cad_source": "statement",
+            "statement_amount_basis": "personal_share",
+            "statement_amount_basis_explicit": True,
+        }
+
+        result = calculate_expense_result(receipt, reconciled, "ivado_reimbursed")
+
+        self.assertEqual(result["arvine_reimbursable_cad"], 110.0)
+        self.assertEqual(result["ivado_claimable_cad"], 110.0)
+        self.assertEqual(result["statement_amount_basis"], "personal_share")
+
+    def test_personal_share_alcohol_exclusion_uses_reviewed_line_ratio(self):
+        receipt = {
+            "source_file": "shared-dinner.pdf",
+            "expense_type": "meal",
+            "amount": 300.0,
+            "currency": "AUD",
+            "included": True,
+            "included_in_ivado": True,
+            "number_of_people": 3,
+            "line_total": 300.0,
+            "arvine_included_total": 300.0,
+            "ivado_included_total": 240.0,
+            "arvine_excluded_total": 0.0,
+            "ivado_excluded_total": 60.0,
+        }
+        reconciled = {
+            "cad_amount_used": 110.0,
+            "cad_source": "statement",
+            "statement_amount_basis": "personal_share",
+            "statement_amount_basis_explicit": True,
+        }
+
+        result = calculate_expense_result(receipt, reconciled, "ivado_reimbursed")
+
+        self.assertEqual(result["arvine_reimbursable_cad"], 88.0)
+        self.assertEqual(result["ivado_claimable_cad"], 88.0)
+        self.assertEqual(result["ivado_excluded_cad"], 22.0)
+
+    def test_exact_idr_statement_cad_is_not_rebuilt_from_rounded_fx(self):
+        receipt = {
+            "source_file": "flight.pdf",
+            "expense_type": "flight",
+            "amount": 20_598_982.0,
+            "currency": "IDR",
+            "included": True,
+            "included_in_ivado": True,
+            "number_of_people": 1,
+        }
+        reconciled = {
+            "cad_amount_used": 1_659.90,
+            "cad_source": "statement",
+            "statement_purchase_amount_used": 1_659.90,
+            "statement_purchase_currency": "CAD",
+            "fx_basis_amount_used": 20_598_982.0,
+            "fx_basis_status": "receipt_fallback_currency",
+        }
+
+        result = calculate_expense_result(receipt, reconciled, "ivado_reimbursed")
+
+        self.assertEqual(result["fx_rate"], 0.000081)
+        self.assertEqual(result["arvine_reimbursable_cad"], 1_659.90)
+        self.assertEqual(result["ivado_claimable_cad"], 1_659.90)
+        manifest = receipt_manifest_record(Path("trip"), result, "ivado_sponsored")
+        self.assertEqual(manifest["fx_rate"], 0.000081)
+
+    def test_manual_cad_override_remains_authoritative_over_statement_cad(self):
+        receipt = {
+            "source_file": "flight.pdf",
+            "expense_type": "flight",
+            "amount": 20_598_982.0,
+            "currency": "IDR",
+            "included": True,
+            "included_in_ivado": True,
+            "number_of_people": 1,
+            "manual_cad_override": 1_600.0,
+            "manual_cad_note": "Card provider correction",
+        }
+        reconciled = {
+            "cad_amount_used": 1_659.90,
+            "cad_source": "statement",
+            "statement_purchase_amount_used": 1_659.90,
+            "statement_purchase_currency": "CAD",
+        }
+
+        result = calculate_expense_result(receipt, reconciled, "ivado_reimbursed")
+
+        self.assertEqual(result["cad_source"], "manual")
+        self.assertEqual(result["arvine_reimbursable_cad"], 1_600.0)
+        self.assertEqual(result["ivado_claimable_cad"], 1_600.0)
+
+    def test_statement_basis_decision_persists_without_resync(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trip = ensure_trip(root, "202607_shared-cad-only", mode="ivado")
+            complete_metadata(trip)
+            receipt = trip / "expenses_receipts" / "shared.pdf"
+            receipt.write_bytes(b"fixture")
+            (trip / "card_statements" / "card.csv").write_text(
+                "Date,Description,Amount,Foreign Spend Amount\n2026-07-01,BISTRO,110,\n",
+                encoding="utf-8",
+            )
+            expense = Expense(
+                source_file=receipt,
+                expense_id="",
+                date="2026-07-01",
+                supplier_name="Bistro",
+                expense_type="meal",
+                amount=300,
+                currency="AUD",
+                line_items=[
+                    LineItem(description="Dinner", amount=240),
+                    LineItem(description="Wine", amount=60, is_alcohol=True),
+                ],
+            )
+            save_line_item_review(trip, [expense])
+            set_expense_review(trip, receipt.name, {"number_of_people": 3})
+            reconciliation = sync_reconciliation(trip, root, llm_mode="off")
+            transaction = reconciliation["transactions"][0]
+            set_manual_match(trip, transaction["group_id"], receipt.name, use_auto=False)
+
+            set_statement_basis(trip, receipt.name, "personal_share")
+            preview = consolidation_view(root, trip)
+            result = preview["expenses"][0]
+
+            self.assertFalse(preview["issues"])
+            self.assertEqual(result["fx_basis_status"], "statement_personal_share_explicit")
+            self.assertEqual(result["fx_rate"], 1.1)
+            self.assertEqual(result["ivado_claimable_cad"], 88.0)
+            self.assertTrue(result["statement_amount_basis_explicit"])
+
     def test_malformed_statement_purchase_amount_falls_back_to_receipt_fx_basis(self):
         receipt = {
             "source_file": "flight.pdf",
@@ -282,6 +499,38 @@ class ConsolidationTests(unittest.TestCase):
 
         self.assertEqual(result["fx_basis_status"], "statement_receipt_total")
         self.assertEqual(result["claimable_cad"], 11.93)
+
+    def test_card_tip_gap_uses_full_settlement_without_inflating_receipt_taxes(self):
+        receipt = {
+            "source_file": "dinner.pdf",
+            "expense_type": "meal",
+            "amount": 57.0,
+            "currency": "CAD",
+            "included": True,
+            "number_of_people": 1,
+            "gst_hst": 2.48,
+            "qst": 4.95,
+            "line_total": 57.0,
+            "included_total": 57.0,
+            "excluded_total": 0.0,
+        }
+        reconciled = {
+            "cad_amount_used": 67.0,
+            "cad_source": "statement",
+            "statement_purchase_amount_used": 67.0,
+            "statement_purchase_currency": "CAD",
+            "statement_receipt_difference": 10.0,
+            "fx_basis_amount_used": 67.0,
+            "fx_basis_status": "statement_includes_tip",
+        }
+
+        result = calculate_expense_result(receipt, reconciled)
+
+        self.assertEqual(result["claimable_cad"], 67.0)
+        self.assertEqual(result["arvine_reimbursable_cad"], 67.0)
+        self.assertEqual(result["fx_rate"], 1.0)
+        self.assertEqual(result["fx_basis_status"], "statement_includes_tip")
+        self.assertEqual(result["statement_receipt_difference"], 10.0)
 
     def test_non_meal_receipt_correction_is_not_overridden_by_stale_synthetic_line(self):
         receipt = {
@@ -361,7 +610,11 @@ class ConsolidationTests(unittest.TestCase):
             )
             self.assertFalse(restored_transaction["ignored"])
             self.assertEqual(restored_transaction["normalization_status"], "ok")
-            self.assertEqual(restored["summary"]["needs_review_count"], 1)
+            self.assertEqual(restored["summary"]["needs_review_count"], 0)
+            self.assertIn(
+                restored_transaction["group_id"],
+                {item["group_id"] for item in restored["unmatched_transactions"]},
+            )
 
     def test_manual_cad_override_is_shared_without_a_statement(self):
         with tempfile.TemporaryDirectory() as tmp:

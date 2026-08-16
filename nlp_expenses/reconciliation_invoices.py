@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
+from nlp_expenses.currencies import CURRENCY_CODES
 from nlp_expenses.models import Expense
 from nlp_expenses.trips import source_file_key
 
@@ -73,8 +74,8 @@ def validate_invoice_fields(fields: dict, extracted: dict) -> dict:
             errors["date"] = "Use a valid date in YYYY-MM-DD format."
     currency = str(normalized.get("currency") or "").upper()
     normalized["currency"] = currency
-    if currency and (len(currency) != 3 or not currency.isalpha()):
-        errors["currency"] = "Use a three-letter currency code such as CAD or USD."
+    if currency and currency not in CURRENCY_CODES:
+        errors["currency"] = "Choose a currency from the ISO currency list."
     amount = normalized.get("amount")
     if amount is not None and amount < 0:
         errors["amount"] = "A purchase total cannot be negative."

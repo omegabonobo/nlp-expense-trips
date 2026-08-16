@@ -191,7 +191,7 @@ def approval_reconciliation_check(trip_dir: Path) -> dict:
             )
         coverage = view.get("coverage", {})
         if (
-            trip_mode(trip_dir) == "arvine"
+            trip_mode(trip_dir) == "company"
             and coverage.get("gaps")
             and not coverage.get("confirmation")
         ):
@@ -418,7 +418,7 @@ def approval_view(root: Path, trip_dir: Path, manifest: dict | None) -> dict | N
 def generation_artifacts(trip_dir: Path, workbook: Path, generation: dict) -> list[dict]:
     entries = generation.get("artifacts")
     if not isinstance(entries, list) or not entries:
-        return [artifact_entry(trip_dir, workbook, "arvine_report")]
+        return [artifact_entry(trip_dir, workbook, "company_report")]
     result = []
     for entry in entries:
         if not isinstance(entry, dict):
@@ -450,7 +450,7 @@ def generated_artifacts_are_current(trip_dir: Path, generation: dict) -> bool:
 
 def generated_artifact_kind(path: Path, primary_workbook: Path) -> str:
     if path == primary_workbook:
-        return "arvine_report"
+        return "company_report"
     if path.suffix.lower() == ".ndjson":
         return "reimbursement_manifest"
     if path.suffix.lower() == ".xlsx" and "ivado" in path.name.lower():

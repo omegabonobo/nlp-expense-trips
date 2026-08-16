@@ -10,7 +10,15 @@ TRIP_NAME_RE = re.compile(r"^\d{6}_[A-Za-z0-9][A-Za-z0-9_-]*$")
 RECEIPTS_DIR = "expenses_receipts"
 STATEMENTS_DIR = "card_statements"
 TRIP_CONFIG = ".nlp-expenses.json"
-TRIP_MODES = {"ivado", "arvine"}
+TRIP_MODES = {"ivado", "company"}
+LEGACY_TRIP_MODES = {"arvine": "company"}
+
+
+def normalize_trip_mode(mode: object) -> str:
+    """Return the current neutral mode name while accepting saved legacy trips."""
+
+    normalized = str(mode or "").strip().lower()
+    return LEGACY_TRIP_MODES.get(normalized, normalized)
 
 
 def validate_trip_name(name: str) -> bool:
@@ -20,6 +28,7 @@ def validate_trip_name(name: str) -> bool:
 def ensure_trip(root: Path, name: str, mode: str = "ivado") -> Path:
     if not validate_trip_name(name):
         raise ValueError("Trip folder must be named like YYYYMM_tripName, e.g. 202606_melbourne.")
+    mode = normalize_trip_mode(mode)
     if mode not in TRIP_MODES:
         raise ValueError(f"Unknown trip mode: {mode}.")
     trip_dir = root / "trips" / name
@@ -102,11 +111,12 @@ def validate_source_name(value: str) -> str:
 
 def trip_mode(trip_dir: Path) -> str:
     data = load_trip_config(trip_dir)
-    mode = str(data.get("mode", "ivado")).lower()
+    mode = normalize_trip_mode(data.get("mode", "ivado"))
     return mode if mode in TRIP_MODES else "ivado"
 
 
 def save_trip_mode(trip_dir: Path, mode: str) -> None:
+    mode = normalize_trip_mode(mode)
     if mode not in TRIP_MODES:
         raise ValueError(f"Unknown trip mode: {mode}.")
     data = load_trip_config(trip_dir)

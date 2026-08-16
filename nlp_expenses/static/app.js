@@ -1,6 +1,8 @@
 const state = JSON.parse(document.getElementById("initial-state").textContent);
+const currencyCodes = new Set((state.currencies || []).map(currency => currency.code));
 const csrf = document.querySelector('meta[name="csrf-token"]').content;
 const selectedTrip = state.selected?.name;
+let deleteTripName = selectedTrip || "";
 let sourceFileSignature = state.selected?.file_state?.signature || "";
 let sourceFilePollTimer = null;
 let lineItemSaveQueue = Promise.resolve();
@@ -53,7 +55,8 @@ function initializeCollapsibleSections() {
     const setCollapsed = (collapsed, persist = true) => {
       section.classList.toggle("section-collapsed", collapsed);
       toggle.setAttribute("aria-expanded", String(!collapsed));
-      toggle.textContent = collapsed ? "Expand section" : "Collapse section";
+      toggle.setAttribute("aria-label", collapsed ? "Expand section" : "Collapse section");
+      toggle.textContent = collapsed ? "⌃" : "⌄";
       toggle.title = `${collapsed ? "Expand" : "Collapse"} ${title}`;
       if (persist) saveCollapsePreference(key, collapsed);
     };
@@ -76,7 +79,8 @@ function initializeCollapsibleSubsections() {
     const setCollapsed = (collapsed, persist = true) => {
       section.classList.toggle("subsection-collapsed", collapsed);
       toggle.setAttribute("aria-expanded", String(!collapsed));
-      toggle.textContent = collapsed ? "Expand subsection" : "Collapse subsection";
+      toggle.setAttribute("aria-label", collapsed ? "Expand subsection" : "Collapse subsection");
+      toggle.textContent = collapsed ? "⌃" : "⌄";
       toggle.title = `${collapsed ? "Expand" : "Collapse"} ${title}`;
       if (persist) saveCollapsePreference(key, collapsed);
     };
@@ -94,6 +98,46 @@ function setReceiptItemsExpanded(article, expanded, persist = true) {
   const count = Number(button.dataset.itemCount || 0);
   button.textContent = expanded ? "Hide items" : `Show items (${count})`;
   if (persist) saveCollapsePreference(collapseKey("receipt", button.dataset.sourceFile), !expanded);
+}
+
+function receiptEditContextKey() {
+  return `nlp-expenses:${selectedTrip || "no-trip"}:receipt-edit-context`;
+}
+
+function reloadPreservingReceipt(sourceFile) {
+  const button = document.querySelector(
+    `.receipt-items-toggle[data-source-file="${CSS.escape(sourceFile)}"]`
+  );
+  const article = button?.closest(".line-receipt");
+  if (article) {
+    saveCollapsePreference(collapseKey("receipt", sourceFile), false);
+    try {
+      window.sessionStorage.setItem(
+        receiptEditContextKey(),
+        JSON.stringify({ sourceFile, viewportTop: article.getBoundingClientRect().top })
+      );
+    } catch (_failure) { /* Optional position restoration only. */ }
+  }
+  window.location.reload();
+}
+
+function restoreReceiptEditContext() {
+  let context = null;
+  try {
+    context = JSON.parse(window.sessionStorage.getItem(receiptEditContextKey()) || "null");
+    window.sessionStorage.removeItem(receiptEditContextKey());
+  } catch (_failure) { return; }
+  if (!context?.sourceFile) return;
+  const button = document.querySelector(
+    `.receipt-items-toggle[data-source-file="${CSS.escape(context.sourceFile)}"]`
+  );
+  const article = button?.closest(".line-receipt");
+  if (!article) return;
+  setReceiptItemsExpanded(article, true, false);
+  window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+    const offset = article.getBoundingClientRect().top - Number(context.viewportTop || 0);
+    window.scrollBy({ top: offset, behavior: "auto" });
+  }));
 }
 
 function initializeReceiptCollapsing() {
@@ -120,6 +164,7 @@ function initializeReceiptCollapsing() {
 initializeCollapsibleSections();
 initializeCollapsibleSubsections();
 initializeReceiptCollapsing();
+restoreReceiptEditContext();
 document.getElementById("new-trip-button")?.addEventListener("click", () => openDialog("new-trip-dialog"));
 document.getElementById("empty-new-trip-button")?.addEventListener("click", () => openDialog("new-trip-dialog"));
 document.querySelectorAll(".open-settings-button").forEach(button => {
@@ -128,13 +173,48 @@ document.querySelectorAll(".open-settings-button").forEach(button => {
 document.getElementById("open-accounting-button")?.addEventListener("click", () => openDialog("accounting-dialog"));
 document.getElementById("open-trip-metadata-button")?.addEventListener("click", () => openDialog("trip-metadata-dialog"));
 document.getElementById("open-approval-button")?.addEventListener("click", () => openDialog("approval-dialog"));
-document.getElementById("open-delete-trip-button")?.addEventListener("click", () => {
+function openDeleteTripDialog(tripName, tripLabel, receiptCount = 0, statementCount = 0) {
+  deleteTripName = tripName;
   const form = document.getElementById("delete-trip-form");
   form?.reset();
+  const label = document.getElementById("delete-trip-label");
+  if (label) label.textContent = tripLabel || tripName;
+  const confirmationPrompt = document.getElementById("delete-trip-confirmation");
+  if (confirmationPrompt) {
+    const code = document.createElement("code");
+    code.textContent = tripName;
+    confirmationPrompt.replaceChildren(
+      document.createTextNode("Type "),
+      code,
+      document.createTextNode(" to confirm"),
+    );
+  }
+  const receipts = document.getElementById("delete-trip-receipts");
+  if (receipts) receipts.textContent = receiptCount;
+  const statements = document.getElementById("delete-trip-statements");
+  if (statements) statements.textContent = statementCount;
   const error = document.getElementById("delete-trip-error");
   if (error) error.textContent = "";
   openDialog("delete-trip-dialog");
+}
+document.getElementById("open-delete-trip-button")?.addEventListener("click", () => {
+  openDeleteTripDialog(
+    selectedTrip,
+    state.selected?.label,
+    state.selected?.receipts?.length || 0,
+    state.selected?.statements?.length || 0,
+  );
 });
+document.querySelectorAll(".trip-delete-button").forEach(button => button.addEventListener("click", event => {
+  event.preventDefault();
+  event.stopPropagation();
+  openDeleteTripDialog(
+    button.dataset.tripName,
+    button.dataset.tripLabel,
+    Number(button.dataset.receipts || 0),
+    Number(button.dataset.statements || 0),
+  );
+}));
 document.querySelectorAll(".close-dialog").forEach(button => button.addEventListener("click", () => button.closest("dialog").close()));
 
 const receiptPreviewDialog = document.getElementById("receipt-preview-dialog");
@@ -292,13 +372,13 @@ document.getElementById("delete-trip-form")?.addEventListener("submit", async ev
   const error = document.getElementById("delete-trip-error");
   const submit = form.querySelector('button[type="submit"]');
   error.textContent = "";
-  if (confirmation !== selectedTrip) {
-    error.textContent = `Type ${selectedTrip} exactly to confirm.`;
+  if (confirmation !== deleteTripName) {
+    error.textContent = `Type ${deleteTripName} exactly to confirm.`;
     return;
   }
   submit.disabled = true;
   try {
-    await api(`/api/trips/${encodeURIComponent(selectedTrip)}`, {
+    await api(`/api/trips/${encodeURIComponent(deleteTripName)}`, {
       method: "DELETE",
       body: JSON.stringify({ confirmation })
     });
@@ -360,7 +440,7 @@ document.getElementById("accounting-form")?.addEventListener("submit", async eve
 });
 
 document.getElementById("claim-program-select")?.addEventListener("change", async event => {
-  if (!window.confirm("Change this trip's claim program? Existing files stay in place, but receipt review and finalization may need to be refreshed.")) {
+  if (!window.confirm("Change this trip's reimbursement program? Existing files stay in place, but receipt review and finalization may need to be refreshed.")) {
     event.target.value = state.selected.claim_program;
     return;
   }
@@ -445,27 +525,50 @@ document.querySelectorAll(".reveal-workbook").forEach(button => button.addEventL
   } catch (failure) { toast(failure.message, true); }
 }));
 
-document.getElementById("sync-reconciliation-button")?.addEventListener("click", async event => {
-  event.target.disabled = true;
+async function startReconciliation(button, onlyUnmatched = true) {
+  button.disabled = true;
   try {
     const payload = await api(`/api/trips/${encodeURIComponent(selectedTrip)}/reconcile`, {
-      method: "POST", body: JSON.stringify({})
+      method: "POST", body: JSON.stringify({ only_unmatched: onlyUnmatched })
     });
     renderReconciliationJob(payload.job);
     pollReconciliationJob(payload.job.id);
-  } catch (failure) { toast(failure.message, true); event.target.disabled = false; }
+  } catch (failure) { toast(failure.message, true); button.disabled = false; }
+}
+
+document.getElementById("sync-reconciliation-button")?.addEventListener("click", event => {
+  startReconciliation(event.currentTarget, true);
 });
 
-document.getElementById("sync-line-items-button")?.addEventListener("click", async event => {
-  const quality = document.querySelector('input[name="receipt-quality"]:checked')?.value || "basic";
-  event.target.disabled = true;
-  try {
-    const payload = await api(`/api/trips/${encodeURIComponent(selectedTrip)}/line-items/sync`, {
-      method: "POST", body: JSON.stringify({ quality })
-    });
-    renderLineItemJob(payload.job);
-    pollLineItemJob(payload.job.id);
-  } catch (failure) { toast(failure.message, true); event.target.disabled = false; }
+document.getElementById("rebuild-reconciliation-button")?.addEventListener("click", event => {
+  startReconciliation(event.currentTarget, false);
+});
+
+document.querySelectorAll(".resync-card-matcher").forEach(button => {
+  button.addEventListener("click", () => startReconciliation(button, true));
+});
+
+document.querySelectorAll(".receipt-scan-button").forEach(button => {
+  button.addEventListener("click", async () => {
+    const quality = document.querySelector('input[name="receipt-quality"]:checked')?.value || "basic";
+    document.querySelectorAll(".receipt-scan-button").forEach(control => { control.disabled = true; });
+    try {
+      const payload = await api(`/api/trips/${encodeURIComponent(selectedTrip)}/line-items/sync`, {
+        method: "POST",
+        body: JSON.stringify({
+          quality,
+          only_unscanned: button.dataset.onlyUnscanned === "true"
+        })
+      });
+      renderLineItemJob(payload.job);
+      pollLineItemJob(payload.job.id);
+    } catch (failure) {
+      toast(failure.message, true);
+      document.querySelectorAll(".receipt-scan-button").forEach(control => {
+        control.disabled = false;
+      });
+    }
+  });
 });
 
 async function updateLineItem(input, field) {
@@ -522,25 +625,59 @@ document.querySelectorAll(".receipt-reviewed").forEach(input => {
   });
 });
 
-document.querySelectorAll(".currency-review-form").forEach(form => {
-  form.addEventListener("submit", async event => {
-    event.preventDefault();
-    const input = form.querySelector(".currency-review-input");
-    const currency = String(input.value || "").trim().toUpperCase();
-    if (!/^[A-Z]{3}$/.test(currency)) {
-      toast("Use a three-letter currency code such as CAD or QAR.", true);
-      return;
-    }
+document.querySelectorAll(".receipt-meal-toggle").forEach(input => {
+  input.addEventListener("change", async () => {
     input.disabled = true;
+    const expenseType = input.checked ? "meal" : (input.dataset.nonMealType || "other");
     try {
-      await saveExpenseFields(form.dataset.sourceFile, { currency });
-      toast("Receipt currency saved. Resync statements to refresh matching.");
+      await saveExpenseFields(input.dataset.sourceFile, { expense_type: expenseType });
+      toast(input.checked ? "Receipt classified as a meal." : "Receipt classified as travel — non-meal.");
       window.location.reload();
     } catch (failure) {
+      input.checked = !input.checked;
       input.disabled = false;
       toast(failure.message, true);
     }
   });
+});
+
+function inlineExpenseStatus(control, message, kind = "") {
+  const status = control.querySelector(".inline-save-status");
+  if (!status) return;
+  status.textContent = message;
+  status.className = `inline-save-status${kind ? ` ${kind}` : ""}`;
+}
+
+document.querySelectorAll(".currency-review-form").forEach(control => {
+  const input = control.querySelector(".currency-review-input");
+  const autosave = async () => {
+    if (input.dataset.saving === "true") return;
+    const currency = String(input.value || "").trim().toUpperCase();
+    if (currency === String(input.dataset.savedValue || "").toUpperCase()) return;
+    if (!currencyCodes.has(currency)) {
+      inlineExpenseStatus(control, "Choose a listed currency", "error");
+      toast("Choose a currency from the list.", true);
+      return;
+    }
+    input.dataset.saving = "true";
+    input.disabled = true;
+    inlineExpenseStatus(control, "Saving…", "saving");
+    try {
+      await saveExpenseFields(control.dataset.sourceFile, { currency });
+      input.value = currency;
+      input.dataset.savedValue = currency;
+      inlineExpenseStatus(control, "Saved", "saved");
+      toast("Receipt currency saved. Match suggestions updated.");
+      window.location.reload();
+    } catch (failure) {
+      input.dataset.saving = "false";
+      input.disabled = false;
+      inlineExpenseStatus(control, "Not saved", "error");
+      toast(failure.message, true);
+    }
+  };
+  input.addEventListener("change", autosave);
+  input.addEventListener("blur", autosave);
 });
 
 function normalizedLineItemValue(input, field) {
@@ -592,15 +729,20 @@ function updateAutosavedReceipt(payload, sourceFile, lineId) {
   document.getElementById(`receipt-${sourceFile}`)?.classList.toggle("needs-review", receipt.status === "review");
 
   const totals = document.querySelector(`[data-receipt-totals="${CSS.escape(sourceFile)}"]`);
-  const setTotal = (kind, label, value) => {
-    const element = totals?.querySelector(`[data-total-kind="${kind}"]`);
+  const setTotal = (scope, kind, label, value) => {
+    const element = totals?.querySelector(`[data-total-scope="${scope}"][data-total-kind="${kind}"]`);
     if (element) element.textContent = `${label} ${value == null ? "—" : Number(value).toFixed(2)}`;
   };
-  setTotal("receipt", "Receipt", receipt.receipt_total);
-  setTotal("lines", "Lines", receipt.line_total);
-  setTotal("arvine", "Arvine", receipt.arvine_included_total);
-  setTotal("ivado", "IVADO", receipt.ivado_included_total);
-  setTotal("removed", "IVADO removed", receipt.ivado_excluded_total);
+  setTotal("full", "receipt", "Receipt", receipt.receipt_total);
+  setTotal("full", "lines", "Lines", receipt.line_total);
+  setTotal("full", "company", "Company", receipt.arvine_included_total);
+  setTotal("full", "ivado", "IVADO", receipt.ivado_included_total);
+  setTotal("full", "removed", "IVADO removed", receipt.ivado_excluded_total);
+  setTotal("person", "receipt", "Receipt", receipt.per_person_receipt_total);
+  setTotal("person", "lines", "Lines", receipt.per_person_line_total);
+  setTotal("person", "company", "Company", receipt.per_person_arvine_included_total);
+  setTotal("person", "ivado", "IVADO", receipt.per_person_ivado_included_total);
+  setTotal("person", "removed", "IVADO removed", receipt.per_person_ivado_excluded_total);
   const difference = totals?.querySelector('[data-total-kind="difference"]');
   if (difference) {
     const value = Number(receipt.difference || 0);
@@ -626,7 +768,7 @@ function autosaveLineItem(input) {
     lineItemStatus(input, "Description required", "error");
     return;
   }
-  if (field === "amount" && (!value || Number(value) < 0)) {
+  if (field === "amount" && (!value || !Number.isFinite(Number(value)))) {
     lineItemStatus(input, "Invalid amount", "error");
     return;
   }
@@ -659,7 +801,7 @@ document.querySelectorAll("[data-autosave-field]").forEach(input => {
 document.querySelectorAll(".add-line-item").forEach(button => button.addEventListener("click", async () => {
   const description = window.prompt("Description for the new receipt line:", "");
   if (description === null || !description.trim()) return;
-  const amount = window.prompt("Amount in the receipt currency:", "");
+  const amount = window.prompt("Amount in the receipt currency (use a negative amount for a promotion or discount):", "");
   if (amount === null) return;
   button.disabled = true;
   try {
@@ -674,7 +816,7 @@ document.querySelectorAll(".add-line-item").forEach(button => button.addEventLis
       })
     });
     toast("Receipt line added.");
-    window.location.reload();
+    reloadPreservingReceipt(button.dataset.sourceFile);
   } catch (failure) { toast(failure.message, true); button.disabled = false; }
 }));
 
@@ -690,7 +832,7 @@ document.querySelectorAll(".remove-line-item").forEach(button => button.addEvent
       })
     });
     toast("Receipt line removed.");
-    window.location.reload();
+    reloadPreservingReceipt(button.dataset.sourceFile);
   } catch (failure) { toast(failure.message, true); button.disabled = false; }
 }));
 document.querySelectorAll(".reset-line-items").forEach(button => button.addEventListener("click", async () => {
@@ -857,9 +999,16 @@ function renderCardMatchResults() {
 document.querySelectorAll(".open-receipt-matcher").forEach(button => button.addEventListener("click", () => {
   pendingReceiptMatchFile = button.dataset.sourceFile;
   const expense = state.reconciliation.expenses.find(item => item.source_file === pendingReceiptMatchFile);
+  const people = Math.max(1, Number(expense.number_of_people || 1));
+  const receiptAmount = Number(expense.amount);
+  const employeeMatchTarget = Number.isFinite(receiptAmount)
+    ? (receiptAmount / people).toFixed(2)
+    : "?";
   document.getElementById("card-match-title").textContent = expense.vendor || expense.source_file;
   document.getElementById("card-match-receipt").textContent =
-    `${expense.amount ?? "?"} ${expense.currency || ""} · ${expense.date || "date missing"} · employee share 1/${expense.number_of_people || 1}`;
+    `${expense.amount ?? "?"} ${expense.currency || ""} full receipt · ` +
+    `${employeeMatchTarget} ${expense.currency || ""} per employee match target (÷ ${people}) · ` +
+    `${expense.date || "date missing"}`;
   document.getElementById("card-match-search").value = "";
   document.getElementById("card-match-date").value = expense.date || "";
   document.getElementById("card-match-date-window").value = expense.date ? "3" : "all";
@@ -898,94 +1047,76 @@ document.querySelectorAll(".receipt-unmatch").forEach(button => button.addEventL
   } catch (failure) { toast(failure.message, true); button.disabled = false; }
 }));
 
-let pendingTransactionDisposition = null;
+document.querySelectorAll(".confirm-receipt-match").forEach(button => button.addEventListener("click", async () => {
+  button.disabled = true;
+  try {
+    await api(`/api/trips/${encodeURIComponent(selectedTrip)}/reconciliation/mapping`, {
+      method: "POST",
+      body: JSON.stringify({
+        group_id: button.dataset.groupId,
+        expense_file: button.dataset.sourceFile,
+        use_auto: false
+      })
+    });
+    toast("Card match confirmed.");
+    window.location.reload();
+  } catch (failure) { toast(failure.message, true); button.disabled = false; }
+}));
 
-function currentTransactionDisposition(select) {
-  const current = state.reconciliation.transactions.find(
-    item => item.group_id === select.dataset.groupId
-  );
-  if (current?.ignored) return "ignore";
-  return select.dataset.possibleDuplicate === "true"
-    ? current?.duplicate_resolution || "unresolved"
-    : "keep";
+async function saveStatementBasis(control) {
+  const select = control.querySelector(".statement-basis-select");
+  select.disabled = true;
+  try {
+    await api(`/api/trips/${encodeURIComponent(selectedTrip)}/reconciliation/statement-basis`, {
+      method: "POST",
+      body: JSON.stringify({
+        source_file: control.dataset.sourceFile,
+        basis: select.value
+      })
+    });
+    toast("Card amount basis updated.");
+    window.location.reload();
+  } catch (failure) {
+    toast(failure.message, true);
+    select.disabled = false;
+  }
 }
 
-async function persistTransactionDisposition(select, action, note = "") {
-  select.disabled = true;
+document.querySelectorAll(".statement-basis-select").forEach(select => {
+  select.addEventListener("change", () => saveStatementBasis(select.closest(".statement-basis-review")));
+});
+async function persistTransactionDisposition(button, action) {
+  button.disabled = true;
   await api(`/api/trips/${encodeURIComponent(selectedTrip)}/reconciliation/transaction-decision`, {
     method: "POST",
-    body: JSON.stringify({ group_id: select.dataset.groupId, action, note })
+    body: JSON.stringify({ group_id: button.dataset.groupId, action })
   });
-  const possibleDuplicate = select.dataset.possibleDuplicate === "true";
   toast(
     action === "ignore"
-      ? (possibleDuplicate ? "Duplicate ignored with an audit note." : "Transaction excluded from this trip.")
-      : "Transaction disposition saved."
+      ? "Transaction excluded. Restore it below if needed."
+      : "Transaction restored to the review list."
   );
   window.location.reload();
 }
 
-document.querySelectorAll(".transaction-decision").forEach(select => select.addEventListener("change", async event => {
-  const action = event.target.value;
-  if (action === "ignore") {
-    pendingTransactionDisposition = event.target;
-    const form = document.getElementById("transaction-disposition-form");
-    form.reset();
-    form.elements.group_id.value = event.target.dataset.groupId;
-    form.elements.possible_duplicate.value = event.target.dataset.possibleDuplicate;
-    const possibleDuplicate = event.target.dataset.possibleDuplicate === "true";
-    document.getElementById("transaction-disposition-title").textContent =
-      possibleDuplicate ? "Ignore duplicate transaction" : "Exclude transaction from this trip";
-    document.getElementById("transaction-disposition-help").textContent = possibleDuplicate
-      ? "The duplicate stays in the statement audit trail, but it will not fund an expense."
-      : "The transaction stays in the statement audit trail, but it will not be matched to a trip expense.";
-    document.getElementById("transaction-disposition-error").textContent = "";
-    openDialog("transaction-disposition-dialog");
-    return;
-  }
+document.querySelectorAll(".exclude-transaction").forEach(button => button.addEventListener("click", async () => {
   try {
-    await persistTransactionDisposition(event.target, action);
+    await persistTransactionDisposition(button, "ignore");
   } catch (failure) {
     toast(failure.message, true);
-    event.target.value = currentTransactionDisposition(event.target);
-    event.target.disabled = false;
+    button.disabled = false;
   }
 }));
 
-function cancelTransactionDisposition() {
-  if (pendingTransactionDisposition) {
-    pendingTransactionDisposition.value = currentTransactionDisposition(pendingTransactionDisposition);
-  }
-  pendingTransactionDisposition = null;
-  document.getElementById("transaction-disposition-dialog")?.close();
-}
-
-document.querySelectorAll(".cancel-transaction-disposition").forEach(button => {
-  button.addEventListener("click", cancelTransactionDisposition);
-});
-
-document.getElementById("transaction-disposition-dialog")?.addEventListener("cancel", event => {
-  event.preventDefault();
-  cancelTransactionDisposition();
-});
-
-document.getElementById("transaction-disposition-form")?.addEventListener("submit", async event => {
-  event.preventDefault();
-  if (!pendingTransactionDisposition) return;
-  const data = new FormData(event.target);
-  const note = String(data.get("note") || "").trim();
-  const error = document.getElementById("transaction-disposition-error");
-  if (!note) {
-    error.textContent = "Add a reason so the exclusion remains auditable.";
-    return;
-  }
-  error.textContent = "";
-  try {
-    await persistTransactionDisposition(pendingTransactionDisposition, "ignore", note);
-  } catch (failure) {
-    error.textContent = failure.message;
-    pendingTransactionDisposition.disabled = false;
-  }
+document.querySelectorAll(".restore-transaction, .keep-transaction").forEach(button => {
+  button.addEventListener("click", async () => {
+    try {
+      await persistTransactionDisposition(button, "keep");
+    } catch (failure) {
+      toast(failure.message, true);
+      button.disabled = false;
+    }
+  });
 });
 
 document.querySelectorAll(".policy-exception").forEach(button => button.addEventListener("click", async () => {
@@ -1173,6 +1304,27 @@ function syncExpenseIvadoReasonControl() {
   if (included.checked) reason.value = "";
 }
 
+function initializeExpenseMealControl(receipt) {
+  const form = document.getElementById("expense-review-form");
+  const toggle = document.getElementById("expense-meal-toggle");
+  if (!form || !toggle) return;
+  const expenseType = String(form.elements.expense_type.value || "other");
+  form.dataset.nonMealExpenseType = expenseType.startsWith("meal")
+    ? (receipt?.non_meal_expense_type || "other")
+    : expenseType;
+  toggle.checked = expenseType.startsWith("meal");
+}
+
+function syncReceiptTotalFromSubtotal() {
+  const form = document.getElementById("expense-review-form");
+  if (!form || form.dataset.receiptTotalEdited === "true") return;
+  const subtotal = Number(form.elements.subtotal?.value);
+  if (!form.elements.subtotal?.value || !Number.isFinite(subtotal)) return;
+  const gstHst = Number(form.elements.gst_hst?.value || 0);
+  const qst = Number(form.elements.qst?.value || 0);
+  form.elements.amount.value = (subtotal + gstHst + qst).toFixed(2);
+}
+
 document.querySelectorAll(".edit-expense").forEach(button => button.addEventListener("click", () => {
   const receipt = reviewedReceipt(button.dataset.sourceFile);
   if (!receipt) return;
@@ -1185,6 +1337,9 @@ document.querySelectorAll(".edit-expense").forEach(button => button.addEventList
   for (const field of expenseFields) {
     if (form.elements[field]) form.elements[field].value = receipt[field] ?? "";
   }
+  form.dataset.receiptTotalEdited = "false";
+  form.dataset.subtotalEdited = "false";
+  initializeExpenseMealControl(receipt);
   syncExpenseIvadoReasonControl();
   document.getElementById("expense-dialog-title").textContent = receipt.vendor || receipt.source_file;
   openDialog("expense-dialog");
@@ -1195,22 +1350,52 @@ document.querySelector("#expense-review-form [name='included_in_ivado']")?.addEv
   syncExpenseIvadoReasonControl
 );
 
-document.querySelectorAll(".people-review-form").forEach(form => {
-  form.addEventListener("submit", async event => {
-    event.preventDefault();
-    const input = form.querySelector(".people-review-input");
+document.getElementById("expense-meal-toggle")?.addEventListener("change", event => {
+  const form = event.target.form;
+  const currentType = String(form.elements.expense_type.value || "other");
+  if (event.target.checked) {
+    if (!currentType.startsWith("meal")) form.dataset.nonMealExpenseType = currentType;
+    form.elements.expense_type.value = "meal";
+  } else {
+    form.elements.expense_type.value = form.dataset.nonMealExpenseType || "other";
+  }
+});
+
+document.querySelector("#expense-review-form [name='amount']")?.addEventListener("input", event => {
+  event.target.form.dataset.receiptTotalEdited = "true";
+});
+
+document.querySelector("#expense-review-form [name='subtotal']")?.addEventListener("input", event => {
+  event.target.form.dataset.subtotalEdited = "true";
+  syncReceiptTotalFromSubtotal();
+});
+
+document.querySelectorAll("#expense-review-form [name='gst_hst'], #expense-review-form [name='qst']")
+  .forEach(input => input.addEventListener("input", event => {
+    if (event.target.form.dataset.subtotalEdited === "true") syncReceiptTotalFromSubtotal();
+  }));
+
+document.querySelectorAll(".people-review-form").forEach(control => {
+  const input = control.querySelector(".people-review-input");
+  input.addEventListener("change", async () => {
     const numberOfPeople = Number(input?.value || 0);
+    if (String(numberOfPeople) === String(input.dataset.savedValue || "")) return;
     if (!Number.isInteger(numberOfPeople) || numberOfPeople < 1 || numberOfPeople > 99) {
+      inlineExpenseStatus(control, "Enter 1–99", "error");
       toast("Enter a whole number of employees from 1 to 99.", true);
       return;
     }
     input.disabled = true;
+    inlineExpenseStatus(control, "Saving…", "saving");
     try {
-      await saveExpenseFields(form.dataset.sourceFile, { number_of_people: numberOfPeople });
-      toast(`Employee share saved as 1/${numberOfPeople}. Resync statements to refresh matching.`);
+      await saveExpenseFields(control.dataset.sourceFile, { number_of_people: numberOfPeople });
+      input.dataset.savedValue = String(numberOfPeople);
+      inlineExpenseStatus(control, "Saved", "saved");
+      toast(`Traveller share saved as 1/${numberOfPeople}. Match suggestions updated.`);
       window.location.reload();
     } catch (failure) {
       input.disabled = false;
+      inlineExpenseStatus(control, "Not saved", "error");
       toast(failure.message, true);
     }
   });
@@ -1238,7 +1423,7 @@ document.getElementById("expense-review-form")?.addEventListener("submit", async
   clearExpenseErrors();
   try {
     await saveExpenseFields(data.get("source_file"), fields);
-    toast("Expense saved. Resync statements if matching fields changed.");
+    toast("Expense saved. Card matches and CAD values updated.");
     window.location.reload();
   } catch (failure) { showExpenseErrors(failure); }
 });
@@ -1252,7 +1437,7 @@ document.getElementById("restore-expense-button")?.addEventListener("click", asy
       .filter(field => form.elements[field])
       .map(field => [field, receipt.extracted[field]])
   );
-  fields.paid_by = receipt.auto_paid_by ?? receipt.paid_by ?? "employee_personal";
+  fields.paid_by = receipt.auto_paid_by ?? receipt.paid_by ?? "traveller_personal";
   if (form.elements.included_in_ivado) {
     fields.included_in_ivado = receipt.extracted.included_in_ivado ?? true;
   }
@@ -1361,9 +1546,14 @@ async function pollReconciliationJob(jobId) {
     } else if (["succeeded", "succeeded_warnings"].includes(payload.job.status)) {
       window.setTimeout(() => window.location.reload(), 700);
     } else {
-      document.getElementById("sync-reconciliation-button").disabled = false;
+      document.querySelectorAll("#sync-reconciliation-button, #rebuild-reconciliation-button")
+        .forEach(button => { button.disabled = false; });
     }
-  } catch (failure) { toast(failure.message, true); document.getElementById("sync-reconciliation-button").disabled = false; }
+  } catch (failure) {
+    toast(failure.message, true);
+    document.querySelectorAll("#sync-reconciliation-button, #rebuild-reconciliation-button")
+      .forEach(button => { button.disabled = false; });
+  }
 }
 
 async function pollLineItemJob(jobId) {
@@ -1375,9 +1565,16 @@ async function pollLineItemJob(jobId) {
     } else if (["succeeded", "succeeded_warnings"].includes(payload.job.status)) {
       window.setTimeout(() => window.location.reload(), 700);
     } else {
-      document.getElementById("sync-line-items-button").disabled = false;
+      document.querySelectorAll(".receipt-scan-button").forEach(control => {
+        control.disabled = false;
+      });
     }
-  } catch (failure) { toast(failure.message, true); document.getElementById("sync-line-items-button").disabled = false; }
+  } catch (failure) {
+    toast(failure.message, true);
+    document.querySelectorAll(".receipt-scan-button").forEach(control => {
+      control.disabled = false;
+    });
+  }
 }
 
 if (state.job && ["queued", "running"].includes(state.job.status)) pollJob(state.job.id);

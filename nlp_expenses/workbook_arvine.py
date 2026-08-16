@@ -97,7 +97,7 @@ def write_arvine_summary_sheet(ws, trip_dir: Path, accounting_profile: dict) -> 
         ("Company / traveller", traveller_company),
         ("Business purpose / client", purpose_client),
         ("Counter-account", accounting_profile["counter_account"]),
-        ("Mode", "Arvine"),
+        ("Mode", "Own-company reimbursement"),
     ]
     for row, (label, value) in enumerate(metadata, start=1):
         ws.cell(row, 1, label)

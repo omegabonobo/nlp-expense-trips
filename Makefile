@@ -7,7 +7,7 @@ setup:
 	./scripts/setup_local_env.sh
 
 setup-dev:
-	$(PYTHON) -m pip install -e ".[dev]"
+	$(PYTHON) -m pip install -c constraints-runtime.txt -e ".[dev]"
 
 test:
 	$(PYTHON) -m pytest

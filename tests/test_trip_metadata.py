@@ -59,6 +59,8 @@ class TripMetadataTests(unittest.TestCase):
             saved = save_trip_metadata(trip, self.complete_metadata())
             self.assertEqual(saved["destinations"], ["New York"])
             self.assertEqual(saved["expected_accounts"], ["AMEX 1234"])
+            self.assertEqual(saved["claim_program"], "company_reimbursed")
+            self.assertEqual(saved["default_paid_by"], "company_card")
             self.assertEqual(required_metadata_gaps(trip), [])
             with self.assertRaisesRegex(ValueError, "before"):
                 save_trip_metadata(

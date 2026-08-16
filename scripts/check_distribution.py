@@ -20,9 +20,14 @@ WHEEL_ASSETS = {
 }
 SDIST_ASSETS = WHEEL_ASSETS | {
     ".env.example",
+    "constraints-runtime.txt",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
     "Makefile",
     "docs/DEVELOPMENT.md",
+    "docs/GETTING_STARTED.md",
     "examples/ivado-trip-manifest-v3.ndjson",
+    "NLP Expenses.command",
     "scripts/check_distribution.py",
     "scripts/setup_local_env.sh",
 }

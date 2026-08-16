@@ -18,6 +18,7 @@ from nlp_expenses.cli import main
 from nlp_expenses.extraction.arvine import (
     heuristic_parse_arvine_receipt,
     normalize_arvine_line_items,
+    preserve_reconciled_heuristic_lines,
 )
 from nlp_expenses.generator import generate_review
 from nlp_expenses.matching import match_normalized_transactions
@@ -67,11 +68,83 @@ class ArvineTests(unittest.TestCase):
             ],
         )
 
+    def test_non_meal_purchase_breakdown_is_retained_with_canonical_tax_rows(self):
+        expense = Expense(
+            source_file=Path("uber.pdf"),
+            expense_id="",
+            expense_type="transport",
+            amount=16.56,
+            subtotal=14.40,
+            gst_hst=0.72,
+            qst=1.44,
+            line_items=[
+                LineItem(description="Trip fare", amount=12.66),
+                LineItem(description="Insurance and payment costs", amount=0.84),
+                LineItem(description="MTQ dues", amount=0.90),
+            ],
+        )
+
+        normalize_arvine_line_items(expense)
+
+        self.assertEqual(
+            [(item.description, item.amount) for item in expense.line_items],
+            [
+                ("Trip fare", 12.66),
+                ("Insurance and payment costs", 0.84),
+                ("MTQ dues", 0.90),
+                ("GST/HST", 0.72),
+                ("QST", 1.44),
+            ],
+        )
+
+    def test_reconciled_heuristic_promotions_fill_an_incomplete_openai_breakdown(self):
+        heuristic = Expense(
+            source_file=Path("uber-eats.pdf"),
+            expense_id="",
+            expense_type="meal",
+            amount=47.50,
+            line_items=[
+                LineItem(description="Food", amount=47.50),
+                LineItem(description="Tax", amount=5.47),
+                LineItem(description="Delivery Fee", amount=0.99),
+                LineItem(description="Service Fee", amount=6.50),
+                LineItem(description="Tip", amount=5.49),
+                LineItem(description="Promotion", amount=-17.50),
+                LineItem(description="Service Fee Discount", amount=-0.95),
+            ],
+        )
+        preferred = Expense(
+            source_file=Path("uber-eats.pdf"),
+            expense_id="",
+            expense_type="meal",
+            amount=47.50,
+            gst_hst=5.47,
+            qst=0.0,
+            line_items=[LineItem(description="Food", amount=47.50)],
+        )
+
+        preserve_reconciled_heuristic_lines(preferred, heuristic)
+        normalize_arvine_line_items(preferred)
+
+        self.assertEqual(
+            [(item.description, item.amount) for item in preferred.line_items],
+            [
+                ("Food", 47.50),
+                ("Delivery Fee", 0.99),
+                ("Service Fee", 6.50),
+                ("Tip", 5.49),
+                ("Promotion", -17.50),
+                ("Service Fee Discount", -0.95),
+                ("GST/HST", 5.47),
+                ("QST", 0.0),
+            ],
+        )
+
     def test_trip_mode_is_saved_and_legacy_trip_defaults_to_ivado(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             arvine = ensure_trip(root, "202607_arvine", mode="arvine")
-            self.assertEqual(trip_mode(arvine), "arvine")
+            self.assertEqual(trip_mode(arvine), "company")
             legacy = root / "trips" / "202607_legacy"
             legacy.mkdir(parents=True)
             self.assertEqual(trip_mode(legacy), "ivado")

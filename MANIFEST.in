@@ -1,4 +1,7 @@
 include .env.example
+include constraints-runtime.txt
+include LICENSE
+include THIRD_PARTY_NOTICES.md
 include Makefile
 include *.command
 recursive-include docs *.md

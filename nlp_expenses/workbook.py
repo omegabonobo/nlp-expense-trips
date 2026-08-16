@@ -132,7 +132,7 @@ def build_arvine_workbook(
     accounting_profile: dict | None = None,
     transaction_allocations: dict[str, list[dict]] | None = None,
 ) -> Path:
-    """Build Arvine's accounting workbook without changing the IVADO workbook path."""
+    """Build the company accounting workbook without changing the IVADO workbook path."""
     match_normalized_transactions(expenses, transactions)
     if manual_matches:
         apply_manual_matches(expenses, transactions, manual_matches)
@@ -202,8 +202,8 @@ def write_expense_sheet(ws, expenses: list[Expense]) -> None:
                 ),
                 (
                     f'=IF(OR($J{idx}="",$L{idx}=""),"",'
-                    f'IF($W{idx}="statement_person_share",$K{idx}*{line_ratio_formula},'
-                    f'IF(OR($W{idx}="statement_receipt_total",$W{idx}="statement_aggregated"),'
+                    f'IF(OR($W{idx}="statement_person_share",$W{idx}="statement_person_share_includes_tip"),$K{idx}*{line_ratio_formula},'
+                    f'IF(OR($W{idx}="statement_receipt_total",$W{idx}="statement_includes_tip",$W{idx}="statement_aggregated"),'
                     f"$K{idx}*{line_ratio_formula}/MAX(1,$I{idx}),$J{idx}*$L{idx})))"
                 ),
                 source_file_key(expense.source_file),
@@ -230,8 +230,11 @@ def write_expense_sheet(ws, expenses: list[Expense]) -> None:
                     f"IF($U{idx}<>$H{idx},$F{idx},"
                     f"IF(OR(COUNTIF(card_statements!$D:$D,$A{idx})>1,"
                     f"ABS($T{idx}-$F{idx})<=MAX(2,ABS($F{idx})*0.08),"
+                    f"AND($T{idx}>$F{idx}+MAX(2,ABS($F{idx})*0.08),$T{idx}<=$F{idx}*1.35),"
                     f"AND($I{idx}>1,ABS($T{idx}-$F{idx}/$I{idx})"
-                    f"<=MAX(2,ABS($F{idx}/$I{idx})*0.08))),$T{idx},$F{idx})))))"
+                    f"<=MAX(2,ABS($F{idx}/$I{idx})*0.08)),"
+                    f"AND($I{idx}>1,$T{idx}>$F{idx}/$I{idx}+MAX(2,ABS($F{idx}/$I{idx})*0.08),"
+                    f"$T{idx}<=$F{idx}/$I{idx}*1.35)),$T{idx},$F{idx})))))"
                 ),
                 (
                     f'=IF($R{idx}<>"","manual_receipt_total",'
@@ -239,9 +242,11 @@ def write_expense_sheet(ws, expenses: list[Expense]) -> None:
                     f'IF($U{idx}<>$H{idx},"receipt_fallback_currency",'
                     f'IF(COUNTIF(card_statements!$D:$D,$A{idx})>1,"statement_aggregated",'
                     f'IF(ABS($T{idx}-$F{idx})<=MAX(2,ABS($F{idx})*0.08),"statement_receipt_total",'
+                    f'IF(AND($T{idx}>$F{idx}+MAX(2,ABS($F{idx})*0.08),$T{idx}<=$F{idx}*1.35),"statement_includes_tip",'
                     f"IF(AND($I{idx}>1,ABS($T{idx}-$F{idx}/$I{idx})"
                     f"<=MAX(2,ABS($F{idx}/$I{idx})*0.08)),"
-                    f'"statement_person_share","receipt_fallback_mismatch"))))))'
+                    f'"statement_person_share",IF(AND($I{idx}>1,$T{idx}>$F{idx}/$I{idx}+MAX(2,ABS($F{idx}/$I{idx})*0.08),'
+                    f'$T{idx}<=$F{idx}/$I{idx}*1.35),"statement_person_share_includes_tip","receipt_fallback_mismatch")))))))'
                 ),
             ],
         )

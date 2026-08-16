@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import tempfile
 import threading
@@ -19,6 +20,10 @@ from nlp_expenses.jobs import JobManager
 from nlp_expenses.lifecycle import record_generated_workbook
 from nlp_expenses.line_items import save_line_item_review
 from nlp_expenses.models import Expense, LineItem
+from nlp_expenses.reconciliation_state import (
+    load_reconciliation_state,
+    save_reconciliation_state,
+)
 from nlp_expenses.trip_metadata import save_trip_metadata
 from nlp_expenses.trips import ensure_trip, trip_mode
 from nlp_expenses.ui import create_app, open_local_url
@@ -90,6 +95,24 @@ class UITests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn('window.location.protocol === "file:"', template)
         self.assertIn("This is the application template, not the running app", template)
+
+    def test_legacy_company_values_render_with_neutral_product_language(self):
+        trip = ensure_trip(self.root, "202607_company-trip", mode="arvine")
+        save_trip_metadata(
+            trip,
+            {
+                "claim_program": "arvine_only",
+                "traveller": "Colleague",
+                "default_paid_by": "arvine_corporate_bmo",
+            },
+        )
+
+        html = self.client.get(f"/?trip={trip.name}").get_data(as_text=True)
+
+        self.assertNotIn("Arvine", html)
+        self.assertIn("Own-company reimbursement", html)
+        self.assertIn("Default payment source", html)
+        self.assertIn("Company funds/card", html)
 
     def test_upload_cards_reveal_folders_and_best_quality_is_disabled_without_key(self):
         trip = ensure_trip(self.root, "202607_montreal", mode="arvine")
@@ -463,7 +486,7 @@ class UITests(unittest.TestCase):
 
         self.assertEqual(job["status"], "succeeded_warnings")
         self.assertIn("No statement files", job["warnings"][0])
-        self.assertTrue(job["output_name"].startswith(f"expense_review_{trip.name}_arvine_"))
+        self.assertTrue(job["output_name"].startswith(f"expense_review_{trip.name}_company_"))
         workbook_path = trip / job["output_name"]
         self.assertTrue(workbook_path.exists())
         self.assertEqual(
@@ -481,7 +504,7 @@ class UITests(unittest.TestCase):
         details = self.client.get(f"/api/trips/{trip.name}").get_json()["trip"]
         self.assertEqual(
             {entry["kind"] for entry in details["lifecycle"]["current_generation"]["artifacts"]},
-            {"arvine_report", "reimbursement_manifest"},
+            {"company_report", "reimbursement_manifest"},
         )
 
         approved = self.client.post(
@@ -547,38 +570,35 @@ class UITests(unittest.TestCase):
             terminal = self.wait_for_job(started.get_json()["job"]["id"])
         self.assertEqual(terminal["status"], "succeeded")
         primary = trip / terminal["output_name"]
-        ivado = trip / terminal["output_name"].replace("_arvine_", "_ivado_", 1)
+        ivado = trip / terminal["output_name"].replace("_company_", "_ivado_", 1)
         self.assertTrue(primary.is_file())
         self.assertTrue(ivado.is_file())
         self.assertEqual(
             load_workbook(ivado, read_only=True).sheetnames,
-            ["Expense Report", "Card Statements", "Receipt Items"],
-        )
-        ivado_workbook = load_workbook(ivado, data_only=False)
-        expense_report = ivado_workbook["Expense Report"]
-        self.assertEqual(expense_report["H9"].value, 95)
-        self.assertEqual(expense_report["N9"].value, 95)
-        statement_headers = [cell.value for cell in ivado_workbook["Card Statements"][1]]
-        self.assertEqual(
-            statement_headers[-7:],
             [
-                "CAD Conversion Rate",
-                "Rate Week Start",
-                "Rate Week End",
-                "Conversion Method",
-                "Conversion Route",
-                "Rate Source",
-                "Rate Source URL(s)",
+                "modèle - Template FR EN",
+                "Card Statements",
+                "Reconciliation",
+                "Directives & instructions - FR",
+                "Guidelines & Instructions - EN",
             ],
         )
-        receipt_items = ivado_workbook["Receipt Items"]
-        alcohol_row = next(
-            row for row in receipt_items.iter_rows(min_row=2, values_only=True) if row[6] == "Wine"
-        )
-        self.assertEqual(alcohol_row[10], "Yes")
-        self.assertEqual(alcohol_row[12], "No")
-        self.assertEqual(alcohol_row[13], 20)
-        self.assertEqual(alcohol_row[14], 20)
+        ivado_workbook = load_workbook(ivado, data_only=False)
+        expense_report = ivado_workbook["modèle - Template FR EN"]
+        self.assertEqual(expense_report["H15"].value, 95)
+        self.assertEqual(expense_report["N15"].value, 95)
+        statement_headers = [cell.value for cell in ivado_workbook["Card Statements"][5]]
+        self.assertEqual(statement_headers[6], "Statement CAD")
+        self.assertEqual(statement_headers[13], "Allocated IVADO Claim CAD")
+        reconciliation = ivado_workbook["Reconciliation"]
+        rows = list(reconciliation.iter_rows(values_only=True))
+        receipt_header = next(index for index, row in enumerate(rows) if "Vendor" in row)
+        bistro_row = next(row for row in rows[receipt_header + 1 :] if row[2] == "Bistro")
+        self.assertEqual(bistro_row[14], 20)
+        self.assertEqual(bistro_row[15], 95)
+        self.assertEqual(bistro_row[16], 20)
+        self.assertEqual(bistro_row[17], 95)
+        self.assertNotIn("Receipt Line", {value for row in rows for value in row})
         records = [
             json.loads(line)
             for line in (trip / "trip-reimbursement-manifest.v3.ndjson")
@@ -588,12 +608,12 @@ class UITests(unittest.TestCase):
         ]
         receipt_record = records[0]
         report_record = records[-1]
-        self.assertEqual(receipt_record["arvine_reimbursable_cad"], 115)
+        self.assertEqual(receipt_record["arvine_reimbursable_cad"], 95)
         self.assertEqual(receipt_record["ivado_claimable_cad"], 95)
         self.assertEqual(receipt_record["ivado_excluded_cad"], 20)
         self.assertEqual(
             report_record["employee_reimbursement_total_cad"],
-            report_record["ivado_claim_total_cad"] + report_record["ivado_excluded_total_cad"],
+            report_record["ivado_claim_total_cad"],
         )
 
     def test_workbook_generation_inherits_the_receipt_scan_quality(self):
@@ -727,6 +747,7 @@ class UITests(unittest.TestCase):
             expense_type="meal",
             amount=40,
             currency="EUR",
+            number_of_people=2,
             line_items=[LineItem(description="Dinner", amount=40)],
         )
         save_line_item_review(trip, [expense])
@@ -734,10 +755,27 @@ class UITests(unittest.TestCase):
         html = self.client.get(f"/?trip={trip.name}").get_data(as_text=True)
         self.assertIn('class="receipt-file-link receipt-preview"', html)
         self.assertIn('class="currency-review-form"', html)
+        self.assertIn("Per employee (÷ 2)", html)
+        self.assertIn("Receipt 20.00", html)
+        self.assertNotIn("Saved automatically", html)
+        self.assertNotIn(">Save share</button>", html)
+        self.assertIn('class="receipt-meal-toggle"', html)
+        self.assertIn("Meal expense · 50% deductible", html)
+        self.assertIn('list="currency-options"', html)
+        self.assertIn('<option value="QAR">Qatari Rial</option>', html)
         self.assertIn('class="receipt-reviewed"', html)
         self.assertIn('class="line-item-reviewed"', html)
         self.assertIn('data-autosave-field="description"', html)
         self.assertIn('data-autosave-field="amount"', html)
+        amount_inputs = re.findall(
+            r'<input class="input compact-input line-item-amount"[^>]+>', html
+        )
+        self.assertTrue(
+            any(
+                'value="40.00"' in input_html and 'min="0"' not in input_html
+                for input_html in amount_inputs
+            )
+        )
         self.assertIn('class="line-save-status"', html)
         self.assertNotIn('class="button secondary small save-line-item"', html)
         self.assertIn("Click outside this window or press Esc to close", html)
@@ -920,13 +958,41 @@ class UITests(unittest.TestCase):
         self.assertEqual(reconciliation["expenses"][0]["cad_amount_used"], 75)
         html = self.client.get(f"/?trip={trip.name}").get_data(as_text=True)
         self.assertIn("Reconcile invoices and card statements", html)
-        self.assertIn("Statement mappings", html)
+        self.assertIn("Receipt and card matches", html)
+        self.assertIn("Statement transactions without a receipt", html)
+        self.assertNotIn("<h4>Statement mappings</h4>", html)
         self.assertIn("1.500000", html)
+
+        people = self.client.post(
+            f"/api/trips/{trip.name}/line-items/expense",
+            json={"source_file": receipt.name, "fields": {"number_of_people": 2}},
+            headers=self.headers,
+        )
+        self.assertEqual(people.status_code, 200)
+        basis = self.client.post(
+            f"/api/trips/{trip.name}/reconciliation/statement-basis",
+            json={
+                "source_file": receipt.name,
+                "basis": "personal_share",
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(basis.status_code, 200)
+        changed = basis.get_json()["reconciliation"]["expenses"][0]
+        self.assertEqual(changed["statement_amount_basis"], "personal_share")
+        changed_html = self.client.get(f"/?trip={trip.name}").get_data(as_text=True)
+        self.assertIn("Card amount represents", changed_html)
+        self.assertIn("Traveller personal share", changed_html)
+        self.assertIn("reviewed alcohol-free share", changed_html)
 
     def test_line_item_scan_job_populates_ivado_review(self):
         trip = ensure_trip(self.root, "202607_line-scan", mode="ivado")
         receipt = trip / "expenses_receipts" / "meal.pdf"
         receipt.write_bytes(b"fixture")
+        before_scan = self.client.get(f"/?trip={trip.name}").get_data(as_text=True)
+        self.assertIn("<h3>Receipts</h3>", before_scan)
+        self.assertIn("Not scanned", before_scan)
+        self.assertIn("Scan 1 new/changed receipt", before_scan)
         expense = Expense(
             source_file=receipt,
             expense_id="",
@@ -960,6 +1026,10 @@ class UITests(unittest.TestCase):
         self.assertTrue(review["available"])
         self.assertEqual(review["summary"]["line_count"], 4)
         self.assertEqual(review["summary"]["excluded_count"], 1)
+        after_scan = self.client.get(f"/?trip={trip.name}").get_data(as_text=True)
+        self.assertIn("Scanned", after_scan)
+        self.assertIn("All receipts scanned", after_scan)
+        self.assertIn("Rescan all receipts", after_scan)
 
     def test_reconciliation_sync_and_manual_mapping_api(self):
         trip = ensure_trip(self.root, "202607_reconcile", mode="arvine")
@@ -1007,6 +1077,7 @@ class UITests(unittest.TestCase):
             )
             self.assertEqual(started.status_code, 202)
             self.assertEqual(started.get_json()["job"]["quality"], "basic")
+            self.assertTrue(started.get_json()["job"]["only_unmatched"])
             job = self.wait_for_job(started.get_json()["job"]["id"])
         self.assertEqual(job["kind"], "reconciliation")
         self.assertEqual(job["status"], "succeeded")
@@ -1028,6 +1099,27 @@ class UITests(unittest.TestCase):
         self.assertIn('id="card-match-date-window"', html)
         self.assertIn("±3 days", html)
         self.assertIn("every eligible uploaded-card transaction remains searchable", html)
+        self.assertIn("assumed ok", html)
+        self.assertIn('class="current-match-card"', html)
+        self.assertIn(transaction["description"], html)
+        self.assertIn(f"{transaction['cad_amount']:.2f} CAD", html)
+        self.assertIn("Sync unmatched receipts", html)
+        self.assertIn("Rebuild automatic matches", html)
+
+        with patch(
+            "nlp_expenses.generator.parse_arvine_receipt",
+            side_effect=AssertionError("reconciliation should reuse Step 3"),
+        ) as parser:
+            rebuild = self.client.post(
+                f"/api/trips/{trip.name}/reconcile",
+                json={"only_unmatched": False},
+                headers=self.headers,
+            )
+            self.assertEqual(rebuild.status_code, 202)
+            self.assertFalse(rebuild.get_json()["job"]["only_unmatched"])
+            rebuilt_job = self.wait_for_job(rebuild.get_json()["job"]["id"])
+        parser.assert_not_called()
+        self.assertEqual(rebuilt_job["status"], "succeeded")
 
         cleared = self.client.post(
             f"/api/trips/{trip.name}/reconciliation/mapping",
@@ -1038,6 +1130,40 @@ class UITests(unittest.TestCase):
         changed = cleared.get_json()["reconciliation"]["transactions"][0]
         self.assertIsNone(changed["expense_file"])
         self.assertEqual(changed["match_status"], "unmatched")
+        unmatched_html = self.client.get(f"/?trip={trip.name}").get_data(as_text=True)
+        self.assertIn("Statement transactions without a receipt", unmatched_html)
+        self.assertIn("FOREIGN HOTEL", unmatched_html)
+        self.assertIn('class="icon-button exclude-transaction"', unmatched_html)
+        self.assertNotIn("transaction-disposition-dialog", unmatched_html)
+
+        edited = self.client.post(
+            f"/api/trips/{trip.name}/line-items/expense",
+            json={"source_file": receipt.name, "fields": {"currency": "EUR"}},
+            headers=self.headers,
+        )
+        self.assertEqual(edited.status_code, 200)
+        self.assertEqual(edited.get_json()["line_item_review"]["receipts"][0]["currency"], "EUR")
+        refreshed = self.client.get(f"/api/trips/{trip.name}/reconciliation")
+        updated_reconciliation = refreshed.get_json()["reconciliation"]
+        self.assertFalse(updated_reconciliation["stale"])
+        self.assertEqual(updated_reconciliation["expenses"][0]["currency"], "EUR")
+        self.assertIsNone(updated_reconciliation["transactions"][0]["expense_file"])
+        self.assertEqual(updated_reconciliation["transactions"][0]["match_status"], "unmatched")
+        refreshed_html = self.client.get(f"/?trip={trip.name}").get_data(as_text=True)
+        self.assertIn('class="button secondary small open-receipt-matcher"', refreshed_html)
+        self.assertNotIn('class="button secondary small resync-card-matcher"', refreshed_html)
+
+        legacy_state = load_reconciliation_state(trip)
+        legacy_state["expenses"][0]["currency"] = "USD"
+        legacy_state["invoice_overrides"].pop(receipt.name, None)
+        legacy_state["requires_resync"] = True
+        legacy_state.pop("requires_resync_reason", None)
+        save_reconciliation_state(trip, legacy_state)
+        migrated = self.client.get(f"/api/trips/{trip.name}/reconciliation").get_json()[
+            "reconciliation"
+        ]
+        self.assertFalse(migrated["stale"])
+        self.assertEqual(migrated["expenses"][0]["currency"], "EUR")
 
     def test_active_job_locks_trip_source_mutations(self):
         trip = ensure_trip(self.root, "202607_locked", mode="ivado")
@@ -1150,7 +1276,7 @@ class UITests(unittest.TestCase):
         )
         self.assertEqual(saved.status_code, 200)
         view = saved.get_json()["reconciliation"]
-        self.assertTrue(view["stale"])
+        self.assertFalse(view["stale"])
         self.assertEqual(view["expenses"][0]["vendor"], "Corrected Restaurant")
         self.assertEqual(view["expenses"][0]["manual_cad_override"]["amount"], 142.25)
 
@@ -1186,19 +1312,9 @@ class UITests(unittest.TestCase):
         ]
         duplicate = next(item for item in view["transactions"] if item["possible_duplicate"])
 
-        rejected = self.client.post(
-            f"/api/trips/{trip.name}/reconciliation/transaction-decision",
-            json={"group_id": duplicate["group_id"], "action": "ignore", "note": ""},
-            headers=self.headers,
-        )
-        self.assertEqual(rejected.status_code, 400)
         saved = self.client.post(
             f"/api/trips/{trip.name}/reconciliation/transaction-decision",
-            json={
-                "group_id": duplicate["group_id"],
-                "action": "ignore",
-                "note": "Overlapping export",
-            },
+            json={"group_id": duplicate["group_id"], "action": "ignore", "note": ""},
             headers=self.headers,
         )
         self.assertEqual(saved.status_code, 200)
@@ -1244,13 +1360,13 @@ class UITests(unittest.TestCase):
         unrelated = next(item for item in view["transactions"] if "SPOTIFY" in item["description"])
 
         page = self.client.get(f"/?trip={trip.name}")
-        self.assertIn(b"Exclude from this trip", page.data)
+        self.assertIn(b'class="icon-button exclude-transaction"', page.data)
+        self.assertNotIn(b"transaction-disposition-dialog", page.data)
         saved = self.client.post(
             f"/api/trips/{trip.name}/reconciliation/transaction-decision",
             json={
                 "group_id": unrelated["group_id"],
                 "action": "ignore",
-                "note": "Personal subscription outside the trip",
             },
             headers=self.headers,
         )
@@ -1261,7 +1377,13 @@ class UITests(unittest.TestCase):
             if item["group_id"] == unrelated["group_id"]
         )
         self.assertTrue(changed["ignored"])
-        self.assertEqual(changed["decision_note"], "Personal subscription outside the trip")
+        self.assertEqual(changed["decision_note"], "")
+
+        excluded_page = self.client.get(f"/?trip={trip.name}")
+        self.assertIn(
+            b"excluded statement transaction(s) \xc2\xb7 restore if needed", excluded_page.data
+        )
+        self.assertIn(b'class="button secondary small restore-transaction"', excluded_page.data)
 
         restored = self.client.post(
             f"/api/trips/{trip.name}/reconciliation/transaction-decision",
@@ -1310,6 +1432,13 @@ class UITests(unittest.TestCase):
         )
         self.assertEqual(settings.status_code, 200)
         self.assertGreaterEqual(len(settings.get_json()["coverage"]["gaps"]), 1)
+
+        html = self.client.get(f"/?trip={trip.name}").get_data(as_text=True)
+        self.assertIn("Accounts expected for this trip (optional)", html)
+        self.assertIn(
+            "Completeness checklist only; this does not affect transaction matching.", html
+        )
+        self.assertIn("Save completeness checklist", html)
 
         rejected = self.client.post(
             f"/api/trips/{trip.name}/finalize",

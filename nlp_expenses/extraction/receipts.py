@@ -20,7 +20,7 @@ MONTHS = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec"
 SUPPORTED_CURRENCIES = ("AUD", "CAD", "USD", "IDR", "EUR", "GBP", "VND", "QAR", "HKD", "CHF")
 CURRENCY_PATTERN = "|".join(SUPPORTED_CURRENCIES)
 MONEY_RE = re.compile(
-    rf"(?P<cur>{CURRENCY_PATTERN}|AU\$|CA\$|\$)?\s*(?P<amt>-?(?:\d{{1,3}}(?:,\d{{3}})+|\d+,\d{{2}}|\d+)(?:\.\d{{2}})?)",
+    rf"(?P<sign>-)?\s*(?P<cur>{CURRENCY_PATTERN}|AU\$|CA\$|\$)?\s*(?P<amt>-?(?:\d{{1,3}}(?:,\d{{3}})+|\d+,\d{{2}}|\d+)(?:\.\d{{2}})?)",
     re.I,
 )
 OCR_SPLIT_MONEY_RE = re.compile(
@@ -36,6 +36,9 @@ ADDITIVE_CHARGE_RE = re.compile(
     re.I,
 )
 INCLUDED_TAX_RE = re.compile(r"\b(?:includes?|included|incl\.?)\b", re.I)
+DISCOUNT_LINE_RE = re.compile(
+    r"\b(?:discount|promotion|promo|coupon|credit|rebate|remise|rabais)\b", re.I
+)
 
 
 @dataclass(frozen=True)
@@ -401,6 +404,8 @@ def money_matches_in_line(line: str) -> list[MoneyMatch]:
         if any(match.start() >= start and match.end() <= end for start, end in occupied):
             continue
         raw = match.group("amt")
+        if match.group("sign") and not raw.startswith("-"):
+            raw = f"-{raw}"
         currency = match.group("cur")
         if not is_valid_money_match(line, raw, currency, match.start("amt"), match.end("amt")):
             continue
@@ -492,11 +497,11 @@ def find_line_items(
         return []
     items: list[LineItem] = []
     skip = re.compile(
-        r"\b(total|subtotal|visa|mastercard|amex|american expr|paid|payment|balance|change|covers|table|account|check|abn|agn|address|phone|telephone|served by)\b",
+        r"\b(total|subtotal|visa|mastercard|amex|american express|paid|payment|balance|change|covers|table|account|check|abn|agn|address|phone|telephone|served by)\b",
         re.I,
     )
     category_summary = re.compile(r"^\s*(food sales|beverage|misc(?:ellaneous)?)\b", re.I)
-    for line in lines:
+    for line in line_item_candidate_lines(lines):
         if is_tax_total_summary_line(line):
             continue
         is_additive_charge = looks_like_additive_charge(line)
@@ -514,20 +519,29 @@ def find_line_items(
             continue
         selected = choose_line_item_money(line, matches, is_additive_charge)
         amount = selected.amount
-        if amount <= 0:
+        is_discount = bool(DISCOUNT_LINE_RE.search(line))
+        if amount == 0 or (amount < 0 and not is_discount):
             continue
         if is_parenthesized_modifier_amount(line, selected) and not is_additive_charge:
             continue
-        if total_amount is not None and amount > total_amount:
+        if not is_discount and total_amount is not None and amount > total_amount:
             continue
-        if not is_additive_charge and amount > implausible_meal_item_threshold(total_amount):
+        if (
+            not is_discount
+            and not is_additive_charge
+            and amount > implausible_meal_item_threshold(total_amount)
+        ):
             continue
         description = clean_line_item_description(line, selected)
         description = re.sub(r"^[|!Il1x«\s@]+", "", description).strip(" .:-\t")
         if not description or len(description) < 2 or len(re.findall(r"[A-Za-z]", description)) < 3:
             continue
-        confidence = 0.75 if is_additive_charge else 0.6
-        alcohol = detect_alcohol(description)
+        confidence = 0.85 if is_discount else 0.75 if is_additive_charge else 0.6
+        alcohol = (
+            AlcoholDetection(False, 1.0, "receipt discount or promotion")
+            if is_discount
+            else detect_alcohol(description)
+        )
         items.append(
             LineItem(
                 description=description[:120],
@@ -541,6 +555,29 @@ def find_line_items(
             )
         )
     return items
+
+
+def line_item_candidate_lines(lines: list[str]) -> list[str]:
+    """Join native-PDF labels to amounts that were extracted onto the next line."""
+
+    candidates: list[str] = []
+    for index, line in enumerate(lines):
+        candidates.append(line)
+        if index == 0 or not is_standalone_money_line(line):
+            continue
+        previous = lines[index - 1]
+        if money_matches_in_line(previous):
+            continue
+        candidates.append(f"{previous} {line}")
+    return candidates
+
+
+def is_standalone_money_line(line: str) -> bool:
+    matches = money_matches_in_line(line)
+    if len(matches) != 1:
+        return False
+    match = matches[0]
+    return not line[: match.start].strip() and not line[match.end :].strip()
 
 
 def is_parenthesized_modifier_amount(line: str, selected: MoneyMatch) -> bool:
@@ -753,6 +790,8 @@ def classify_expense(text: str, supplier: str, filename: str) -> str:
         return "flight"
     if any(term in blob for term in ["hotel", "room", "arrival", "departure", "meridien"]):
         return "hotel"
+    if "uber" in blob and ("restaurant" in blob or "uber eats" in blob):
+        return "meal-dinner"
     if "uber" in blob or "taxi" in blob or "ride" in blob:
         return "transport"
     if any(
@@ -927,6 +966,7 @@ def llm_parse_receipt(
                         "For flights, hotels, transport, and other non-meal expenses, return an empty line_items array. "
                         "For meal expenses, include only actual purchased menu/food/drink line items, not ticket numbers, phone numbers, addresses, booking references, table numbers, or payment metadata. "
                         "For meal expenses, include additive GST/tax, surcharges, service fees, gratuity, and tips when they are charged as separate line amounts. "
+                        "Include promotions, discounts, coupons, rebates, and credits as negative line-item amounts exactly as shown; never make them positive or omit them. "
                         "Do not add informational tax-included lines that would double-count the total. "
                         "Use short receipt labels for line item descriptions; never copy long menu marketing copy as a line item. "
                         "For meal expenses, line_items should reconcile to the tax-included receipt total when possible; mark alcoholic beverages in line_items. "

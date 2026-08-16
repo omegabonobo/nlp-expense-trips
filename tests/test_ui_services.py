@@ -37,7 +37,7 @@ class UIServiceTests(unittest.TestCase):
             root = Path(tmp)
             trip = create_trip(root, "2026-07", "Montréal Client Meetings")
             self.assertEqual(trip.name, "202607_montreal-client-meetings")
-            self.assertEqual(trip_mode(trip), "arvine")
+            self.assertEqual(trip_mode(trip), "company")
             change_trip_mode(root, trip.name, "ivado")
             self.assertEqual(trip_mode(trip), "ivado")
 

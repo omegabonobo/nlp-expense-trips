@@ -94,6 +94,5 @@ CSS, and the standard-statement CSV are runtime package data.
 - Never add real receipts, card exports, `.env`, workbooks, or generated trip
   packages as test data.
 
-This repository currently has no declared public license. Internal sharing is
-unaffected, but choose and add a license before distributing it outside the
-organization.
+The source is distributed under the repository's [MIT License](../LICENSE).
+Private runtime data remains outside that license and must not be committed.

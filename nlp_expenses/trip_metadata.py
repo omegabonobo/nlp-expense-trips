@@ -9,9 +9,27 @@ from nlp_expenses.trips import load_trip_config, save_trip_config
 
 METADATA_LIST_FIELDS = {"origins", "destinations"}
 POLICY_CATEGORIES = {"flight", "hotel", "transport", "meal", "other"}
-CLAIM_PROGRAMS = {"arvine_only", "ivado_sponsored"}
-PAID_BY_VALUES = {"employee_personal", "arvine_corporate_bmo"}
+CLAIM_PROGRAMS = {"company_reimbursed", "ivado_reimbursed"}
+LEGACY_CLAIM_PROGRAMS = {
+    "arvine_only": "company_reimbursed",
+    "ivado_sponsored": "ivado_reimbursed",
+}
+PAID_BY_VALUES = {"traveller_personal", "company_card"}
+LEGACY_PAID_BY_VALUES = {
+    "employee_personal": "traveller_personal",
+    "arvine_corporate_bmo": "company_card",
+}
 SETTLEMENT_STATUSES = {"planned", "approved", "paid", "reconciled"}
+
+
+def normalize_claim_program(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    return LEGACY_CLAIM_PROGRAMS.get(normalized, normalized)
+
+
+def normalize_paid_by(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    return LEGACY_PAID_BY_VALUES.get(normalized, normalized)
 
 
 def blank_trip_metadata() -> dict:
@@ -33,7 +51,7 @@ def blank_trip_metadata() -> dict:
         "cost_centre": "",
         "approver": "",
         "payment_method": "",
-        "default_paid_by": "employee_personal",
+        "default_paid_by": "traveller_personal",
         "payer_confirmed": False,
         "ivado_template_version": "",
         "ivado_claimant_instruction": "",
@@ -137,6 +155,7 @@ def invalidate_reconciliation_for_metadata_change(
         return
     if previous.get("business_purpose") != current.get("business_purpose"):
         state["requires_resync"] = True
+        state["requires_resync_reason"] = "trip_metadata"
     coverage_fields_changed = any(
         previous.get(field) != current.get(field)
         for field in ("start_date", "end_date", "expected_accounts")
@@ -178,6 +197,8 @@ def validate_trip_metadata(submitted: object) -> dict:
     ):
         if field in submitted:
             result[field] = str(submitted.get(field) or "").strip()
+    result["claim_program"] = normalize_claim_program(result["claim_program"])
+    result["default_paid_by"] = normalize_paid_by(result["default_paid_by"])
     for field in ("payer_confirmed", "ivado_claimant_confirmed"):
         if field in submitted:
             if not isinstance(submitted[field], bool):
@@ -208,9 +229,11 @@ def validate_trip_metadata(submitted: object) -> dict:
     if result["start_date"] and result["end_date"] and result["start_date"] > result["end_date"]:
         raise ValueError("Trip end date cannot be before the start date.")
     if result["claim_program"] and result["claim_program"] not in CLAIM_PROGRAMS:
-        raise ValueError("Claim program must be Arvine only or IVADO sponsored.")
+        raise ValueError(
+            "Reimbursement program must be own-company reimbursement or IVADO-reimbursed."
+        )
     if result["default_paid_by"] not in PAID_BY_VALUES:
-        raise ValueError("Default payer must be employee personal or Arvine corporate BMO.")
+        raise ValueError("Default payment source must be traveller personal or company card.")
 
     submitted_settlement = submitted.get("settlement", {})
     if submitted_settlement is not None and not isinstance(submitted_settlement, dict):
@@ -297,7 +320,7 @@ def apply_trip_metadata_defaults(trip_dir: Path, expenses: list[Expense]) -> Non
 def required_metadata_gaps(trip_dir: Path) -> list[str]:
     metadata = trip_metadata(trip_dir)
     labels = {
-        "claim_program": "claim program",
+        "claim_program": "reimbursement program",
         "traveller": "traveller",
     }
     return [label for field, label in labels.items() if not metadata.get(field)]

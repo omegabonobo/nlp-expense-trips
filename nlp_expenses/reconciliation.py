@@ -13,7 +13,11 @@ from nlp_expenses.generator import (
     assign_simple_expense_ids,
     extract_trip_expenses,
 )
-from nlp_expenses.line_items import apply_line_item_review, save_line_item_review
+from nlp_expenses.line_items import (
+    apply_line_item_review,
+    line_item_review_view,
+    save_line_item_review,
+)
 from nlp_expenses.matching import (
     apply_manual_matches,
     close_amount,
@@ -38,9 +42,7 @@ from nlp_expenses.reconciliation_allocations import (
 )
 from nlp_expenses.reconciliation_coverage import statement_coverage_view
 from nlp_expenses.reconciliation_invoices import (
-    InvoiceValidationError as InvoiceValidationError,
-)
-from nlp_expenses.reconciliation_invoices import (
+    INVOICE_FIELD_MAP,
     apply_invoice_overrides,
     apply_manual_cad_overrides,
     apply_overrides_to_snapshots,
@@ -48,9 +50,14 @@ from nlp_expenses.reconciliation_invoices import (
     validate_invoice_fields,
     validate_manual_cad,
 )
+from nlp_expenses.reconciliation_invoices import (
+    InvoiceValidationError as InvoiceValidationError,
+)
 from nlp_expenses.reconciliation_state import (
     RECONCILIATION_VERSION,
+    STATEMENT_AMOUNT_BASES,
     deserialize_manual_matches,
+    deserialize_statement_basis_overrides,
     deserialize_transaction_allocations,
     deserialize_transaction_decisions,
     load_invoice_overrides,
@@ -58,6 +65,7 @@ from nlp_expenses.reconciliation_state import (
     load_reconciliation_state,
     reconciliation_input_fingerprint,
     save_reconciliation_state,
+    statement_input_fingerprint,
 )
 from nlp_expenses.reconciliation_views import (
     accounting_basis as accounting_basis,
@@ -72,6 +80,9 @@ from nlp_expenses.reconciliation_views import (
 from nlp_expenses.reconciliation_views import (
     serialized_candidate_score as serialized_candidate_score,
 )
+from nlp_expenses.reconciliation_views import (
+    statement_receipt_difference as statement_receipt_difference,
+)
 from nlp_expenses.statement_normalizer import (
     StatementNormalizationError,
     list_statement_files,
@@ -82,7 +93,9 @@ from nlp_expenses.trip_metadata import (
     apply_trip_metadata_defaults,
 )
 from nlp_expenses.trips import (
+    list_receipt_files,
     load_trip_config,
+    relative_source_name,
     save_trip_config,
     source_file_key,
     trip_mode,
@@ -90,11 +103,35 @@ from nlp_expenses.trips import (
     trip_statements_dir,
 )
 
+RECONCILIATION_EXPENSE_FIELDS = {
+    "date",
+    "vendor",
+    "description",
+    "expense_type",
+    "amount",
+    "currency",
+    "country",
+    "province",
+    "gst_hst",
+    "qst",
+    "gst_hst_number",
+    "qst_number",
+    "business_purpose",
+    "attendees_client",
+    "tax_documentation_status",
+    "review_note",
+    "included",
+    "number_of_people",
+    "manual_cad_override",
+    "manual_cad_note",
+}
+
 
 def sync_reconciliation(
     trip_dir: Path,
     root: Path,
     llm_mode: str = "off",
+    only_unmatched: bool = False,
     progress_callback: ProgressCallback | None = None,
     warning_callback: WarningCallback | None = None,
     allow_openai_prompt: bool = True,
@@ -109,7 +146,7 @@ def sync_reconciliation(
     emit_progress(
         progress_callback, "statements", 0, len(statements), "Validating card and bank statements"
     )
-    if selected_mode == "arvine":
+    if selected_mode == "company":
         reports = preflight_statement_files(statements)
         errors = [error for report in reports for error in report.errors]
         if errors:
@@ -133,29 +170,24 @@ def sync_reconciliation(
     current_fingerprint = reconciliation_input_fingerprint(trip_dir)
     invoice_overrides = load_invoice_overrides(trip_dir)
     manual_cad_overrides = load_manual_cad_overrides(trip_dir)
-    transaction_decisions = (
-        deserialize_transaction_decisions(previous_state)
-        if previous_state and previous_state.get("input_fingerprint") == current_fingerprint
-        else {}
-    )
-    transaction_allocations = (
-        deserialize_transaction_allocations(previous_state)
-        if previous_state and previous_state.get("input_fingerprint") == current_fingerprint
-        else {}
-    )
-    expenses = extract_trip_expenses(
-        trip_receipts_dir(trip_dir),
-        root,
-        selected_mode,
-        llm_mode,
-        progress_callback=progress_callback,
-        warning_callback=warning_callback,
-        allow_openai_prompt=allow_openai_prompt,
-    )
+    statement_basis_overrides = deserialize_statement_basis_overrides(previous_state)
+    transaction_decisions = deserialize_transaction_decisions(previous_state)
+    transaction_allocations = deserialize_transaction_allocations(previous_state)
+    expenses = reviewed_expenses_for_reconciliation(trip_dir)
+    if expenses is None:
+        expenses = extract_trip_expenses(
+            trip_receipts_dir(trip_dir),
+            root,
+            selected_mode,
+            llm_mode,
+            progress_callback=progress_callback,
+            warning_callback=warning_callback,
+            allow_openai_prompt=allow_openai_prompt,
+        )
+        save_line_item_review(trip_dir, expenses, llm_mode=llm_mode)
+        apply_line_item_review(trip_dir, expenses, require_fresh=True)
     apply_trip_metadata_defaults(trip_dir, expenses)
     extracted_expenses = [serialize_expense(expense) for expense in expenses]
-    save_line_item_review(trip_dir, expenses, llm_mode=llm_mode)
-    apply_line_item_review(trip_dir, expenses, require_fresh=True)
     apply_invoice_overrides(expenses, invoice_overrides)
     apply_manual_cad_overrides(expenses, manual_cad_overrides)
     manual_cad_overrides = {
@@ -167,46 +199,123 @@ def sync_reconciliation(
         if expense.manual_cad_override is not None
     }
     assign_simple_expense_ids(expenses)
-    emit_progress(
-        progress_callback, "matching", 0, 1, "Matching invoices to statement transactions"
-    )
-    estimated_cad_by_expense = estimate_expense_cad_amounts(
-        expenses,
-        normalization.transactions,
-        fx_resolver,
-        warning_callback,
-    )
-    match_normalized_transactions(
-        expenses,
-        normalization.transactions,
-        estimated_cad_by_expense=estimated_cad_by_expense,
-    )
 
     expense_files = {source_file_key(expense.source_file) for expense in expenses}
     transaction_groups = {
         transaction.transaction_group_id for transaction in normalization.transactions
     }
-    preserved_manual_matches = (
-        deserialize_manual_matches(previous_state)
-        if previous_state and previous_state.get("input_fingerprint") == current_fingerprint
-        else {}
-    )
+    preserved_manual_matches = deserialize_manual_matches(previous_state)
     manual_matches = {
         group_id: receipt_file
         for group_id, receipt_file in preserved_manual_matches.items()
         if group_id in transaction_groups
         and (receipt_file is None or receipt_file in expense_files)
     }
+    previous_groups = {
+        str(group.get("group_id") or ""): group
+        for group in (previous_state.get("transactions", []) if previous_state else [])
+        if isinstance(group, dict) and group.get("group_id") in transaction_groups
+    }
+    protected_group_ids, previously_matched_files = incremental_match_scope(
+        previous_groups,
+        manual_matches,
+        transaction_decisions,
+        transaction_allocations,
+        expense_files,
+    )
+    matching_expenses = (
+        [
+            expense
+            for expense in expenses
+            if source_file_key(expense.source_file) not in previously_matched_files
+        ]
+        if only_unmatched and previous_state
+        else expenses
+    )
+    matching_transactions = (
+        [
+            transaction
+            for transaction in normalization.transactions
+            if transaction.transaction_group_id not in protected_group_ids
+        ]
+        if only_unmatched and previous_state
+        else normalization.transactions
+    )
+    emit_progress(
+        progress_callback,
+        "matching",
+        0,
+        1,
+        (
+            f"Matching {len(matching_expenses)} unmatched receipt(s)"
+            if only_unmatched and previous_state
+            else "Matching invoices to statement transactions"
+        ),
+    )
+    estimated_cad_by_expense = (
+        {
+            source_file: amount
+            for source_file, amount in (previous_state or {})
+            .get("estimated_cad_by_expense", {})
+            .items()
+            if source_file in previously_matched_files
+        }
+        if only_unmatched and previous_state
+        else {}
+    )
+    estimated_cad_by_expense.update(
+        estimate_expense_cad_amounts(
+            matching_expenses,
+            matching_transactions,
+            fx_resolver,
+            warning_callback,
+        )
+    )
+    match_normalized_transactions(
+        matching_expenses,
+        matching_transactions,
+        estimated_cad_by_expense=estimated_cad_by_expense,
+    )
     auto_groups = aggregate_transaction_groups(expenses, normalization.transactions)
     apply_manual_matches(expenses, normalization.transactions, manual_matches)
     current_groups = aggregate_transaction_groups(expenses, normalization.transactions)
     auto_by_id = {group["group_id"]: group for group in auto_groups}
     for group in current_groups:
         automatic = auto_by_id[group["group_id"]]
-        group["auto_expense_file"] = automatic["expense_file"]
-        group["auto_match_status"] = automatic["match_status"]
-        group["auto_match_confidence"] = automatic["match_confidence"]
-        group["auto_match_review_reason"] = automatic.get("match_review_reason", "")
+        previous = previous_groups.get(group["group_id"])
+        protected = bool(
+            only_unmatched and previous_state and group["group_id"] in protected_group_ids
+        )
+        if protected and previous:
+            group["auto_expense_file"] = previous.get(
+                "auto_expense_file", previous.get("expense_file")
+            )
+            group["auto_match_status"] = previous.get(
+                "auto_match_status", previous.get("match_status", "unmatched")
+            )
+            group["auto_match_confidence"] = previous.get(
+                "auto_match_confidence", previous.get("match_confidence", 0.0)
+            )
+            group["auto_match_review_reason"] = previous.get(
+                "auto_match_review_reason", previous.get("match_review_reason", "")
+            )
+            if (
+                group["group_id"] not in manual_matches
+                and previous.get("expense_file") in expense_files
+            ):
+                for field in (
+                    "expense_file",
+                    "suggested_expense_file",
+                    "match_status",
+                    "match_confidence",
+                    "match_review_reason",
+                ):
+                    group[field] = previous.get(field)
+        else:
+            group["auto_expense_file"] = automatic["expense_file"]
+            group["auto_match_status"] = automatic["match_status"]
+            group["auto_match_confidence"] = automatic["match_confidence"]
+            group["auto_match_review_reason"] = automatic.get("match_review_reason", "")
         group["override_active"] = group["group_id"] in manual_matches
         group["override_expense_file"] = manual_matches.get(group["group_id"])
     apply_decisions_to_groups(current_groups, transaction_decisions)
@@ -217,6 +326,8 @@ def sync_reconciliation(
         "mode": selected_mode,
         "synced_at": datetime.now().isoformat(timespec="seconds"),
         "input_fingerprint": current_fingerprint,
+        "statement_input_fingerprint": statement_input_fingerprint(trip_dir),
+        "sync_scope": "unmatched" if only_unmatched and previous_state else "all",
         "requires_resync": False,
         "extracted_expenses": extracted_expenses,
         "expenses": [serialize_expense(expense) for expense in expenses],
@@ -229,6 +340,11 @@ def sync_reconciliation(
         "manual_cad_overrides": {
             filename: values
             for filename, values in manual_cad_overrides.items()
+            if filename in expense_files
+        },
+        "statement_basis_overrides": {
+            filename: values
+            for filename, values in statement_basis_overrides.items()
             if filename in expense_files
         },
         "transaction_decisions": {
@@ -249,6 +365,69 @@ def sync_reconciliation(
     save_reconciliation_state(trip_dir, state)
     emit_progress(progress_callback, "complete", 1, 1, "Reconciliation ready for review")
     return reconciliation_view(trip_dir, state)
+
+
+def reviewed_expenses_for_reconciliation(trip_dir: Path) -> list[Expense] | None:
+    """Reuse the current Step 3 review instead of scanning receipts again."""
+
+    review = line_item_review_view(trip_dir)
+    if not review.get("available") or review.get("stale"):
+        return None
+    receipts = [
+        receipt
+        for receipt in review.get("receipts", [])
+        if isinstance(receipt, dict) and receipt.get("source_file")
+    ]
+    expenses = [
+        Expense(
+            source_file=trip_receipts_dir(trip_dir) / str(receipt["source_file"]),
+            expense_id="",
+            confidence=float(receipt.get("extraction_confidence") or 0.0),
+        )
+        for receipt in receipts
+    ]
+    apply_line_item_review(trip_dir, expenses, require_fresh=True)
+    return expenses
+
+
+def incremental_match_scope(
+    previous_groups: dict[str, dict],
+    manual_matches: dict[str, str | None],
+    transaction_decisions: dict[str, dict],
+    transaction_allocations: dict[str, list[dict]],
+    expense_files: set[str],
+) -> tuple[set[str], set[str]]:
+    """Return reviewed transaction groups and receipts that incremental matching must not touch."""
+
+    protected_groups: set[str] = set()
+    matched_files: set[str] = set()
+    for group_id, group in previous_groups.items():
+        expense_file = group.get("expense_file")
+        if expense_file in expense_files:
+            protected_groups.add(group_id)
+            matched_files.add(str(expense_file))
+
+        allocations = transaction_allocations.get(group_id) or group.get("allocations") or []
+        if allocations:
+            protected_groups.add(group_id)
+            for allocation in allocations:
+                if not isinstance(allocation, dict):
+                    continue
+                invoice_file = allocation.get("invoice_file")
+                if invoice_file in expense_files:
+                    matched_files.add(str(invoice_file))
+
+        if group_id in manual_matches:
+            protected_groups.add(group_id)
+            manual_file = manual_matches[group_id]
+            if manual_file in expense_files:
+                matched_files.add(str(manual_file))
+
+        if transaction_decisions.get(group_id, {}).get("action") == "ignore" or group.get(
+            "ignored"
+        ):
+            protected_groups.add(group_id)
+    return protected_groups, matched_files
 
 
 def estimate_expense_cad_amounts(
@@ -355,6 +534,48 @@ def set_manual_match(
     return reconciliation_view(trip_dir, state)
 
 
+def set_statement_basis(
+    trip_dir: Path,
+    source_file: str,
+    basis: str,
+) -> dict:
+    """Persist how a matched statement amount relates to a shared receipt."""
+
+    state = load_reconciliation_state(trip_dir)
+    if not state:
+        raise ValueError("Run invoice and statement sync before setting the statement basis.")
+    if not reconciliation_is_fresh(trip_dir, state):
+        raise ValueError(
+            "Receipts or statements changed after the last sync. Sync again before setting the statement basis."
+        )
+    expense = next(
+        (
+            item
+            for item in state.get("expenses", [])
+            if isinstance(item, dict) and item.get("source_file") == source_file
+        ),
+        None,
+    )
+    if expense is None:
+        raise FileNotFoundError("The receipt is no longer present in the reconciliation snapshot.")
+    if basis not in STATEMENT_AMOUNT_BASES:
+        raise ValueError("Choose whether the card amount is the full receipt or traveller share.")
+    people = max(1, int(expense.get("number_of_people") or 1))
+    if basis == "personal_share" and people == 1:
+        raise ValueError(
+            "Personal-share basis is only applicable to receipts shared by two or more people."
+        )
+
+    decision: dict[str, object] = {
+        "basis": basis,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+    state.setdefault("statement_basis_overrides", {})[source_file] = decision
+    save_reconciliation_state(trip_dir, state)
+    return reconciliation_view(trip_dir, state)
+
+
 def load_manual_matches(trip_dir: Path) -> dict[str, str | None]:
     state = load_reconciliation_state(trip_dir)
     if state and not reconciliation_is_fresh(trip_dir, state):
@@ -418,9 +639,9 @@ def set_transaction_decision(
     """Persist an auditable statement disposition.
 
     Possible duplicates support an explicit keep/ignore decision. Any normal
-    match-eligible statement row may also be excluded from the trip with a
-    reason, which is required for subscriptions, personal charges, and other
-    statement activity that does not belong to the business trip.
+    match-eligible statement row may also be excluded from the trip. The
+    timestamp and source transaction preserve the audit trail; a note remains
+    optional for API callers.
     """
 
     state = load_reconciliation_state(trip_dir)
@@ -443,8 +664,6 @@ def set_transaction_decision(
     if action not in {"unresolved", "keep", "ignore"}:
         raise ValueError("Choose unresolved, keep, or ignore.")
     note = note.strip()
-    if action == "ignore" and not note:
-        raise ValueError("Explain why this transaction should be ignored.")
 
     decisions = state.setdefault("transaction_decisions", {})
     restore_group_before_decision(transaction)
@@ -657,7 +876,7 @@ def set_invoice_review(
             invoice_overrides.pop(source_file, None)
 
     if previous_fields != invoice_overrides.get(source_file, {}):
-        state["requires_resync"] = True
+        state.get("estimated_cad_by_expense", {}).pop(source_file, None)
 
     if update_manual_cad:
         cad_overrides = state.setdefault("manual_cad_overrides", {})
@@ -674,6 +893,297 @@ def set_invoice_review(
     state["expenses"] = apply_overrides_to_snapshots(extracted, state.get("invoice_overrides", {}))
     save_reconciliation_state(trip_dir, state)
     return reconciliation_view(trip_dir, state)
+
+
+def update_reconciliation_expense_snapshot(
+    trip_dir: Path,
+    receipt: dict,
+    changed_fields: set[str],
+) -> None:
+    """Apply receipt-review edits without re-extracting receipts or statements.
+
+    Receipt fields are already validated by ``line_items.py``. Reconciliation
+    stores the normalized card transactions, so updating its expense snapshot is
+    sufficient for the view to recalculate candidate scores, CAD, FX, and review
+    status while preserving manual mappings and statement decisions.
+    """
+
+    state = load_reconciliation_state(trip_dir)
+    if not state or state.get("input_fingerprint") != reconciliation_input_fingerprint(trip_dir):
+        return
+    source_file = str(receipt.get("source_file") or "")
+    expense = next(
+        (
+            item
+            for item in state.get("expenses", [])
+            if isinstance(item, dict) and item.get("source_file") == source_file
+        ),
+        None,
+    )
+    if expense is None:
+        return
+
+    fields_to_copy = changed_fields & RECONCILIATION_EXPENSE_FIELDS
+    if changed_fields & {"manual_cad_override", "manual_cad_note"}:
+        fields_to_copy.update({"manual_cad_override", "manual_cad_note"})
+    for field in fields_to_copy:
+        expense[field] = receipt.get(field)
+
+    receipt_overrides = (
+        receipt.get("field_overrides") if isinstance(receipt.get("field_overrides"), dict) else {}
+    )
+    invoice_overrides = state.setdefault("invoice_overrides", {})
+    source_overrides = dict(invoice_overrides.get(source_file, {}))
+    for field in changed_fields & set(INVOICE_FIELD_MAP):
+        if field in receipt_overrides:
+            source_overrides[field] = receipt.get(field)
+        else:
+            source_overrides.pop(field, None)
+    if source_overrides:
+        invoice_overrides[source_file] = source_overrides
+    else:
+        invoice_overrides.pop(source_file, None)
+
+    if changed_fields & {"manual_cad_override", "manual_cad_note"}:
+        cad_overrides = state.setdefault("manual_cad_overrides", {})
+        amount = receipt.get("manual_cad_override")
+        if isinstance(amount, (int, float)):
+            cad_overrides[source_file] = {
+                "amount": float(amount),
+                "note": str(receipt.get("manual_cad_note") or ""),
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        else:
+            cad_overrides.pop(source_file, None)
+
+    if changed_fields & {"date", "amount", "currency", "number_of_people"}:
+        state.get("estimated_cad_by_expense", {}).pop(source_file, None)
+    if state.get("requires_resync_reason") in (None, "receipt_edit"):
+        state["requires_resync"] = False
+        state.pop("requires_resync_reason", None)
+    save_reconciliation_state(trip_dir, state)
+
+
+def refresh_reconciliation_receipts(trip_dir: Path, receipts: list[dict]) -> None:
+    """Merge freshly scanned receipts without rebuilding statement transactions."""
+
+    state = load_reconciliation_state(trip_dir)
+    if not state:
+        return
+    stored_statement_fingerprint = state.get("statement_input_fingerprint")
+    if stored_statement_fingerprint:
+        if stored_statement_fingerprint != statement_input_fingerprint(trip_dir):
+            return
+    else:
+        try:
+            synced_at = datetime.fromisoformat(str(state.get("synced_at") or "")).timestamp()
+        except (TypeError, ValueError):
+            return
+        if any(
+            path.stat().st_mtime > synced_at + 1
+            for path in reconciliation_statement_files(trip_dir, trip_mode(trip_dir))
+        ):
+            return
+
+    existing_expenses = {
+        str(expense.get("source_file") or ""): expense
+        for expense in state.get("expenses", [])
+        if isinstance(expense, dict)
+    }
+    existing_extracted = {
+        str(expense.get("source_file") or ""): expense
+        for expense in state.get("extracted_expenses", [])
+        if isinstance(expense, dict)
+    }
+    invoice_overrides = state.setdefault("invoice_overrides", {})
+    cad_overrides = state.setdefault("manual_cad_overrides", {})
+    refreshed_expenses = []
+    refreshed_extracted = []
+    for receipt in receipts:
+        if not isinstance(receipt, dict) or not receipt.get("source_file"):
+            continue
+        source_file = str(receipt["source_file"])
+        current = dict(existing_expenses.get(source_file, {}))
+        extracted = dict(existing_extracted.get(source_file, {}))
+        current.setdefault("source_file", source_file)
+        current.setdefault("expense_id", "")
+        extracted.setdefault("source_file", source_file)
+        extracted.setdefault("expense_id", current.get("expense_id", ""))
+        receipt_extracted = (
+            receipt.get("extracted") if isinstance(receipt.get("extracted"), dict) else {}
+        )
+        for field in RECONCILIATION_EXPENSE_FIELDS:
+            current[field] = receipt.get(field)
+            extracted[field] = receipt_extracted.get(field, receipt.get(field))
+        current["confidence"] = receipt.get("extraction_confidence", current.get("confidence", 0))
+        extracted["confidence"] = current["confidence"]
+        refreshed_expenses.append(current)
+        refreshed_extracted.append(extracted)
+
+        field_overrides = (
+            receipt.get("field_overrides")
+            if isinstance(receipt.get("field_overrides"), dict)
+            else {}
+        )
+        values = {
+            field: receipt.get(field) for field in INVOICE_FIELD_MAP if field in field_overrides
+        }
+        if values:
+            invoice_overrides[source_file] = values
+        else:
+            invoice_overrides.pop(source_file, None)
+        manual_cad = receipt.get("manual_cad_override")
+        if isinstance(manual_cad, (int, float)):
+            cad_overrides[source_file] = {
+                "amount": float(manual_cad),
+                "note": str(receipt.get("manual_cad_note") or ""),
+            }
+        else:
+            cad_overrides.pop(source_file, None)
+
+    current_sources = {expense["source_file"] for expense in refreshed_expenses}
+    state["expenses"] = refreshed_expenses
+    state["extracted_expenses"] = refreshed_extracted
+    state["invoice_overrides"] = {
+        source_file: values
+        for source_file, values in invoice_overrides.items()
+        if source_file in current_sources
+    }
+    state["manual_cad_overrides"] = {
+        source_file: values
+        for source_file, values in cad_overrides.items()
+        if source_file in current_sources
+    }
+    state["statement_basis_overrides"] = {
+        source_file: values
+        for source_file, values in state.get("statement_basis_overrides", {}).items()
+        if source_file in current_sources
+    }
+    state["estimated_cad_by_expense"] = {
+        source_file: amount
+        for source_file, amount in state.get("estimated_cad_by_expense", {}).items()
+        if source_file in current_sources
+    }
+    state["input_fingerprint"] = reconciliation_input_fingerprint(trip_dir)
+    if state.get("requires_resync_reason") in (None, "receipt_edit"):
+        state["requires_resync"] = False
+        state.pop("requires_resync_reason", None)
+    save_reconciliation_state(trip_dir, state)
+
+
+def persist_reconciliation_after_receipt_removal(
+    trip_dir: Path,
+    source_file: str,
+) -> None:
+    """Remove one deleted receipt and every mapping that points to it without a resync."""
+
+    state = load_reconciliation_state(trip_dir)
+    if not state:
+        return
+    source_file = source_file_key(Path(source_file))
+    for field in ("expenses", "extracted_expenses"):
+        state[field] = [
+            expense
+            for expense in state.get(field, [])
+            if isinstance(expense, dict) and expense.get("source_file") != source_file
+        ]
+    for field in (
+        "invoice_overrides",
+        "manual_cad_overrides",
+        "statement_basis_overrides",
+        "estimated_cad_by_expense",
+    ):
+        values = state.get(field)
+        if isinstance(values, dict):
+            values.pop(source_file, None)
+
+    manual_matches = state.setdefault("manual_matches", {})
+    allocations_by_group = state.setdefault("transaction_allocations", {})
+    for group in state.get("transactions", []):
+        if not isinstance(group, dict):
+            continue
+        group_id = str(group.get("group_id") or "")
+        allocations = allocations_by_group.get(group_id) or group.get("allocations") or []
+        if any(
+            isinstance(allocation, dict) and allocation.get("invoice_file") == source_file
+            for allocation in allocations
+        ):
+            allocations_by_group.pop(group_id, None)
+            restore_group_before_allocations(group)
+
+        if manual_matches.get(group_id) == source_file:
+            manual_matches.pop(group_id, None)
+        clear_removed_receipt_mapping(group, source_file)
+
+    state["coverage_confirmation"] = None
+    state["input_fingerprint"] = reconciliation_input_fingerprint(trip_dir)
+    if state.get("requires_resync_reason") in (None, "receipt_edit"):
+        state["requires_resync"] = False
+        state.pop("requires_resync_reason", None)
+    save_reconciliation_state(trip_dir, state)
+
+
+def repair_reconciliation_after_missing_receipts(trip_dir: Path) -> bool:
+    """Repair receipts deleted before targeted in-app cleanup was available."""
+
+    state = load_reconciliation_state(trip_dir)
+    if not state:
+        return False
+    stored_sources = {
+        str(expense.get("source_file") or "")
+        for expense in state.get("expenses", [])
+        if isinstance(expense, dict) and expense.get("source_file")
+    }
+    folder = trip_receipts_dir(trip_dir)
+    current_paths = {
+        relative_source_name(folder, path): path for path in list_receipt_files(folder)
+    }
+    current_sources = set(current_paths)
+    missing_sources = stored_sources - current_sources
+    if not missing_sources or not current_sources.issubset(stored_sources):
+        return False
+    stored_statement_fingerprint = state.get("statement_input_fingerprint")
+    if stored_statement_fingerprint and stored_statement_fingerprint != statement_input_fingerprint(
+        trip_dir
+    ):
+        return False
+    try:
+        synced_timestamp = datetime.fromisoformat(str(state.get("synced_at") or "")).timestamp()
+    except (TypeError, ValueError):
+        return False
+    if any(path.stat().st_mtime > synced_timestamp + 1 for path in current_paths.values()):
+        return False
+    for source_file in sorted(missing_sources):
+        persist_reconciliation_after_receipt_removal(trip_dir, source_file)
+    return True
+
+
+def clear_removed_receipt_mapping(group: dict, source_file: str) -> None:
+    if group.get("match_status") == "split" and not group.get("allocations"):
+        group["expense_file"] = None
+        group["match_status"] = "unmatched"
+        group["match_confidence"] = 0.0
+    if group.get("expense_file") == source_file:
+        group["expense_file"] = None
+        group["match_status"] = "unmatched"
+        group["match_confidence"] = 0.0
+        group["match_review_reason"] = ""
+    if group.get("suggested_expense_file") == source_file:
+        group["suggested_expense_file"] = None
+    if group.get("auto_expense_file") == source_file:
+        group["auto_expense_file"] = None
+        group["auto_match_status"] = "unmatched"
+        group["auto_match_confidence"] = 0.0
+        group["auto_match_review_reason"] = ""
+    if group.get("override_expense_file") == source_file:
+        group["override_expense_file"] = None
+        group["override_active"] = False
+    for snapshot_field in ("pre_allocation", "pre_decision"):
+        snapshot = group.get(snapshot_field)
+        if isinstance(snapshot, dict) and snapshot.get("expense_file") == source_file:
+            snapshot["expense_file"] = None
+            snapshot["match_status"] = "unmatched"
+            snapshot["match_confidence"] = 0.0
 
 
 def ensure_reconciliation_ready(trip_dir: Path) -> None:
@@ -889,7 +1399,7 @@ def serialize_expense(expense: Expense) -> dict:
 
 
 def reconciliation_statement_files(trip_dir: Path, mode: str) -> list[Path]:
-    if mode == "arvine":
+    if mode == "company":
         return list_statement_files(trip_statements_dir(trip_dir))
     supported = {".csv", ".xls", ".xlsx", ".pdf"}
     return sorted(

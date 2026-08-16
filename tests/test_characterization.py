@@ -60,6 +60,7 @@ EXPECTED_ROUTES = [
     ("/api/trips/<trip_name>/reconciliation/coverage-settings", ("POST",)),
     ("/api/trips/<trip_name>/reconciliation/invoice", ("POST",)),
     ("/api/trips/<trip_name>/reconciliation/mapping", ("POST",)),
+    ("/api/trips/<trip_name>/reconciliation/statement-basis", ("POST",)),
     ("/api/trips/<trip_name>/reconciliation/transaction-decision", ("POST",)),
     ("/api/trips/<trip_name>/remove-file", ("POST",)),
     ("/api/trips/<trip_name>/reveal", ("POST",)),
@@ -99,7 +100,13 @@ def workbook_semantic_contract(path: Path) -> dict:
                 cells.append(
                     {
                         "coordinate": cell.coordinate,
-                        "value": serializable_cell_value(cell.value),
+                        "value": (
+                            "<generated-report-date>"
+                            if worksheet.title == "expense_summary"
+                            and cell.coordinate == "B1"
+                            and worksheet["A1"].value == "Report date"
+                            else serializable_cell_value(cell.value)
+                        ),
                         "number_format": cell.number_format,
                         "style_id": cell.style_id,
                         "locked": cell.protection.locked,
@@ -449,7 +456,7 @@ class CharacterizationTests(unittest.TestCase):
 
             self.assertEqual(
                 workbook_contract_digest(output),
-                "7980bd3051096ce42f1091e7b6858a322e8351a2cc3a5f7b1eea2a5525bca2de",
+                "7a8a2f918ad4d930b98d037dc87c80b76af4efb6d217c012a685fcc21a184171",
             )
 
     def test_contract_bundle_removes_completed_artifacts_after_later_failure(self):

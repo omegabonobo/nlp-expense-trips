@@ -16,6 +16,7 @@ dist/
 *.egg-info/
 trips/
 *.xlsx
+!nlp_expenses/static/ivado_expense_report_template.xlsx
 *.xls
 *.pdf
 *.csv

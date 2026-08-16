@@ -27,6 +27,8 @@ class GenerationJob:
     id: str
     trip_name: str
     quality: str
+    only_unscanned: bool = False
+    only_unmatched: bool = False
     kind: str = "generation"
     status: str = "queued"
     stage: str = "queued"
@@ -68,7 +70,7 @@ class JobManager:
                     "Another sync or workbook job is already running for this trip."
                 )
             job = GenerationJob(id=uuid.uuid4().hex, trip_name=trip_name, quality=quality)
-            if trip_mode(trip) == "arvine" and not list_source_files(trip_statements_dir(trip)):
+            if trip_mode(trip) == "company" and not list_source_files(trip_statements_dir(trip)):
                 job.warnings.append(
                     "No statement files were included; statement matching will be empty."
                 )
@@ -84,7 +86,12 @@ class JobManager:
         worker.start()
         return self.get(job.id)
 
-    def start_reconciliation(self, trip_name: str, quality: str) -> GenerationJob:
+    def start_reconciliation(
+        self,
+        trip_name: str,
+        quality: str,
+        only_unmatched: bool = True,
+    ) -> GenerationJob:
         if quality not in {"basic", "best"}:
             raise ValueError("Choose Basic or Best extraction quality.")
         trip = resolve_trip(self.root, trip_name)
@@ -102,8 +109,13 @@ class JobManager:
                 id=uuid.uuid4().hex,
                 trip_name=trip_name,
                 quality=quality,
+                only_unmatched=only_unmatched,
                 kind="reconciliation",
-                message="Waiting to sync invoices and statements",
+                message=(
+                    "Waiting to match unmatched receipts"
+                    if only_unmatched
+                    else "Waiting to rebuild automatic matches"
+                ),
             )
             self._jobs[job.id] = job
             self._latest_reconciliation_by_trip[trip_name] = job.id
@@ -117,7 +129,12 @@ class JobManager:
         worker.start()
         return self.get(job.id)
 
-    def start_line_item_review(self, trip_name: str, quality: str) -> GenerationJob:
+    def start_line_item_review(
+        self,
+        trip_name: str,
+        quality: str,
+        only_unscanned: bool = True,
+    ) -> GenerationJob:
         if quality not in {"basic", "best"}:
             raise ValueError("Choose Basic or Best extraction quality.")
         trip = resolve_trip(self.root, trip_name)
@@ -135,8 +152,11 @@ class JobManager:
                 id=uuid.uuid4().hex,
                 trip_name=trip_name,
                 quality=quality,
+                only_unscanned=only_unscanned,
                 kind="line_items",
-                message="Waiting to scan receipt line items",
+                message="Waiting to scan new receipts"
+                if only_unscanned
+                else "Waiting to rescan all receipts",
             )
             self._jobs[job.id] = job
             self._latest_line_items_by_trip[trip_name] = job.id
@@ -219,9 +239,9 @@ class JobManager:
 
     def _run(self, job_id: str, trip: Path, statements_complete: bool) -> None:
         mode = trip_mode(trip)
-        # The primary artifact is always the Arvine reimbursement/accounting
+        # The primary artifact is always the company reimbursement/accounting
         # report. Sponsored trips add a sibling IVADO claim adapter.
-        output_path = versioned_output_path(trip, "arvine")
+        output_path = versioned_output_path(trip, "company")
         self._update(
             job_id,
             status="running",
@@ -279,6 +299,7 @@ class JobManager:
                 trip,
                 self.root,
                 llm_mode="required" if self.get(job_id).quality == "best" else "off",
+                only_unmatched=self.get(job_id).only_unmatched,
                 progress_callback=lambda event: self._progress(job_id, event),
                 warning_callback=lambda warning: self._warning(job_id, warning),
                 allow_openai_prompt=False,
@@ -318,6 +339,7 @@ class JobManager:
                 trip,
                 self.root,
                 llm_mode="required" if self.get(job_id).quality == "best" else "off",
+                only_unscanned=self.get(job_id).only_unscanned,
                 progress_callback=lambda event: self._progress(job_id, event),
                 warning_callback=lambda warning: self._warning(job_id, warning),
                 allow_openai_prompt=False,

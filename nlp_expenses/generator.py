@@ -25,6 +25,7 @@ from nlp_expenses.trip_metadata import apply_trip_metadata_defaults
 from nlp_expenses.trips import (
     TRIP_MODES,
     list_receipt_files,
+    normalize_trip_mode,
     relative_source_name,
     trip_mode,
     trip_receipts_dir,
@@ -85,6 +86,7 @@ def extract_trip_expenses(
     root: Path,
     selected_mode: str,
     llm_mode: str,
+    source_files: set[str] | None = None,
     progress_callback: ProgressCallback | None = None,
     warning_callback: WarningCallback | None = None,
     allow_openai_prompt: bool = True,
@@ -94,8 +96,9 @@ def extract_trip_expenses(
         path
         for path in list_receipt_files(receipts_dir)
         if path.suffix.lower() in SUPPORTED_RECEIPTS
+        and (source_files is None or relative_source_name(receipts_dir, path) in source_files)
     ]
-    receipt_parser = parse_arvine_receipt if selected_mode == "arvine" else parse_receipt
+    receipt_parser = parse_arvine_receipt if selected_mode == "company" else parse_receipt
     expenses: list[Expense] = []
     for index, path in enumerate(receipt_files, start=1):
         source_name = relative_source_name(receipts_dir, path)
@@ -209,7 +212,7 @@ def validate_generation_request(
         raise FileNotFoundError(f"Missing receipts folder: {receipts_dir}")
     statements_dir.mkdir(parents=True, exist_ok=True)
 
-    selected_mode = (mode or trip_mode(trip_dir)).lower()
+    selected_mode = normalize_trip_mode(mode or trip_mode(trip_dir))
     if selected_mode not in TRIP_MODES:
         raise ValueError(f"Unknown trip mode: {selected_mode}.")
 
@@ -236,7 +239,7 @@ def prepare_statement_review(
     progress_callback: ProgressCallback | None,
     warning_callback: WarningCallback | None,
 ) -> tuple[NormalizationResult | None, bool]:
-    if selected_mode != "arvine":
+    if selected_mode != "company":
         return None, True
 
     statement_files = list_statement_files(statements_dir)
@@ -315,7 +318,7 @@ def apply_arvine_reconciliation(
     normalization: NormalizationResult | None,
     expenses: list[Expense],
 ) -> None:
-    if selected_mode != "arvine":
+    if selected_mode != "company":
         return
 
     from nlp_expenses.reconciliation import (
@@ -342,7 +345,7 @@ def build_standard_review_workbook(
 ) -> Path:
     from nlp_expenses.lifecycle import record_generated_workbook
 
-    if selected_mode == "arvine":
+    if selected_mode == "company":
         from nlp_expenses.accounting import trip_accounting_profile
         from nlp_expenses.reconciliation import (
             load_manual_matches,
@@ -396,7 +399,7 @@ def build_contract_review_bundle(
 
     view = consolidation_view(root, trip_dir)
     records = build_trip_manifest_records(root, trip_dir, view=view)
-    primary_path = output_path or trip_dir / f"expense_review_{trip_dir.name}_arvine.xlsx"
+    primary_path = output_path or trip_dir / f"expense_review_{trip_dir.name}_company.xlsx"
     manifest_path = trip_dir / CONTRACT_FILENAME
     created: list[Path] = []
     try:
@@ -404,7 +407,7 @@ def build_contract_review_bundle(
         created.append(result)
         manifest = write_trip_manifest(root, trip_dir, view=view, output_path=manifest_path)
         created.append(manifest)
-        if view["claim_program"] == "ivado_sponsored":
+        if view["claim_program"] == "ivado_reimbursed":
             ivado_report = build_ivado_claim_workbook(
                 trip_dir,
                 records,
@@ -446,9 +449,11 @@ def append_note(existing: str, note: str) -> str:
 
 
 def ivado_output_path(primary_path: Path) -> Path:
-    marker = "_arvine_"
-    if marker in primary_path.stem:
-        stem = primary_path.stem.replace(marker, "_ivado_", 1)
+    stem = primary_path.stem
+    for marker in ("_company_", "_arvine_"):
+        if marker in stem:
+            stem = stem.replace(marker, "_ivado_", 1)
+            break
     else:
-        stem = f"{primary_path.stem}_ivado"
+        stem = f"{stem}_ivado"
     return primary_path.with_name(f"{stem}.xlsx")

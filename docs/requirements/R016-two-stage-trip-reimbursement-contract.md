@@ -58,8 +58,10 @@ For sponsored trips:
 
 ```text
 sum(total_cad)
-  = employee_reimbursement_total_cad + corporate_paid_total_cad
   = ivado_claim_total_cad + ivado_excluded_total_cad
+
+employee_reimbursement_total_cad + corporate_paid_total_cad
+  = ivado_claim_total_cad
 ```
 
 All controls use a CAD 0.02 tolerance.
@@ -78,17 +80,18 @@ Two tabs:
 
 ### IVADO workbook
 
-Exactly three tabs:
+Exactly five tabs:
 
-1. `Expense Report`: the equivalent of IVADO's
-   `modèle - Template FR EN` expense-entry tab, including sequence, invoice
-   date, supplier, description, location, receipt status, foreign amount,
-   reviewed CAD, GL allocation, taxes, allocated total, and difference.
-2. `Card Statements`: all uploaded statement transactions normalized into one
-   table with their receipt mappings.
-3. `Receipt Items`: every extracted line, full-invoice amount, traveller
-   `1/N` share, alcohol flag, Arvine/IVADO inclusion, and removed original/CAD
-   amount. Removed alcohol remains visible and highlighted.
+1. `modèle - Template FR EN`: IVADO's official expense form, populated with
+   the eligible traveller claim while retaining the supplied template,
+   formulas, validation, and layout.
+2. `Card Statements`: statement transactions mapped to trip receipts, including
+   exact CAD, statement basis, receipt mapping, and allocated claim/removal.
+3. `Reconciliation`: compact receipt-level evidence for people sharing, gross
+   card share, FX, alcohol removed, IVADO claim, and traveller reimbursement.
+   Line-item detail can be re-enabled with the code flag when needed.
+4. `Directives & instructions - FR`: preserved official guidance.
+5. `Guidelines & Instructions - EN`: preserved official guidance.
 
 ## Contract 3.0
 
@@ -118,5 +121,6 @@ both repositories, and producer/consumer fixtures.
 - Alcohol excluded from IVADO remains visible with the amount removed.
 - IVADO `Expense Report` equals `ivado_claim_total_cad`.
 - Corporate-paid receipts do not increase employee reimbursement.
-- Arvine accounting components equal employee reimbursement.
+- In IVADO mode, employee reimbursement and accounting components equal the
+  IVADO claim after alcohol and other reviewed exclusions.
 - Contract copies in both repositories are byte-for-byte identical.

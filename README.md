@@ -4,6 +4,25 @@ Local-first Mac app and compatible CLI for reviewing trip receipts, reconciling
 card statements, finalizing claims, and exporting a synchronized reimbursement
 package.
 
+## Install on a Mac
+
+Install Python 3.11 or newer plus Tesseract OCR, then clone this repository or
+download the latest GitHub release. In Finder, double-click
+`NLP Expenses.command`; the first launch creates the local environment and opens
+the app in your browser.
+
+Fresh installs keep private settings and trip files outside the source under
+`~/Documents/NLP Expenses Data/`. This makes Git updates and replacement source
+ZIPs safe for local data. Existing checkouts with a `.env` or `trips/` directory
+retain their original data location.
+
+See the concise [Mac getting-started guide](docs/GETTING_STARTED.md) for
+installation, updates, privacy boundaries, and troubleshooting. The source is
+available under the [MIT License](LICENSE); receipts, statements, generated
+reports, exported packages, and API keys must never be committed.
+The bundled IVADO form remains subject to its original owner's terms; see the
+[third-party notice](THIRD_PARTY_NOTICES.md).
+
 For a new contributor, start with the
 [development and packaging guide](docs/DEVELOPMENT.md). It covers the supported
 Python versions, quality checks, distribution build, private-data boundaries,
@@ -11,15 +30,14 @@ and the wheel smoke test.
 
 The app separates two decisions that must not be conflated:
 
-- **Claim program:** `arvine_only` or `ivado_sponsored`.
-- **Receipt payer:** `employee_personal` or `arvine_corporate_bmo`, with a
+- **Reimbursement program:** `company_reimbursed` or `ivado_reimbursed`.
+- **Payment source:** `traveller_personal` or `company_card`, with a
   trip default and receipt-level exceptions.
 
-Arvine reimbursement eligibility and IVADO eligibility are also reviewed
-separately. For example, alcohol can remain in the employee's Arvine
-reimbursement while being explicitly excluded from the IVADO sponsor claim.
-The saved `arvine` / `ivado` processing mode remains as an internal compatibility
-adapter for extraction, statement handling, and the legacy CLI.
+Company-report inclusion and IVADO eligibility are reviewed separately. For
+example, alcohol remains in the company expense record while being explicitly
+excluded from the IVADO claim. Older saved values are normalized automatically;
+the versioned v3 export retains a compatibility adapter for its existing consumer.
 
 ## Local Mac interface
 
@@ -38,16 +56,16 @@ From the interface you can:
   app processes them recursively and keeps their relative paths distinct;
 - automatically refresh when receipt or statement files are added, changed, or
   removed directly in Finder, with a manual **Refresh files** fallback;
-- edit receipt fields, payer, Arvine/IVADO eligibility, person count, and extracted lines; add/remove manual lines; reactivate or deactivate any item; and correct its alcohol classification;
-- validate Arvine statement files before generation;
+- edit receipt fields, payment source, company/IVADO eligibility, person count, and extracted lines; add/remove manual lines; reactivate or deactivate any item; and correct its alcohol classification;
+- validate company-trip statement files before generation;
 - sync either mode against provider-neutral statement transactions, apply cached weekly CAD rates when an exact CAD amount is absent, review the conversion source, and save manual mapping overrides;
 - correct extracted invoice fields, document manual CAD amounts, resolve duplicates, and split charges/refunds/personal portions;
 - review statement coverage against the trip dates and expected cards/accounts;
 - enter the traveller plus optional dates/purpose, choose the default receipt payer,
-  and review the employee share on each receipt;
+  and review the traveller share on each receipt;
 - choose receipt extraction once—Best quality with a locally stored OpenAI API key or Basic/offline—and reuse that choice for reconciliation and Excel;
-- review a blocking issue queue, per-expense CAD/FX results, and the Arvine accounting preview, then explicitly finalize the current claim;
-- generate a compact Arvine report, the shared manifest, and a three-tab IVADO
+- review a blocking issue queue, per-expense CAD/FX results, and the company accounting preview, then explicitly finalize the current claim;
+- generate a compact company report, the shared manifest, and a three-tab IVADO
   workbook when the trip is sponsored, without overwriting earlier manual work;
 - open the result in Excel, reveal it in Finder, or download it from the local page;
 - lock a reviewed version, export a hashed consolidation ZIP, and archive or restore completed trips.
@@ -56,13 +74,13 @@ From the interface you can:
 
 The UI compiles one canonical reviewed dataset and uses it for every output:
 
-- `expense_review_<trip>_arvine_<timestamp>.xlsx` is always the primary
+- `expense_review_<trip>_company_<timestamp>.xlsx` is always the primary
   reimbursement/accounting report. It contains one readable `Expense Report`
   and the five derived `Accounting Rows` used by the accounting handoff.
 - `trip-reimbursement-manifest.v3.ndjson` is the minimal machine-readable shared
-  contract consumed by `arvine-accounting-expenses`.
+  contract consumed by the accounting handoff.
 - `expense_review_<trip>_ivado_<timestamp>.xlsx` is added only for
-  `ivado_sponsored` trips. It contains exactly `Expense Report`, consolidated
+  `ivado_reimbursed` trips. It contains exactly `Expense Report`, consolidated
   `Card Statements`, and `Receipt Items`. The first tab mirrors IVADO's
   expense-entry columns; the last tab keeps every extracted item visible,
   including alcohol removed from the IVADO amount.
@@ -72,13 +90,14 @@ The exported ZIP includes source receipts/statements, review state, every
 generated artifact, and `approval-manifest.json`. The manifest enforces these
 controls within a CAD 0.02 tolerance:
 
-- reviewed trip total = employee reimbursement + corporate-paid;
+- reviewed trip total = traveller reimbursement + company-paid + program exclusions;
 - for sponsored trips, reviewed trip total = IVADO claim + IVADO exclusions;
+- for sponsored trips, traveller reimbursement + company-paid = IVADO claim;
 - receipt detail totals = report totals;
-- accounting components = employee reimbursement.
+- accounting components = traveller reimbursement.
 
 Contract 3.0 contains only receipt/output facts, payer and employee-share
-decisions, the Arvine/IVADO CAD amounts, receipt items, and the five accounting
+decisions, the company/IVADO CAD amounts, receipt items, and the five accounting
 amounts actually consumed downstream. Approver, legal identifiers, settlement
 references, policy profiles, and template-confirmation fields are not part of
 the handoff.
@@ -122,7 +141,7 @@ For either mode, use **Sync and auto-match** after uploading receipts and statem
 - the accounting exchange rate in CAD per invoice-currency unit.
 
 Each card transaction can be reassigned to any receipt, explicitly left unmatched,
-or restored to the automatic result. Arvine also supports auditable purchase,
+or restored to the automatic result. Company mode also supports auditable purchase,
 refund, fee, personal, and ignored split allocations. Manual choices are saved
 in the trip’s local reconciliation metadata and are reapplied to the live app
 preview and future generated workbooks. Multiple card transactions may be
@@ -147,7 +166,7 @@ record for extracted fields, whole-expense inclusion, number of people,
 business purpose, justified manual CAD, and review notes.
 
 - IVADO deactivates confidently detected alcohol automatically.
-- Arvine flags detected alcohol but leaves it included by default.
+- The company report retains alcohol while IVADO excludes it.
 - Reactivating an item does not erase its alcohol classification.
 - Receipt, line, included, and excluded totals remain visible together.
 - Descriptions and amounts can be corrected; manual lines can be added or
@@ -157,7 +176,7 @@ business purpose, justified manual CAD, and review notes.
   explicitly reviewable fallback; ambiguous filename dates are left unresolved.
 - Receipt changes make the stored review stale and require a new scan.
 
-For partial Arvine meals, the workbook retains the full card charge for FX
+For partially eligible meals, the company workbook retains the full card charge for FX
 evidence and applies the included-line percentage proportionally to claimable
 CAD, GST/HST, and QST. The same workflow is callable from Python:
 
@@ -226,13 +245,13 @@ Generate directly:
 .venv/bin/python -m nlp_expenses generate trips/202606_melbourne
 ```
 
-Create an Arvine trip and save the mode in its metadata:
+Create an own-company reimbursement trip and save the mode in its metadata:
 
 ```bash
-.venv/bin/python -m nlp_expenses create-trip 202607_montreal --mode arvine
+.venv/bin/python -m nlp_expenses create-trip 202607_montreal --mode company
 ```
 
-Existing trips without mode metadata default to IVADO. A saved mode can be overridden for one generation with `--mode ivado` or `--mode arvine`.
+Existing trips without mode metadata default to IVADO. A saved mode can be overridden for one generation with `--mode ivado` or `--mode company`.
 
 The command asks whether to use an OpenAI API key and tells you that output quality is much better with LLM extraction. If you answer `y`, it asks for the key in the terminal and saves it locally in `.env`.
 The default model is `gpt-5.2` because it supports image input and Structured Outputs for receipt extraction. Advanced users can override it by manually setting `OPENAI_MODEL` in `.env`.
@@ -257,14 +276,14 @@ The output is written beside the trip folder contents as:
 trips/YYYYMM_tripName/expense_review_YYYYMM_tripName.xlsx
 ```
 
-## Arvine statement workflow
+## Company statement workflow
 
 Put any number of raw Amex, BMO, BNC, or Wise exports in the trip's `card_statements/` folder. Compatible generic CSV/XLS/XLSX tables are also accepted. Files are detected from their column signatures, normalized in memory, and left unchanged; no provider-specific CSV is generated.
 
-Before receipt processing, Arvine validates every statement and asks once whether all statements have been added. Answering `No` exits without creating or overwriting the workbook. For scripts or other non-interactive runs, confirm explicitly:
+Before receipt processing, company mode validates every statement and asks once whether all statements have been added. Answering `No` exits without creating or overwriting the workbook. For scripts or other non-interactive runs, confirm explicitly:
 
 ```bash
-.venv/bin/python -m nlp_expenses generate trips/202607_montreal --mode arvine --statements-complete --llm off
+.venv/bin/python -m nlp_expenses generate trips/202607_montreal --mode company --statements-complete --llm off
 ```
 
 An unsupported or malformed file stops generation and names the affected file.
@@ -282,24 +301,32 @@ amounts are purchases and negative amounts are refunds. Optional `cad_amount`
 holds an exact CAD settlement, while `transaction_type`, `posted_date`,
 `account`, `cardholder`, and `category` provide audit detail.
 
-Arvine creates four sheets:
+Company mode creates four sheets:
 
 - `expense_detail`: one row per receipt, tax fields, statement match, manual CAD override, deductible/recoverable calculations, and review statuses.
 - `expense_summary`: editable report metadata, the five-line CAD journal, and balance/completeness checks.
 - `card_statements`: provider-neutral normalized transactions, funding legs, audit rows, and editable `expense_id` / `match_status` fields.
 - `expense_line_items`: visible meal lines and IVADO classification/removal
-  evidence. Arvine always retains the full reviewed receipt.
+  evidence. Own-company trips reimburse the full reviewed share; IVADO trips
+  reimburse only the IVADO-eligible share.
 
 The Canadian tax-documentation review flags follow the current $100 and $500 invoice-information thresholds described by the [Canada Revenue Agency](https://www.canada.ca/en/revenue-agency/services/tax/businesses/topics/gst-hst-businesses/calculate-prepare-report/input-tax-credit.html) and [Revenu Québec](https://www.revenuquebec.ca/en/businesses/consumption-taxes/gsthst-and-qst/collecting-gst-and-qst/preparing-invoices/). These checks assist review; they are not tax advice and do not determine whether a purchase is taxable or eligible.
 
 ## Reviewing an IVADO workbook
 
-Finalize IVADO in the app before exporting. The generated workbook remains a
-shareable, editable record with three sheets:
+Finalize IVADO in the app before exporting. IVADO mode generates both the
+normal company expense workbook and a five-sheet IVADO workbook:
 
-- `expense_list`: one row per receipt file.
-- `expense_line_items`: extracted receipt line items with separate `is_alcohol` and `included` choices plus detection evidence.
-- `card_statements`: normalized card statement rows where you can edit `expense_id` to match transactions to receipts.
+- `modèle - Template FR EN`: IVADO's official expense-report template,
+  populated from the reviewed trip while retaining its formulas and layout.
+- `Card Statements`: only statement transactions mapped to trip receipts, with
+  exact CAD, statement basis, receipt, and allocated claim/removal amounts.
+- `Reconciliation`: a compact receipt-level schedule showing full receipt
+  totals, people sharing, gross card share, FX, alcohol removed, IVADO claim,
+  and traveller reimbursement. Detailed line-item evidence is available behind
+  the disabled `IVADO_INCLUDE_DETAILED_RECONCILIATION` code flag.
+- `Directives & instructions - FR` and `Guidelines & Instructions - EN`:
+  preserved from the official template.
 
 In `expense_list`, `number_of_person` comes from the app review. When the user
 has deactivated a positive line, `corrected_amount_in_currency` is the sum of
@@ -314,10 +341,11 @@ exported into `card_statements`. If it shows `0.00`, no matching statement value
 was finalized. Post-export Excel edits remain possible, but they do not
 round-trip into the app.
 
-For IVADO, `is_alcohol = true` always means the line is removed from the sponsor
-claim with reason `alcohol`. To include a false positive, correct the line to
-non-alcoholic. Arvine does not use alcohol classification or line exclusions:
-every uploaded receipt remains fully included. The automatically created
+For IVADO, `is_alcohol = true` always means the line is removed from both the
+sponsor claim and traveller reimbursement with reason `alcohol`. To include a
+false positive, correct the line to non-alcoholic. Company-only reimbursement
+does not use alcohol classification or line exclusions: every uploaded receipt
+remains fully included. The automatically created
 `Alcohol adjustment - manual` line remains available in IVADO when OCR/OpenAI
 missed or grouped the drink lines.
 

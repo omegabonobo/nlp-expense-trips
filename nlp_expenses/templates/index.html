@@ -78,10 +78,16 @@
         </select>
         <div class="trip-list">
           {% for trip in state.trips %}
-            <a class="trip-item {{ 'active' if state.selected and state.selected.name == trip.name else '' }}" href="/?trip={{ trip.name|urlencode }}{% if state.show_archived %}&archived=1{% endif %}">
-              <strong>{{ trip.label }}</strong>
-              <span>{{ 'ARCHIVED · ' if trip.archived else '' }}{{ 'IVADO sponsored' if trip.claim_program == 'ivado_sponsored' else 'Arvine only' if trip.claim_program == 'arvine_only' else 'Program not confirmed' }} · {{ trip.receipt_count }} receipts · {{ trip.statement_count }} statements</span>
-            </a>
+            <div class="trip-item-row">
+              <a class="trip-item {{ 'active' if state.selected and state.selected.name == trip.name else '' }}" href="/?trip={{ trip.name|urlencode }}{% if state.show_archived %}&archived=1{% endif %}">
+                <strong>{{ trip.label }}</strong>
+                <span>{{ 'ARCHIVED · ' if trip.archived else '' }}{{ 'IVADO-reimbursed trip' if trip.claim_program == 'ivado_reimbursed' else 'Own-company reimbursement' if trip.claim_program == 'company_reimbursed' else 'Program not confirmed' }} · {{ trip.receipt_count }} receipts · {{ trip.statement_count }} statements</span>
+              </a>
+              <button type="button" class="icon-button trip-delete-button"
+                aria-label="Delete {{ trip.label }}" title="Delete trip"
+                data-trip-name="{{ trip.name }}" data-trip-label="{{ trip.label }}"
+                data-receipts="{{ trip.receipt_count }}" data-statements="{{ trip.statement_count }}">×</button>
+            </div>
           {% endfor %}
         </div>
       {% else %}
@@ -100,7 +106,7 @@
         {% set line_review = trip.line_item_review %}
         {% set trip_busy = state.active_job and state.active_job.status in ['queued', 'running'] %}
         {% set reconciliation_required = trip.statements and (not reconciliation.available or reconciliation.stale) %}
-        {% set allocation_required = trip.mode == 'arvine' and reconciliation and reconciliation.available and reconciliation.summary.incomplete_allocation_count %}
+        {% set allocation_required = trip.mode == 'company' and reconciliation and reconciliation.available and reconciliation.summary.incomplete_allocation_count %}
         {% set line_review_required = trip.receipts and (not line_review.available or line_review.stale) %}
         {% set line_review_blocking = line_review.available and not line_review.stale and line_review.summary.blocking_count %}
         {% set finalization_required = not consolidation.is_finalized %}
@@ -111,11 +117,11 @@
             <h2>{{ trip.label }}</h2>
           </div>
           <div class="mode-field">
-            <label for="claim-program-select">Claim program</label>
+            <label for="claim-program-select">Reimbursement program</label>
             <select id="claim-program-select" class="select" data-trip="{{ trip.name }}" {{ 'disabled' if trip_busy else '' }}>
               <option value="" {{ 'selected' if not trip.claim_program }}>Choose…</option>
-              <option value="arvine_only" {{ 'selected' if trip.claim_program == 'arvine_only' }}>Arvine only</option>
-              <option value="ivado_sponsored" {{ 'selected' if trip.claim_program == 'ivado_sponsored' }}>IVADO sponsored</option>
+              <option value="company_reimbursed" {{ 'selected' if trip.claim_program == 'company_reimbursed' }}>Own-company reimbursement</option>
+              <option value="ivado_reimbursed" {{ 'selected' if trip.claim_program == 'ivado_reimbursed' }}>IVADO-reimbursed trip</option>
             </select>
             <span class="lifecycle-badge {{ trip.lifecycle.status }}">{{ trip.lifecycle.label }}</span>
           </div>
@@ -127,6 +133,51 @@
             is running. Source files and mappings are locked until it finishes.
           </div>
         {% endif %}
+
+        <section class="card trip-summary-card">
+          <div class="card-heading">
+            <div>
+              <p class="card-kicker">At a glance</p>
+              <h3>Trip progress</h3>
+            </div>
+            <div class="button-group">
+              <button class="button secondary small" id="refresh-files-button">Refresh files</button>
+              <button class="button secondary small finder-button" data-target="trip">Reveal in folder</button>
+            </div>
+          </div>
+          <div class="process-summary-grid">
+            <div>
+              <strong>{{ state.process_summary.receipt_scanned }} / {{ state.process_summary.receipt_total }}</strong>
+              <span>receipts scanned</span>
+              <small>{{ state.process_summary.receipt_total - state.process_summary.receipt_scanned }} still to scan</small>
+            </div>
+            <div>
+              <strong>{{ state.process_summary.receipt_reviewed }} / {{ state.process_summary.receipt_review_total }}</strong>
+              <span>receipts reviewed</span>
+              <small>{{ state.process_summary.receipt_review_total - state.process_summary.receipt_reviewed }} still to review</small>
+            </div>
+            <div>
+              <strong>{{ state.process_summary.matched_receipts }} / {{ state.process_summary.matched_receipt_total }}</strong>
+              <span>receipts matched to cards</span>
+              <small>{{ state.process_summary.matched_transactions }} / {{ state.process_summary.transaction_total }} card transactions matched</small>
+            </div>
+            <div>
+              <strong>${{ '%.2f'|format(state.process_summary.reviewed_total_cad) }} CAD</strong>
+              <span>reviewed receipt value</span>
+              <small>Based on the current reviewed receipts</small>
+            </div>
+            <div>
+              <strong>${{ '%.2f'|format(state.process_summary.claimable_total_cad) }} CAD</strong>
+              <span>claimable amount</span>
+              <small>Ready for the reimbursement report</small>
+            </div>
+          </div>
+          {% if not reconciliation.available %}
+            <p class="summary-note">Add receipts and statements, then run the sync to see card matches and final amounts.</p>
+          {% elif reconciliation.stale %}
+            <p class="summary-note">Receipts or statements changed since the last sync. Run the sync again to refresh these figures.</p>
+          {% endif %}
+        </section>
 
         <section class="card trip-metadata-card">
           <div class="card-heading">
@@ -140,7 +191,7 @@
             <div><span>Traveller</span><strong>{{ trip.metadata.traveller or 'Not set' }}</strong></div>
             <div><span>Travel dates (optional)</span><strong>{{ trip.metadata.start_date or 'Not set' }} → {{ trip.metadata.end_date or 'Not set' }}</strong></div>
             <div><span>Purpose (optional)</span><strong>{{ trip.metadata.business_purpose or 'Not set' }}</strong></div>
-            <div><span>Default payer</span><strong>{{ 'Employee personal' if trip.metadata.default_paid_by == 'employee_personal' else 'Arvine corporate BMO' }}</strong></div>
+            <div><span>Default payment source</span><strong>{{ 'Traveller’s personal funds/card' if trip.metadata.default_paid_by == 'traveller_personal' else 'Company funds/card' }}</strong></div>
           </div>
           {% if trip.metadata_gaps %}
             <div class="notice warning">
@@ -149,39 +200,12 @@
           {% endif %}
         </section>
 
-        <section class="card location-card">
-          <div class="card-heading">
-            <div>
-              <p class="card-kicker">Trip folder</p>
-              <code>{{ trip.path }}</code>
-            </div>
-            <div class="button-group">
-              <button class="button secondary" id="refresh-files-button">Refresh files</button>
-              <button class="button finder-button" data-target="trip">Reveal in Finder</button>
-            </div>
-          </div>
-          <div class="folder-row">
-            <div>
-              <span>Receipt scans</span>
-              <code>{{ trip.receipts_path }}</code>
-            </div>
-            <button class="button secondary finder-button" data-target="receipts">Open folder</button>
-          </div>
-          <div class="folder-row">
-            <div>
-              <span>Bank and card statements</span>
-              <code>{{ trip.statements_path }}</code>
-            </div>
-            <button class="button secondary finder-button" data-target="statements">Open folder</button>
-          </div>
-        </section>
-
         <div class="upload-grid">
           <section class="card file-card">
             <div class="card-heading">
               <div>
                 <p class="card-kicker">Step 1</p>
-                <h3>Receipt scans</h3>
+                <h3>Receipts</h3>
               </div>
               <div class="button-group">
                 <span class="count-badge">{{ trip.receipts|length }}</span>
@@ -199,6 +223,13 @@
                   <div class="file-name">
                     <strong>{{ file.name }}</strong>
                     <span>{{ (file.size / 1024)|round(1) }} KB</span>
+                    {% if file.scan.status == 'scanned' %}
+                      <span class="match-badge ok">Scanned{% if file.scan.quality %} · {{ 'OpenAI' if file.scan.quality == 'best' else 'Offline' }}{% endif %}</span>
+                    {% elif file.scan.status == 'changed' %}
+                      <span class="match-badge review">Changed · needs scan</span>
+                    {% else %}
+                      <span class="match-badge unmatched">Not scanned</span>
+                    {% endif %}
                   </div>
                   <button class="icon-button remove-file" title="Remove file" data-kind="receipts" data-filename="{{ file.name }}" {{ 'disabled' if trip_busy else '' }}>×</button>
                 </div>
@@ -220,11 +251,11 @@
               </div>
             </div>
             <label class="drop-zone" data-upload-kind="statements">
-              <input type="file" multiple accept="{{ '.csv,.xls,.xlsx' if trip.mode == 'arvine' else '.csv,.xls,.xlsx,.pdf' }}" {{ 'disabled' if trip_busy else '' }}>
+              <input type="file" multiple accept="{{ '.csv,.xls,.xlsx' if trip.mode == 'company' else '.csv,.xls,.xlsx,.pdf' }}" {{ 'disabled' if trip_busy else '' }}>
               <strong>Drop statements here</strong>
-              <span>{{ 'CSV, XLS, or XLSX' if trip.mode == 'arvine' else 'CSV, XLS, XLSX, or PDF' }}</span>
+              <span>{{ 'CSV, XLS, or XLSX' if trip.mode == 'company' else 'CSV, XLS, XLSX, or PDF' }}</span>
             </label>
-            {% if trip.mode == 'arvine' %}
+            {% if trip.mode == 'company' %}
               <details class="statement-template-help">
                 <summary>Bank format not recognized?</summary>
                 <p>
@@ -328,10 +359,23 @@
                 </span>
               </label>
             </div>
-            <button class="button primary" id="sync-line-items-button"
-              {{ 'disabled' if trip_busy or not trip.receipts }}>
-              {{ 'Rescan receipts' if line_review.available else 'Scan receipts' }}
-            </button>
+            <div class="button-group">
+              <button class="button primary receipt-scan-button" id="sync-line-items-button"
+                data-only-unscanned="true"
+                {{ 'disabled' if trip_busy or not trip.receipts or trip.receipt_scan.unscanned_count == 0 }}>
+                {% if trip.receipt_scan.unscanned_count %}
+                  Scan {{ trip.receipt_scan.unscanned_count }} new/changed receipt{{ '' if trip.receipt_scan.unscanned_count == 1 else 's' }}
+                {% else %}
+                  All receipts scanned
+                {% endif %}
+              </button>
+              {% if line_review.available %}
+                <button class="button secondary receipt-scan-button" id="rescan-all-receipts-button"
+                  data-only-unscanned="false" {{ 'disabled' if trip_busy or not trip.receipts }}>
+                  Rescan all receipts
+                </button>
+              {% endif %}
+            </div>
           </div>
 
           {% if line_review.available %}
@@ -353,8 +397,13 @@
             <div class="notice warning">Basic/offline receipt scanning needs Tesseract. Install it with <code>brew install tesseract</code>, or use Best quality.</div>
           {% endif %}
 
-          {% if line_review.stale %}
-            <div class="notice warning">Receipt files or processing mode changed after the last scan. Rescan before editing, reconciling, or generating.</div>
+          {% if trip.receipt_scan.unscanned_count %}
+            <div class="notice warning">
+              {{ trip.receipt_scan.unscanned_count }} new or changed receipt{{ '' if trip.receipt_scan.unscanned_count == 1 else 's' }} still need scanning.
+              Existing receipt reviews and card matches will be preserved.
+            </div>
+          {% elif line_review.stale %}
+            <div class="notice warning">The processing mode changed after the last scan. Rescan all receipts before editing, reconciling, or generating.</div>
           {% endif %}
 
           <div id="line-item-job-panel" class="job-panel {{ '' if state.line_item_job else 'hidden' }}">
@@ -382,9 +431,9 @@
             </div>
             <div class="notice info">
               {% if trip.mode == 'ivado' %}
-                Arvine includes every uploaded receipt. Alcohol is identified only to remove it from the IVADO claim.
+                The company report includes every uploaded receipt. Alcohol is identified only to remove it from the IVADO claim.
               {% else %}
-                Arvine includes every uploaded receipt. Alcohol classification and exclusions do not apply.
+                The company report includes every uploaded receipt. Alcohol classification and exclusions do not apply.
               {% endif %}
             </div>
 
@@ -405,37 +454,46 @@
                       <strong>{{ receipt.vendor or receipt.source_file }}</strong>
                       <span>
                         <button type="button" class="receipt-file-link receipt-preview" data-source-file="{{ receipt.source_file }}">{{ receipt.source_file }}</button>
-                        · {{ receipt.expense_type or 'type missing' }} · {{ receipt.currency or '' }} ·
+                        · {{ 'Meal' if receipt.is_meal else 'Travel – non-meal' }}
+                        {% if not receipt.is_meal and receipt.expense_type not in [none, 'other'] %}({{ receipt.expense_type }}){% endif %}
+                        · {{ receipt.currency or '' }} ·
                         {{ receipt.number_of_people }} {{ 'person' if receipt.number_of_people == 1 else 'people' }} ·
                         {% if trip.mode == 'ivado' %}
-                          {{ 'removed from IVADO' if not receipt.included_in_ivado else 'included in Arvine and IVADO' }}
+                          {{ 'removed from IVADO' if not receipt.included_in_ivado else 'included in company report and IVADO' }}
                         {% else %}
-                          included in Arvine
+                          included in company report
                         {% endif %}
                       </span>
                       {% if receipt.field_issues %}<small class="field-issue">{{ receipt.field_issues|join(' · ') }}</small>{% endif %}
                     </div>
                     <div class="line-receipt-actions">
-                      <form class="currency-review-form" data-source-file="{{ receipt.source_file }}">
+                      <label class="confirmation compact-confirmation" title="Meals use the meal deduction rate; all other travel costs use the normal rate.">
+                        <input type="checkbox" class="receipt-meal-toggle"
+                          data-source-file="{{ receipt.source_file }}"
+                          data-non-meal-type="{{ receipt.non_meal_expense_type }}"
+                          {{ 'checked' if receipt.is_meal }}
+                          {{ 'disabled' if trip_busy or line_review.stale }}>
+                        <span>Meal expense · {{ (trip.accounting_profile.meal_deduction_pct * 100)|round|int }}% deductible</span>
+                      </label>
+                      <div class="currency-review-form" data-source-file="{{ receipt.source_file }}">
                         <label>
                           Currency
-                          <input class="input currency-review-input" name="currency" maxlength="3"
-                            value="{{ receipt.currency or '' }}" placeholder="CAD"
+                          <input class="input currency-review-input" name="currency" list="currency-options"
+                            value="{{ receipt.currency or '' }}" data-saved-value="{{ receipt.currency or '' }}" placeholder="Search currency"
                             {{ 'disabled' if trip_busy or line_review.stale }}>
                         </label>
-                        <button class="button secondary small" type="submit"
-                          {{ 'disabled' if trip_busy or line_review.stale }}>Save</button>
-                      </form>
-                      <form class="people-review-form" data-source-file="{{ receipt.source_file }}">
+                        <small class="inline-save-status" aria-live="polite"></small>
+                      </div>
+                      <div class="people-review-form" data-source-file="{{ receipt.source_file }}">
                         <label>
                           Employees sharing bill
                           <input class="input people-review-input" name="number_of_people" type="number"
                             min="1" max="99" step="1" value="{{ receipt.number_of_people }}"
+                            data-saved-value="{{ receipt.number_of_people }}"
                             {{ 'disabled' if trip_busy or line_review.stale }}>
                         </label>
-                        <button class="button secondary small" type="submit"
-                          {{ 'disabled' if trip_busy or line_review.stale }}>Save share</button>
-                      </form>
+                        <small class="inline-save-status" aria-live="polite"></small>
+                      </div>
                       <label class="review-check receipt-review-check {{ 'ready' if receipt.ready }}"
                         title="{{ 'Correct required receipt fields before marking ready.' if receipt.field_issues else 'Resolve the receipt total before marking ready.' if receipt.blocking else 'Mark this receipt and all its lines as reviewed.' }}">
                         <input type="checkbox" class="receipt-reviewed" data-source-file="{{ receipt.source_file }}"
@@ -486,7 +544,7 @@
                               {% endif %}
                               {% if item.inclusion_overridden %}<small>User inclusion override</small>{% endif %}
                             </td>
-                            <td><input class="input compact-input line-item-amount" type="number" min="0" step="0.01"
+                            <td><input class="input compact-input line-item-amount" type="number" {% if item.system_type %}min="0"{% endif %} step="0.01"
                               value="{{ '%.2f'|format(item.amount) if item.amount is not none else '' }}"
                               data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
                               data-saved-value="{{ '%.2f'|format(item.amount) if item.amount is not none else '' }}" data-autosave-field="amount"
@@ -560,12 +618,27 @@
                     </table>
                   </div>
                   <div class="line-totals" data-receipt-totals="{{ receipt.source_file }}">
-                    <span data-total-kind="receipt">Receipt {{ '%.2f'|format(receipt.receipt_total) if receipt.receipt_total is not none else '—' }}</span>
-                    <span data-total-kind="lines">Lines {{ '%.2f'|format(receipt.line_total) }}</span>
-                    <span data-total-kind="arvine">Arvine {{ '%.2f'|format(receipt.arvine_included_total) }}</span>
-                    {% if trip.mode == 'ivado' %}
-                      <span data-total-kind="ivado">IVADO {{ '%.2f'|format(receipt.ivado_included_total) }}</span>
-                      <span data-total-kind="removed">IVADO removed {{ '%.2f'|format(receipt.ivado_excluded_total) }}</span>
+                    <div class="line-total-group">
+                      <small>Full bill</small>
+                      <span data-total-scope="full" data-total-kind="receipt">Receipt {{ '%.2f'|format(receipt.receipt_total) if receipt.receipt_total is not none else '—' }}</span>
+                      <span data-total-scope="full" data-total-kind="lines">Lines {{ '%.2f'|format(receipt.line_total) }}</span>
+                      <span data-total-scope="full" data-total-kind="company">Company {{ '%.2f'|format(receipt.arvine_included_total) }}</span>
+                      {% if trip.mode == 'ivado' %}
+                        <span data-total-scope="full" data-total-kind="ivado">IVADO {{ '%.2f'|format(receipt.ivado_included_total) }}</span>
+                        <span data-total-scope="full" data-total-kind="removed">IVADO removed {{ '%.2f'|format(receipt.ivado_excluded_total) }}</span>
+                      {% endif %}
+                    </div>
+                    {% if receipt.number_of_people > 1 %}
+                      <div class="line-total-group per-person-totals">
+                        <small>Per employee (÷ {{ receipt.number_of_people }})</small>
+                        <span data-total-scope="person" data-total-kind="receipt">Receipt {{ '%.2f'|format(receipt.per_person_receipt_total) if receipt.per_person_receipt_total is not none else '—' }}</span>
+                        <span data-total-scope="person" data-total-kind="lines">Lines {{ '%.2f'|format(receipt.per_person_line_total) }}</span>
+                        <span data-total-scope="person" data-total-kind="company">Company {{ '%.2f'|format(receipt.per_person_arvine_included_total) }}</span>
+                        {% if trip.mode == 'ivado' %}
+                          <span data-total-scope="person" data-total-kind="ivado">IVADO {{ '%.2f'|format(receipt.per_person_ivado_included_total) }}</span>
+                          <span data-total-scope="person" data-total-kind="removed">IVADO removed {{ '%.2f'|format(receipt.per_person_ivado_excluded_total) }}</span>
+                        {% endif %}
+                      </div>
                     {% endif %}
                     <strong data-total-kind="difference" class="{{ 'hidden' if receipt.difference is none or not receipt.difference else '' }}">Difference {{ '%+.2f'|format(receipt.difference or 0) }}</strong>
                   </div>
@@ -594,11 +667,11 @@
                 <h3>Reconcile invoices and card statements</h3>
               </div>
               {% if reconciliation.available %}
-                <span class="mode-badge">Last sync {{ reconciliation.synced_at|replace('T', ' ') }}</span>
+                <span class="mode-badge">Last sync {{ reconciliation.synced_at|replace('T', ' ') }} · {{ 'unmatched only' if reconciliation.sync_scope == 'unmatched' else 'all automatic matches' }}</span>
               {% endif %}
             </div>
             <p class="section-description">
-              Sync to retry automatic matching, then review or change each card transaction’s invoice mapping before generating Excel.
+              Match only receipts that do not have a card transaction yet. Existing mappings—including manual matches—stay unchanged.
             </p>
             <div class="reconciliation-toolbar">
               <div class="inherited-method">
@@ -612,8 +685,15 @@
               </div>
               <button class="button primary" id="sync-reconciliation-button"
                 {{ 'disabled' if trip_busy or not trip.receipts or not trip.statements or trip.statement_errors or line_review_required else '' }}>
-                Sync and auto-match
+                Sync unmatched receipts
               </button>
+              {% if reconciliation.available %}
+                <button class="button secondary" id="rebuild-reconciliation-button"
+                  title="Recalculate automatic matches for every receipt; manual matches remain protected."
+                  {{ 'disabled' if trip_busy or not trip.receipts or not trip.statements or trip.statement_errors or line_review_required else '' }}>
+                  Rebuild automatic matches
+                </button>
+              {% endif %}
             </div>
 
             {% if line_review_required %}
@@ -642,7 +722,7 @@
                 <div class="{{ 'review' if reconciliation.summary.needs_review_count else '' }}"><strong>{{ reconciliation.summary.needs_review_count }}</strong><span>items need review</span></div>
               </div>
 
-              {% if trip.mode == 'arvine' %}
+              {% if trip.mode == 'company' %}
               <div class="coverage-panel">
                 <div class="subsection-heading">
                   <div>
@@ -677,10 +757,14 @@
                   <p class="coverage-window">Add trip start and end dates to validate statement coverage against the travel window.</p>
                 {% endif %}
                 <label class="field-label coverage-expected">
-                  Expected cards/accounts, one per line
-                  <textarea class="input" id="expected-accounts" rows="3" placeholder="AMEX ••••1234">{{ reconciliation.coverage.expected_accounts|join('\n') }}</textarea>
+                  Accounts expected for this trip (optional)
+                  <small>
+                    Completeness checklist only; this does not affect transaction matching. Add every card or
+                    account that should have a statement above, one per line. We will flag any missing account.
+                  </small>
+                  <textarea class="input" id="expected-accounts" rows="3" placeholder="AMEX ••••1003">{{ reconciliation.coverage.expected_accounts|join('\n') }}</textarea>
                 </label>
-                <button class="button secondary small" id="save-coverage-settings" {{ 'disabled' if trip_busy }}>Save expected accounts</button>
+                <button class="button secondary small" id="save-coverage-settings" {{ 'disabled' if trip_busy }}>Save completeness checklist</button>
                 {% if reconciliation.coverage.gaps %}
                   <div class="notice warning coverage-gaps">
                     <div>
@@ -690,6 +774,7 @@
                   </div>
                 {% endif %}
               </div>
+              {% endif %}
 
               {% if reconciliation.policy_warnings %}
                 <div class="policy-warning-panel">
@@ -719,8 +804,8 @@
               <div class="review-subsection">
                 <div class="subsection-heading">
                   <div>
-                    <h4>Invoice and CAD review</h4>
-                    <p>Receipt fields use the shared editor from Step 3; exact CAD and FX come from the mapping below.</p>
+                    <h4>Receipt and card matches</h4>
+                    <p>Review each receipt and its card transaction in one place. Strong same-date, same-amount matches are assumed OK but remain editable.</p>
                   </div>
                 </div>
                 <div class="reconciliation-table-wrap">
@@ -728,8 +813,8 @@
                   <thead>
                     <tr>
                       <th>Invoice</th>
-                      <th>Original total</th>
-                      <th>Extraction</th>
+                      <th>Receipt total</th>
+                      <th>Status</th>
                       <th>CAD used and FX</th>
                       <th>Card match</th>
                       <th></th>
@@ -737,7 +822,7 @@
                   </thead>
                   <tbody>
                     {% for expense in reconciliation.expenses %}
-                      <tr class="{{ 'needs-review' if expense.extraction_status != 'ok' or expense.cad_source == 'unavailable' else '' }}">
+                      <tr class="{{ 'needs-review' if expense.review_status == 'review' else '' }}">
                         <td>
                           <strong>{{ expense.vendor or expense.source_file }}</strong>
                           <span>{{ expense.date or 'date missing' }} · {{ expense.expense_type or 'type missing' }}</span>
@@ -750,7 +835,7 @@
                           {% endif %}
                         </td>
                         <td>
-                          <span class="match-badge {{ expense.extraction_status }}">{{ expense.extraction_status }}</span>
+                          <span class="match-badge {{ expense.review_status }}">{{ expense.review_status|replace('_', ' ') }}</span>
                           {% if expense.review_note %}<small title="{{ expense.review_note }}">{{ expense.review_note }}</small>{% endif %}
                         </td>
                         <td>
@@ -763,6 +848,9 @@
                               {% else %}CAD invoice total{% endif %}
                             </span>
                             {% if expense.fx_rate is not none %}<small>FX {{ '%.6f'|format(expense.fx_rate) }}</small>{% endif %}
+                            {% if expense.statement_receipt_difference is not none and expense.statement_receipt_difference > 0.005 %}
+                              <small>Includes {{ '%.2f'|format(expense.statement_receipt_difference) }} {{ expense.statement_purchase_currency }} above the receipt (tip or adjustment).</small>
+                            {% endif %}
                           {% else %}
                             <strong>Unavailable</strong>
                             <span>Map complete statement funding or add a manual CAD amount</span>
@@ -772,26 +860,67 @@
                           {% if expense.statement_matches %}
                             <div class="current-matches">
                               {% for match in expense.statement_matches %}
-                                <span>
-                                  {{ match.provider|upper }} {{ match.account_label }} · {{ match.transaction_date }} ·
-                                  {{ '%.2f'|format(match.purchase_amount) if match.purchase_amount is not none else '?' }} {{ match.purchase_currency or '' }}
+                                <div class="current-match-card">
+                                  <div class="current-match-details">
+                                    <strong>{{ match.description or 'No description' }}</strong>
+                                    <span>{{ match.transaction_date or 'date missing' }} · {{ match.provider|upper }} {{ match.account_label }}</span>
+                                    <small>
+                                      {{ '%.2f'|format(match.purchase_amount) if match.purchase_amount is not none else '?' }} {{ match.purchase_currency or '' }} ·
+                                      {% if match.cad_amount is not none %}{{ '%.2f'|format(match.cad_amount) }} CAD{% else %}CAD unavailable{% endif %}
+                                    </small>
+                                  </div>
                                   {% if match.allocation_status in [none, 'none'] %}
                                     <button type="button" class="receipt-unmatch" data-group-id="{{ match.group_id }}" title="Remove this match">×</button>
                                   {% endif %}
-                                </span>
+                                </div>
+                                {% if trip.mode == 'company' and match.cad_completeness == 'complete' %}
+                                  <button class="button secondary small edit-allocations" data-group-id="{{ match.group_id }}"
+                                    {{ 'disabled' if trip_busy or reconciliation.stale }}>
+                                    {{ 'Edit split' if match.allocation_status not in [none, 'none'] else 'Split / allocate' }}
+                                  </button>
+                                {% endif %}
                               {% endfor %}
                             </div>
+                            {% if expense.number_of_people > 1 %}
+                              <div class="statement-basis-review" data-source-file="{{ expense.source_file }}">
+                                <label>
+                                  <span>Card amount represents</span>
+                                  <select class="select statement-basis-select">
+                                    <option value="full_receipt" {{ 'selected' if expense.statement_amount_basis == 'full_receipt' }}>Full group receipt</option>
+                                    <option value="personal_share" {{ 'selected' if expense.statement_amount_basis == 'personal_share' }}>Traveller personal share</option>
+                                  </select>
+                                </label>
+                                <small>
+                                  {% if expense.statement_amount_basis == 'personal_share' %}
+                                    The matched card charge is already one traveller’s share. Its effective CAD rate is applied to the reviewed alcohol-free share without dividing the card amount again.
+                                  {% else %}
+                                    The matched card charge covers the group receipt and is divided across {{ expense.number_of_people }} travellers.
+                                  {% endif %}
+                                </small>
+                              </div>
+                            {% endif %}
+                            {% if expense.review_status == 'review' and expense.statement_matches|length == 1 and not reconciliation.stale %}
+                              <button type="button" class="button primary small confirm-receipt-match"
+                                data-source-file="{{ expense.source_file }}"
+                                data-group-id="{{ expense.statement_matches[0].group_id }}"
+                                {{ 'disabled' if trip_busy }}>Confirm current match</button>
+                            {% endif %}
                           {% else %}
                             <small>No card transaction matched yet.</small>
                           {% endif %}
-                          <button type="button" class="button secondary small open-receipt-matcher"
-                            data-source-file="{{ expense.source_file }}"
-                            {{ 'disabled' if trip_busy or reconciliation.stale }}>
-                            {{ 'Change card match' if expense.statement_matches else 'Match card transaction' }}
-                          </button>
-                          <small>
-                            {{ expense.match_suggestions|length }} prioritized transaction(s). Search every uploaded card in the matcher.
-                          </small>
+                          {% if reconciliation.stale %}
+                            <button type="button" class="button secondary small resync-card-matcher"
+                              {{ 'disabled' if trip_busy }}>Resync to search card transactions</button>
+                            <small>The receipt changed after the last sync. Refresh matching before choosing a transaction.</small>
+                          {% else %}
+                            <button type="button" class="button secondary small open-receipt-matcher"
+                              data-source-file="{{ expense.source_file }}" {{ 'disabled' if trip_busy }}>
+                              {{ 'Change card match' if expense.statement_matches else 'Match card transaction' }}
+                            </button>
+                            <small>
+                              {{ expense.match_suggestions|length }} prioritized transaction(s). Exact totals may differ because of tips; search every uploaded card in the matcher.
+                            </small>
+                          {% endif %}
                         </td>
                         <td>
                           <button class="button secondary edit-expense" data-source-file="{{ expense.source_file }}"
@@ -803,152 +932,74 @@
                   </table>
                 </div>
 
-                {% if reconciliation.unmatched_expenses %}
-                  <div class="unmatched-invoices">
-                    <strong>Invoices without a card match</strong>
-                    <div>
-                      {% for expense in reconciliation.unmatched_expenses %}
-                        <span>{{ expense.vendor or expense.source_file }} · {{ expense.amount if expense.amount is not none else '?' }} {{ expense.currency or '' }}</span>
-                      {% endfor %}
-                    </div>
-                  </div>
-                {% endif %}
               </div>
-              {% endif %}
 
-              <div class="review-subsection">
-                <div id="statement-mappings" class="subsection-heading">
+              <div id="unmatched-statements" class="review-subsection">
+                <div class="subsection-heading">
                   <div>
-                    <h4>Statement mappings</h4>
-                    <p>Each charge should point to the receipt it settles. The resulting CAD amount and FX rate feed the final claim.</p>
+                    <h4>Statement transactions without a receipt</h4>
+                    <p>Use this list to spot missing receipts. Click × to remove an unrelated or duplicate charge; excluded transactions can be restored below.</p>
                   </div>
                 </div>
-                <div class="reconciliation-table-wrap">
-                  <table class="reconciliation-table">
-                  <thead>
-                    <tr>
-                      <th>Card transaction</th>
-                      <th>Statement amount</th>
-                      <th>Invoice mapping</th>
-                      <th>Accounting FX rate</th>
-                      <th>Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {% for transaction in reconciliation.transactions %}
-                      <tr class="{{ 'needs-review' if transaction.match_eligible and not transaction.ignored and (not transaction.expense_file or transaction.cad_completeness != 'complete' or transaction.normalization_status in ['review', 'possible_duplicate']) else 'audit-row' if not transaction.match_eligible or transaction.ignored else '' }}">
-                        <td>
-                          <strong>{{ transaction.description or 'No description' }}</strong>
-                          <span>{{ transaction.transaction_date or 'date missing' }} · {{ transaction.provider|upper }} {{ transaction.account_label }}</span>
-                          <small>
-                            {% for source in transaction.source_rows %}
-                              {{ source.file }} row {{ source.row }}{{ ' · ' if not loop.last else '' }}
-                            {% endfor %}
-                          </small>
-                          {% if transaction.review_note %}<small class="transaction-note">{{ transaction.review_note }}</small>{% endif %}
-                        </td>
-                        <td>
-                          <strong>
-                            {{ '%.2f'|format(transaction.purchase_amount) if transaction.purchase_amount is not none else '?' }}
-                            {{ transaction.purchase_currency or '' }}
-                          </strong>
-                          <span>
-                            {% if transaction.cad_amount is not none %}
-                              {{ '%.2f'|format(transaction.cad_amount) }} CAD
-                            {% else %}
-                              CAD {{ transaction.cad_completeness }}
-                            {% endif %}
-                          </span>
-                          {% if transaction.cad_conversion_rate is not none %}
-                            <small>
-                              {{ '%.8f'|format(transaction.cad_conversion_rate) }} CAD/{{ transaction.purchase_currency }}
-                              · {{ transaction.cad_conversion_route }}
-                            </small>
-                          {% endif %}
-                          {% if transaction.cad_conversion_week_start %}
-                            <small>
-                              Weekly rate {{ transaction.cad_conversion_week_start }}–{{ transaction.cad_conversion_week_end }}
-                            </small>
-                          {% endif %}
-                          {% if transaction.cad_conversion_source %}
-                            <small>{{ transaction.cad_conversion_source }}</small>
-                          {% endif %}
-                        </td>
-                        <td>
-                          <select class="select mapping-select" data-group-id="{{ transaction.group_id }}" {{ 'disabled' if trip_busy or reconciliation.stale or not transaction.match_eligible or transaction.ignored or transaction.allocations else '' }}>
-                            <option value="__auto__" {{ 'selected' if not transaction.override_active else '' }}>
-                              Automatic result{% if transaction.expense_label and not transaction.override_active %}: {{ transaction.expense_label }}{% endif %}
-                            </option>
-                            <option value="" {{ 'selected' if transaction.override_active and transaction.override_expense_file is none else '' }}>Unmatched</option>
-                            {% for expense in reconciliation.expenses %}
-                              <option value="{{ expense.source_file }}"
-                                {{ 'selected' if transaction.override_active and transaction.override_expense_file == expense.source_file else '' }}>
-                                {{ expense.vendor or expense.source_file }} · {{ expense.amount if expense.amount is not none else '?' }} {{ expense.currency or '' }} · {{ expense.date or 'date missing' }}
-                              </option>
-                            {% endfor %}
-                          </select>
-                          {% if transaction.suggested_expense_label and not transaction.expense_file %}
-                            <small>Suggested: {{ transaction.suggested_expense_label }} ({{ (transaction.match_confidence * 100)|round|int }}%)</small>
-                          {% endif %}
-                          {% if transaction.match_review_reason %}<small>{{ transaction.match_review_reason }}</small>{% endif %}
-                          {% if transaction.allocations %}
-                            <small>
-                              {{ transaction.allocations|length }} allocations ·
-                              {{ '%.2f'|format(transaction.allocation_total) }} CAD assigned ·
-                              balance {{ '%.2f'|format(transaction.allocation_balance) }} CAD
-                            </small>
-                          {% endif %}
-                          {% if trip.mode == 'arvine' %}
-                            <button class="button secondary small edit-allocations" data-group-id="{{ transaction.group_id }}"
-                              {{ 'disabled' if trip_busy or reconciliation.stale or transaction.ignored or transaction.cad_completeness != 'complete' else '' }}>
-                              {{ 'Edit split' if transaction.allocations else 'Split / allocate' }}
-                            </button>
-                          {% endif %}
-                        </td>
-                        <td>
-                          {% if transaction.allocations %}
-                            <strong>{{ transaction.allocation_status|replace('_', ' ')|title }}</strong>
-                            <span>Balance {{ '%.2f'|format(transaction.allocation_balance) }} CAD</span>
-                          {% elif transaction.fx_rate is not none and transaction.expense_file %}
-                            <strong>{{ '%.6f'|format(transaction.fx_rate) }}</strong>
-                            <span>CAD per invoice currency unit</span>
-                          {% else %}
-                            <strong>—</strong>
-                            <span>{{ 'Complete CAD amount unavailable' if transaction.cad_completeness != 'complete' else 'Map an invoice to calculate' }}</span>
-                          {% endif %}
-                        </td>
-                        <td>
-                          <span class="match-badge {{ transaction.match_status }}">{{ transaction.match_status }}</span>
-                          {% if transaction.match_confidence %}<small>{{ (transaction.match_confidence * 100)|round|int }}% confidence</small>{% endif %}
-                          {% if transaction.match_eligible or transaction.ignored %}
-                            <label class="duplicate-field">Disposition
-                              <select class="select transaction-decision"
-                                data-group-id="{{ transaction.group_id }}"
-                                data-possible-duplicate="{{ 'true' if transaction.possible_duplicate else 'false' }}"
-                                {{ 'disabled' if trip_busy or reconciliation.stale else '' }}>
+                {% if reconciliation.unmatched_transactions %}
+                  <div class="reconciliation-table-wrap">
+                    <table class="reconciliation-table unmatched-statement-table">
+                      <thead><tr><th>Card transaction</th><th>Statement amount</th><th>Status</th><th>Action</th></tr></thead>
+                      <tbody>
+                        {% for transaction in reconciliation.unmatched_transactions %}
+                          <tr>
+                            <td>
+                              <strong>{{ transaction.description or 'No description' }}</strong>
+                              <span>{{ transaction.transaction_date or 'date missing' }} · {{ transaction.provider|upper }} {{ transaction.account_label }}</span>
+                              <small>{% for source in transaction.source_rows %}{{ source.file }} row {{ source.row }}{{ ' · ' if not loop.last else '' }}{% endfor %}</small>
+                            </td>
+                            <td>
+                              <strong>{{ '%.2f'|format(transaction.purchase_amount) if transaction.purchase_amount is not none else '?' }} {{ transaction.purchase_currency or '' }}</strong>
+                              <span>{% if transaction.cad_amount is not none %}{{ '%.2f'|format(transaction.cad_amount) }} CAD{% else %}CAD unavailable{% endif %}</span>
+                            </td>
+                            <td>
+                              <span class="match-badge audit">Unmatched</span>
+                              <small>Not linked to this trip.</small>
+                              {% if transaction.suggested_expense_label %}<small>Possible receipt: {{ transaction.suggested_expense_label }}</small>{% endif %}
+                              {% if transaction.match_review_reason %}<small>{{ transaction.match_review_reason }}</small>{% endif %}
+                            </td>
+                            <td>
+                              <div class="transaction-actions">
                                 {% if transaction.possible_duplicate %}
-                                  <option value="unresolved" {{ 'selected' if transaction.duplicate_resolution == 'unresolved' else '' }}>Needs duplicate decision</option>
+                                  <button class="button secondary small keep-transaction" data-group-id="{{ transaction.group_id }}"
+                                    {{ 'disabled' if trip_busy or reconciliation.stale else '' }}>Keep</button>
                                 {% endif %}
-                                <option value="keep" {{ 'selected' if not transaction.ignored and (not transaction.possible_duplicate or transaction.duplicate_resolution == 'keep') else '' }}>
-                                  {{ 'Keep repeated transaction' if transaction.possible_duplicate else 'Include in trip review' }}
-                                </option>
-                                <option value="ignore" {{ 'selected' if transaction.ignored else '' }}>
-                                  {{ 'Ignore as duplicate' if transaction.possible_duplicate else 'Exclude from this trip' }}
-                                </option>
-                              </select>
-                            </label>
-                            {% if transaction.decision_note %}<small>{{ transaction.decision_note }}</small>{% endif %}
-                          {% elif transaction.normalization_status != 'ok' %}
-                            <small>Normalization: {{ transaction.normalization_status|replace('_', ' ') }}</small>
-                          {% endif %}
-                        </td>
-                      </tr>
-                    {% else %}
-                      <tr><td colspan="5" class="empty-line">No match-eligible card transactions were found.</td></tr>
+                                {% if trip.mode == 'company' %}
+                                  <button class="button secondary small edit-allocations" data-group-id="{{ transaction.group_id }}"
+                                    {{ 'disabled' if trip_busy or reconciliation.stale or transaction.cad_completeness != 'complete' }}>Split / allocate</button>
+                                {% endif %}
+                                <button class="icon-button exclude-transaction" data-group-id="{{ transaction.group_id }}"
+                                  aria-label="Exclude {{ transaction.description or 'transaction' }} from trip"
+                                  title="Exclude from this trip"
+                                  {{ 'disabled' if trip_busy or reconciliation.stale else '' }}>×</button>
+                              </div>
+                            </td>
+                          </tr>
+                        {% endfor %}
+                      </tbody>
+                    </table>
+                  </div>
+                {% else %}
+                  <div class="notice info">Every included statement transaction is matched or allocated to a receipt.</div>
+                {% endif %}
+
+                {% if reconciliation.ignored_transactions %}
+                  <details class="excluded-transactions">
+                    <summary>{{ reconciliation.ignored_transactions|length }} excluded statement transaction(s) · restore if needed</summary>
+                    {% for transaction in reconciliation.ignored_transactions %}
+                      <div>
+                        <span>{{ transaction.transaction_date or 'date missing' }} · {{ transaction.description or 'No description' }} · {{ transaction.purchase_amount or '?' }} {{ transaction.purchase_currency or '' }}</span>
+                        <button class="button secondary small restore-transaction" data-group-id="{{ transaction.group_id }}"
+                          {{ 'disabled' if trip_busy or reconciliation.stale else '' }}>Restore</button>
+                      </div>
                     {% endfor %}
-                  </tbody>
-                  </table>
-                </div>
+                  </details>
+                {% endif %}
               </div>
             {% else %}
               <div class="empty reconciliation-empty">
@@ -974,9 +1025,9 @@
           </p>
 
           <div class="claim-summary">
-            <div><span>Employee reimbursement</span><strong>{{ '%.2f'|format(consolidation.summary.employee_reimbursement_total_cad) }} CAD</strong></div>
+            <div><span>Traveller reimbursement</span><strong>{{ '%.2f'|format(consolidation.summary.employee_reimbursement_total_cad) }} CAD</strong></div>
             <div><span>Corporate-paid</span><strong>{{ '%.2f'|format(consolidation.summary.corporate_paid_total_cad) }} CAD</strong></div>
-            {% if consolidation.claim_program == 'ivado_sponsored' %}
+            {% if consolidation.claim_program == 'ivado_reimbursed' %}
               <div><span>IVADO claim</span><strong>{{ '%.2f'|format(consolidation.summary.ivado_claim_total_cad) }} CAD</strong></div>
               <div><span>IVADO excluded</span><strong>{{ '%.2f'|format(consolidation.summary.ivado_excluded_total_cad) }} CAD</strong></div>
             {% else %}
@@ -1002,7 +1053,7 @@
           <div class="reconciliation-table-wrap result-ledger">
             <table class="reconciliation-table">
               <thead>
-                <tr><th>Expense</th><th>Payer and basis</th><th>CAD and FX</th><th>Arvine result</th>{% if consolidation.claim_program == 'ivado_sponsored' %}<th>IVADO result</th>{% endif %}<th>Status</th></tr>
+                <tr><th>Expense</th><th>Payment source and basis</th><th>CAD and FX</th><th>Company result</th>{% if consolidation.claim_program == 'ivado_reimbursed' %}<th>IVADO result</th>{% endif %}<th>Status</th></tr>
               </thead>
               <tbody>
                 {% for expense in consolidation.expenses %}
@@ -1037,10 +1088,13 @@
                     </td>
                     <td>
                       <strong>{{ '%.2f CAD'|format(expense.arvine_reimbursable_cad) if expense.arvine_reimbursable_cad is not none else '—' }}</strong>
-                      <span>Employee reimbursement</span>
+                      <span>Traveller reimbursement</span>
+                      {% if expense.cad_source in ['statement', 'statement_aggregated', 'allocation', 'allocation_aggregated'] and expense.statement_receipt_difference is not none and expense.statement_receipt_difference > 0.005 %}
+                        <small>Full card charge used; receipt taxes are not increased for the {{ '%.2f'|format(expense.statement_receipt_difference) }} {{ expense.statement_purchase_currency }} tip/adjustment.</small>
+                      {% endif %}
                       {% if expense.corporate_paid_cad %}<small>{{ '%.2f CAD'|format(expense.corporate_paid_cad) }} corporate-paid</small>{% endif %}
                     </td>
-                    {% if consolidation.claim_program == 'ivado_sponsored' %}
+                    {% if consolidation.claim_program == 'ivado_reimbursed' %}
                       <td>
                         <strong>{{ '%.2f CAD'|format(expense.ivado_claimable_cad) }}</strong>
                         <span>Claim · {{ '%.2f CAD'|format(expense.ivado_excluded_cad) }} excluded</span>
@@ -1049,7 +1103,7 @@
                     <td><span class="match-badge {{ 'ok' if expense.status == 'ready' else 'audit' if expense.status == 'excluded' else 'review' }}">{{ expense.status }}</span></td>
                   </tr>
                 {% else %}
-                  <tr><td colspan="{{ 6 if consolidation.claim_program == 'ivado_sponsored' else 5 }}" class="empty-line">Scan receipts to calculate the claim.</td></tr>
+                  <tr><td colspan="{{ 6 if consolidation.claim_program == 'ivado_reimbursed' else 5 }}" class="empty-line">Scan receipts to calculate the claim.</td></tr>
                 {% endfor %}
               </tbody>
             </table>
@@ -1058,23 +1112,36 @@
           {% if consolidation.accounting.available %}
             <div class="accounting-preview">
               <div>
-                <strong>Accounting preview · profile {{ consolidation.accounting.profile_version }}</strong>
-                <span>Counter-account: {{ consolidation.accounting.counter_account }}</span>
+                <strong>Accounting preview</strong>
+                <span>
+                  Meals: {{ '%.0f'|format(consolidation.accounting.meal_deduction_pct * 100) }}% deductible ·
+                  {{ '%.0f'|format(consolidation.accounting.meal_tax_recovery_pct * 100) }}% tax recovery where registered ·
+                  counter-account: {{ consolidation.accounting.counter_account }}
+                </span>
               </div>
               <div class="accounting-preview-rows">
                 {% for row in consolidation.accounting.rows %}
-                  <span>{{ row.account }} <strong>{{ '%.2f'|format(row.amount_cad) }} CAD</strong></span>
+                  <span>
+                    {{ row.account }} <strong>{{ '%.2f'|format(row.amount_cad) }} CAD</strong>
+                    {% if row.rounding_adjustment_cad %}<small>includes {{ '%+.2f'|format(row.rounding_adjustment_cad) }} rounding</small>{% endif %}
+                  </span>
                 {% endfor %}
               </div>
               <div class="accounting-check {{ 'review' if consolidation.accounting.balance_difference|abs >= 0.01 else '' }}">
                 Journal {{ '%.2f'|format(consolidation.accounting.journal_total) }} CAD ·
                 claim {{ '%.2f'|format(consolidation.accounting.claim_total) }} CAD ·
                 difference {{ '%+.2f'|format(consolidation.accounting.balance_difference) }}
+                {% if consolidation.accounting.rounding_adjustment_cad %}
+                  <small>
+                    Account totals initially differed by {{ '%+.2f'|format(consolidation.accounting.pre_adjustment_difference) }} CAD after cent rounding.
+                    A {{ '%+.2f'|format(consolidation.accounting.rounding_adjustment_cad) }} CAD adjustment was applied to {{ consolidation.accounting.rounding_adjustment_account }}.
+                  </small>
+                {% endif %}
               </div>
             </div>
           {% endif %}
 
-          {% if trip.mode == 'arvine' %}
+          {% if trip.mode == 'company' %}
             <label class="confirmation">
               <input type="checkbox" id="statements-complete" {{ 'checked' if consolidation.is_finalized }}>
               <span>I confirm that all card and bank statements for this trip have been added.</span>
@@ -1107,7 +1174,7 @@
             <span class="mode-badge">{{ trip.mode|upper }}</span>
           </div>
 
-          {% if trip.mode == 'arvine' %}
+          {% if trip.mode == 'company' %}
             <div class="accounting-assumptions">
               <div>
                 <strong>Accounting assumptions · profile {{ trip.accounting_profile.version }}</strong>
@@ -1121,23 +1188,6 @@
               <button class="button secondary small" id="open-accounting-button" {{ 'disabled' if trip_busy }}>Review assumptions</button>
             </div>
           {% endif %}
-
-          <div class="processing-summary">
-            <div>
-              <span>Receipt extraction</span>
-              <strong>
-                {{ 'Best quality · OpenAI' if line_review.available and line_review.quality == 'best'
-                  else 'Basic / offline' if line_review.available
-                  else 'Not scanned yet' }}
-              </strong>
-              <small>Inherited from Step 3 and kept consistent for this workbook.</small>
-            </div>
-            <div>
-              <span>Excel creation</span>
-              <strong>Local on this Mac</strong>
-              <small>No separate AI choice. It applies your reviewed line items, mappings, and accounting rules.</small>
-            </div>
-          </div>
 
           {% if not state.system.heic_available %}
             <div class="notice info">HEIC is not enabled in this environment. Re-run local setup, or export iPhone scans as PDF, JPEG, or PNG.</div>
@@ -1304,10 +1354,10 @@
       </div>
       <label class="field-label">Trip month<input class="input" name="month" type="month" required></label>
       <label class="field-label">Trip name<input class="input" name="description" placeholder="Montreal client meetings" required></label>
-      <label class="field-label">Claim program
+      <label class="field-label">Reimbursement program
         <select class="select full-width" name="claim_program" required>
-          <option value="arvine_only">Arvine only</option>
-          <option value="ivado_sponsored">IVADO sponsored</option>
+          <option value="company_reimbursed">Own-company reimbursement</option>
+          <option value="ivado_reimbursed">IVADO-reimbursed trip</option>
         </select>
       </label>
       <details class="optional-trip-fields">
@@ -1324,7 +1374,7 @@
     </form>
   </dialog>
 
-  {% if state.selected %}
+  {% if state.trips %}
     <dialog id="delete-trip-dialog" class="modal">
       <form id="delete-trip-form">
         <div class="modal-heading">
@@ -1333,16 +1383,15 @@
         </div>
         <p class="help-text">
           This cannot be undone. It will delete the complete local folder for
-          <strong>{{ state.selected.label }}</strong> and all data inside it.
+          <strong id="delete-trip-label">{{ state.selected.label if state.selected else '' }}</strong> and all data inside it.
         </p>
         <div class="deletion-summary">
-          <span>{{ state.selected.receipts|length }} receipt(s)</span>
-          <span>{{ state.selected.statements|length }} statement(s)</span>
-          <span>{{ state.selected.workbooks|length }} generated workbook(s)</span>
-          <span>{{ state.selected.packages|length }} package(s)</span>
+          <span><strong id="delete-trip-receipts">{{ state.selected.receipts|length if state.selected else 0 }}</strong> receipt(s)</span>
+          <span><strong id="delete-trip-statements">{{ state.selected.statements|length if state.selected else 0 }}</strong> statement(s)</span>
+          <span id="delete-trip-artifacts">All generated reports and packages</span>
         </div>
         <label class="field-label">
-          Type <code>{{ state.selected.name }}</code> to confirm
+          <span id="delete-trip-confirmation">Type <code>{{ state.selected.name if state.selected else '' }}</code> to confirm</span>
           <input class="input" name="confirmation" autocomplete="off" spellcheck="false" required>
         </label>
         <p class="form-error" id="delete-trip-error"></p>
@@ -1387,19 +1436,19 @@
           <div><p class="eyebrow">Trip record</p><h2>Trip details</h2></div>
           <button type="button" class="icon-button close-dialog">×</button>
         </div>
-        <p class="help-text">Only the traveller is required. Dates help check statement coverage; purpose labels the Arvine report. Company and IVADO sponsor names are fixed by the output and do not need to be entered here.</p>
+        <p class="help-text">Only the traveller is required. Dates help check statement coverage; purpose labels the company report. Company and IVADO sponsor names are fixed by the output and do not need to be entered here.</p>
         <div class="form-grid">
           <label class="field-label span-2">Traveller<input class="input" name="traveller" value="{{ metadata.traveller }}" required></label>
           <label class="field-label">Start date (optional)<input class="input" name="start_date" type="date" value="{{ metadata.start_date }}"></label>
           <label class="field-label">End date (optional)<input class="input" name="end_date" type="date" value="{{ metadata.end_date }}"></label>
           <label class="field-label span-2">Business purpose (optional)<input class="input" name="business_purpose" value="{{ metadata.business_purpose }}" placeholder="Client meetings and project planning"></label>
-          <label class="field-label">Default receipt payer
+          <label class="field-label">Default payment source
             <select class="select" name="default_paid_by">
-              <option value="employee_personal" {{ 'selected' if metadata.default_paid_by == 'employee_personal' }}>Employee personal</option>
-              <option value="arvine_corporate_bmo" {{ 'selected' if metadata.default_paid_by == 'arvine_corporate_bmo' }}>Arvine corporate BMO</option>
+              <option value="traveller_personal" {{ 'selected' if metadata.default_paid_by == 'traveller_personal' }}>Traveller’s personal funds/card</option>
+              <option value="company_card" {{ 'selected' if metadata.default_paid_by == 'company_card' }}>Company funds/card</option>
             </select>
           </label>
-          <p class="help-text span-2">You can override the payer and employee count on each receipt during review.</p>
+          <p class="help-text span-2">This says who paid at purchase time and determines whether the traveller is owed reimbursement. It is applied to newly scanned receipts unless you override an individual receipt.</p>
         </div>
         <p class="form-error" id="trip-metadata-error"></p>
         <div class="modal-actions">
@@ -1425,7 +1474,7 @@
             {% endif %}
           </div>
         {% endif %}
-        <label class="field-label">Review note (optional)<textarea class="input" name="note" rows="3" placeholder="Receipts, employee shares, alcohol exclusions and statement mappings reviewed."></textarea></label>
+        <label class="field-label">Review note (optional)<textarea class="input" name="note" rows="3" placeholder="Receipts, traveller shares, alcohol exclusions and statement mappings reviewed."></textarea></label>
         <p class="form-error" id="approval-error"></p>
         <button class="button primary full-width" type="submit">Lock this reviewed version</button>
       </form>
@@ -1441,7 +1490,7 @@
       <p class="help-text">These values are the source of truth for the final preview and exported workbook.</p>
       <input type="hidden" name="source_file">
       <div class="expense-claim-controls">
-        <div class="notice info">This uploaded receipt is always included in Arvine.</div>
+        <div class="notice info">This uploaded receipt is always included in the company report.</div>
         {% if trip and trip.mode == 'ivado' %}
           <label class="confirmation">
             <input type="checkbox" name="included_in_ivado">
@@ -1458,10 +1507,10 @@
             <small class="field-error" data-error-for="ivado_exclusion_reason"></small>
           </label>
         {% endif %}
-        <label class="field-label">Paid by
+        <label class="field-label">Payment source
           <select class="select" name="paid_by">
-            <option value="employee_personal">Employee personal</option>
-            <option value="arvine_corporate_bmo">Arvine corporate BMO</option>
+            <option value="traveller_personal">Traveller’s personal funds/card</option>
+            <option value="company_card">Company funds/card</option>
           </select>
           <small class="field-error" data-error-for="paid_by"></small>
         </label>
@@ -1472,14 +1521,21 @@
       </div>
       <div class="form-grid">
         <label class="field-label">Receipt date<input class="input" name="date" type="date"><small class="field-error" data-error-for="date"></small></label>
-        <label class="field-label">Currency<input class="input" name="currency" maxlength="3" placeholder="CAD"><small class="field-error" data-error-for="currency"></small></label>
+        <label class="field-label">Currency<input class="input" name="currency" list="currency-options" placeholder="Search CAD or Canadian Dollar" autocomplete="off"><small class="field-error" data-error-for="currency"></small></label>
         <label class="field-label span-2">Vendor<input class="input" name="vendor"><small class="field-error" data-error-for="vendor"></small></label>
         <label class="field-label span-2">Description<input class="input" name="description"><small class="field-error" data-error-for="description"></small></label>
-        <label class="field-label">Expense type<input class="input" name="expense_type" placeholder="meal, hotel, transport"><small class="field-error" data-error-for="expense_type"></small></label>
+        <input type="hidden" name="expense_type">
+        <label class="confirmation span-2">
+          <input type="checkbox" id="expense-meal-toggle">
+          <span>
+            <strong>Meal expense — apply the {{ (trip.accounting_profile.meal_deduction_pct * 100)|round|int }}% meal deduction rate</strong>
+            <small>Detected automatically from OCR or OpenAI. Turn this off for airfare, taxis, hotels, laundry, and other travel costs.</small>
+          </span>
+        </label>
         <label class="field-label">Receipt total<input class="input" name="amount" type="number" min="0" step="0.01"><small class="field-error" data-error-for="amount"></small></label>
         <label class="field-label">Country<input class="input" name="country"><small class="field-error" data-error-for="country"></small></label>
         <label class="field-label">Province / state<input class="input" name="province"><small class="field-error" data-error-for="province"></small></label>
-        <label class="field-label">Subtotal<input class="input" name="subtotal" type="number" min="0" step="0.01"><small class="field-error" data-error-for="subtotal"></small></label>
+        <label class="field-label">Subtotal (before tax)<input class="input" name="subtotal" type="number" min="0" step="0.01"><small>Changing this updates Receipt total to subtotal + tax unless you also edit Receipt total.</small><small class="field-error" data-error-for="subtotal"></small></label>
         <label class="field-label">GST/HST<input class="input" name="gst_hst" type="number" min="0" step="0.01"><small>Updates the fixed GST/HST line; use 0 when absent.</small><small class="field-error" data-error-for="gst_hst"></small></label>
         <label class="field-label">QST<input class="input" name="qst" type="number" min="0" step="0.01"><small>Updates the fixed QST line; use 0 when absent.</small><small class="field-error" data-error-for="qst"></small></label>
         <label class="field-label">Tax documentation<input class="input" name="tax_documentation_status" placeholder="ok or review"><small class="field-error" data-error-for="tax_documentation_status"></small></label>
@@ -1499,34 +1555,7 @@
     </form>
   </dialog>
 
-  <dialog id="transaction-disposition-dialog" class="modal">
-    <form id="transaction-disposition-form">
-      <div class="modal-heading">
-        <div>
-          <p class="eyebrow">Statement review</p>
-          <h2 id="transaction-disposition-title">Exclude transaction</h2>
-        </div>
-        <button type="button" class="icon-button cancel-transaction-disposition">×</button>
-      </div>
-      <input type="hidden" name="group_id">
-      <input type="hidden" name="possible_duplicate">
-      <p class="help-text" id="transaction-disposition-help">
-        The transaction stays in the audit trail but will not be matched to a trip expense.
-      </p>
-      <label class="field-label">
-        Reason
-        <textarea class="input" name="note" rows="4"
-          placeholder="Personal subscription, unrelated charge, overlapping statement export…" required></textarea>
-      </label>
-      <p class="form-error" id="transaction-disposition-error"></p>
-      <div class="modal-actions">
-        <button class="button secondary cancel-transaction-disposition" type="button">Cancel</button>
-        <button class="button primary" type="submit">Exclude transaction</button>
-      </div>
-    </form>
-  </dialog>
-
-  {% if state.selected and state.selected.mode == 'arvine' %}
+  {% if state.selected and state.selected.mode == 'company' %}
     {% set profile = state.selected.accounting_profile %}
     <dialog id="accounting-dialog" class="modal wide-modal">
       <form id="accounting-form">
@@ -1610,6 +1639,7 @@
         <button type="button" class="icon-button close-dialog">×</button>
       </div>
       <p class="help-text" id="card-match-receipt"></p>
+      <p class="help-text">The card total does not need to equal the invoice exactly. A tip can make the card charge higher; search by merchant or date, then choose the actual transaction.</p>
       <div class="card-match-filters">
         <label class="field-label">Search transactions<input class="input" id="card-match-search" placeholder="Merchant, date, amount…"></label>
         <label class="field-label">Card / account<select class="select" id="card-match-account"><option value="">All cards and accounts</option></select></label>
@@ -1628,6 +1658,12 @@
       </div>
     </div>
   </dialog>
+
+  <datalist id="currency-options">
+    {% for currency in state.currencies %}
+      <option value="{{ currency.code }}">{{ currency.name }}</option>
+    {% endfor %}
+  </datalist>
 
   <div id="toast" class="toast hidden"></div>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
