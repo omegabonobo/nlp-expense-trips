@@ -76,7 +76,10 @@ The UI compiles one canonical reviewed dataset and uses it for every output:
 
 - `expense_review_<trip>_company_<timestamp>.xlsx` is always the primary
   reimbursement/accounting report. It contains one readable `Expense Report`
-  and the five derived `Accounting Rows` used by the accounting handoff.
+  and posting-ready `Accounting Rows` used by the accounting handoff. Ordinary
+  trips use travel/meal/tax expense rows plus the shareholder payment. IVADO
+  trips use a client-recoverable pass-through, Arvine-borne alcohol rows, the
+  IVADO invoice, and the IVADO reimbursement.
 - `trip-reimbursement-manifest.v3.ndjson` is the minimal machine-readable shared
   contract consumed by the accounting handoff.
 - `expense_review_<trip>_ivado_<timestamp>.xlsx` is added only for
@@ -90,11 +93,12 @@ The exported ZIP includes source receipts/statements, review state, every
 generated artifact, and `approval-manifest.json`. The manifest enforces these
 controls within a CAD 0.02 tolerance:
 
-- reviewed trip total = traveller reimbursement + company-paid + program exclusions;
+- reviewed trip total = traveller reimbursement + company-paid;
 - for sponsored trips, reviewed trip total = IVADO claim + IVADO exclusions;
-- for sponsored trips, traveller reimbursement + company-paid = IVADO claim;
 - receipt detail totals = report totals;
-- accounting components = traveller reimbursement.
+- ordinary-trip accounting components = traveller reimbursement;
+- sponsored-trip business-expense components = Arvine-borne sponsor exclusions;
+  the IVADO claim is posted separately as a client-recoverable pass-through.
 
 Contract 3.0 contains only receipt/output facts, payer and employee-share
 decisions, the company/IVADO CAD amounts, receipt items, and the five accounting
@@ -308,7 +312,8 @@ Company mode creates four sheets:
 - `card_statements`: provider-neutral normalized transactions, funding legs, audit rows, and editable `expense_id` / `match_status` fields.
 - `expense_line_items`: visible meal lines and IVADO classification/removal
   evidence. Own-company trips reimburse the full reviewed share; IVADO trips
-  reimburse only the IVADO-eligible share.
+  also reimburse the full reviewed Arvine share while the sponsor claim removes
+  alcohol and any other IVADO-only exclusions.
 
 The Canadian tax-documentation review flags follow the current $100 and $500 invoice-information thresholds described by the [Canada Revenue Agency](https://www.canada.ca/en/revenue-agency/services/tax/businesses/topics/gst-hst-businesses/calculate-prepare-report/input-tax-credit.html) and [Revenu Québec](https://www.revenuquebec.ca/en/businesses/consumption-taxes/gsthst-and-qst/collecting-gst-and-qst/preparing-invoices/). These checks assist review; they are not tax advice and do not determine whether a purchase is taxable or eligible.
 
@@ -341,9 +346,10 @@ exported into `card_statements`. If it shows `0.00`, no matching statement value
 was finalized. Post-export Excel edits remain possible, but they do not
 round-trip into the app.
 
-For IVADO, `is_alcohol = true` always means the line is removed from both the
-sponsor claim and traveller reimbursement with reason `alcohol`. To include a
-false positive, correct the line to non-alcoholic. Company-only reimbursement
+For IVADO, `is_alcohol = true` always means the line is removed from the
+sponsor claim with reason `alcohol`, but retained in the traveller reimbursement
+as an Arvine-borne meal expense. To include a false positive in the IVADO claim,
+correct the line to non-alcoholic. Company-only reimbursement
 does not use alcohol classification or line exclusions: every uploaded receipt
 remains fully included. The automatically created
 `Alcohol adjustment - manual` line remains available in IVADO when OCR/OpenAI

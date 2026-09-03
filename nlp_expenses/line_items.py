@@ -24,7 +24,36 @@ from nlp_expenses.trips import (
 )
 
 LINE_ITEM_REVIEW_FILE = ".nlp-expenses-line-items.json"
-LINE_ITEM_REVIEW_VERSION = 5
+LINE_ITEM_REVIEW_VERSION = 6
+EXTRACTION_REVIEW_RULES_VERSION = "r018-v1"
+FIELD_CONFIDENCE_THRESHOLD = 0.72
+LINE_CONFIDENCE_THRESHOLD = 0.72
+ALCOHOL_CONFIDENCE_THRESHOLD = 0.85
+REQUIRED_EXPENSE_FIELDS = {
+    "date": "date",
+    "vendor": "vendor",
+    "amount": "total",
+    "currency": "currency",
+    "expense_type": "expense type",
+}
+EXTRACTED_FIELD_LABELS = {
+    "date": "Date",
+    "vendor": "Vendor",
+    "description": "Description",
+    "expense_type": "Expense type",
+    "amount": "Receipt total",
+    "currency": "Currency",
+    "country": "Country",
+    "province": "Province / state",
+    "subtotal": "Subtotal",
+    "gst_hst": "GST/HST",
+    "qst": "QST",
+    "gst_hst_number": "GST/HST number",
+    "qst_number": "QST number",
+    "business_purpose": "Business purpose",
+    "attendees_client": "Meal attendees / client",
+    "tax_documentation_status": "Tax documentation",
+}
 IVADO_EXCLUSION_REASONS = {
     "alcohol",
     "non_business",
@@ -211,11 +240,14 @@ def save_line_item_review(
             "line_items": lines,
             "extracted_line_items": extracted_lines,
             "extracted": extracted,
+            "field_evidence": serialize_expense_field_evidence(expense, extracted),
             "field_overrides": {},
             "reviewed": False,
             "reviewed_at": None,
             "source_fingerprint": receipt_source_fingerprint(source_path),
             "quality": "best" if llm_mode == "required" else "basic",
+            "extractor_version": expense.extractor_version or "receipt-v1",
+            "review_rules_version": EXTRACTION_REVIEW_RULES_VERSION,
             "scanned_at": scanned_at,
         }
         receipt.update(extracted)
@@ -226,7 +258,16 @@ def save_line_item_review(
         receipt["paid_by_overridden"] = False
         receipt["receipt_total"] = receipt.get("amount")
         if stored_receipt:
+            receipt["extraction_changes"] = material_extraction_changes(
+                stored_receipt,
+                extracted,
+                extracted_lines,
+            )
+            receipt["changes_acknowledged_at"] = None
             preserve_expense_decisions(receipt, stored_receipt)
+        else:
+            receipt["extraction_changes"] = []
+            receipt["changes_acknowledged_at"] = None
         recompute_receipt(receipt, selected_mode)
         receipts.append(receipt)
     if merge_existing and previous_receipts:
@@ -246,6 +287,7 @@ def save_line_item_review(
         "mode": selected_mode,
         "synced_at": scanned_at,
         "quality": "best" if llm_mode == "required" else "basic",
+        "review_rules_version": EXTRACTION_REVIEW_RULES_VERSION,
         "input_fingerprint": fingerprint,
         "receipts": receipts,
     }
@@ -303,6 +345,19 @@ def line_item_review_view(trip_dir: Path, state: dict | None = None) -> dict:
         receipt.setdefault("review_mode", state.get("mode") or "company")
         migrate_receipt_contract_fields(receipt, state.get("mode") or "company")
         recompute_receipt(receipt, state.get("mode") or "company")
+    apply_likely_duplicate_exceptions(receipts)
+    exceptions = sorted(
+        {
+            exception["id"]: exception
+            for receipt in receipts
+            for exception in receipt.get("exceptions", [])
+        }.values(),
+        key=lambda exception: (
+            0 if exception.get("severity") == "blocking" else 1,
+            str(exception.get("source_file") or "").casefold(),
+            str(exception.get("label") or "").casefold(),
+        ),
+    )
     stale = state.get("input_fingerprint") != line_item_input_fingerprint(trip_dir)
     all_items = [item for receipt in receipts for item in receipt["line_items"]]
     accounting_items = [
@@ -320,6 +375,7 @@ def line_item_review_view(trip_dir: Path, state: dict | None = None) -> dict:
         "quality": state.get("quality", "basic"),
         "mode": state.get("mode"),
         "receipts": receipts,
+        "exceptions": exceptions,
         "summary": {
             "receipt_count": len(receipts),
             "meal_receipt_count": len(meal_receipts),
@@ -341,6 +397,13 @@ def line_item_review_view(trip_dir: Path, state: dict | None = None) -> dict:
             "line_review_count": sum(1 for item in all_items if not item.get("reviewed")),
             "blocking_count": sum(1 for receipt in receipts if receipt.get("blocking")),
             "field_issue_count": sum(len(receipt.get("field_issues", [])) for receipt in receipts),
+            "exception_count": len(exceptions),
+            "exception_blocking_count": sum(
+                exception.get("severity") == "blocking" for exception in exceptions
+            ),
+            "exception_review_count": sum(
+                exception.get("severity") == "review" for exception in exceptions
+            ),
         },
     }
 
@@ -682,6 +745,19 @@ def reset_receipt_review(trip_dir: Path, source_file: str) -> dict:
     return line_item_review_view(trip_dir, state)
 
 
+def acknowledge_extraction_changes(trip_dir: Path, source_file: str) -> dict:
+    """Acknowledge the visible before/after diff without discarding audit history."""
+
+    state = require_current_state(trip_dir)
+    receipt = find_receipt(state, source_file)
+    if not receipt.get("extraction_changes"):
+        raise ValueError("This receipt has no extraction changes to acknowledge.")
+    receipt["changes_acknowledged_at"] = datetime.now().isoformat(timespec="seconds")
+    recompute_receipt(receipt, state.get("mode") or "company")
+    save_line_item_review_state(trip_dir, state)
+    return line_item_review_view(trip_dir, state)
+
+
 def apply_line_item_review(
     trip_dir: Path,
     expenses: list[Expense],
@@ -775,6 +851,8 @@ def ensure_line_item_review_ready(trip_dir: Path) -> dict:
         raise ValueError(
             "Resolve line-item totals before generating; excluded lines require a receipt that reconciles to its total."
         )
+    if view["summary"].get("exception_blocking_count"):
+        raise ValueError("Resolve the blocking receipt extraction exceptions before generating.")
     return view
 
 
@@ -867,6 +945,234 @@ def recompute_receipt(receipt: dict, mode: str | None = None) -> None:
             "field_issues": field_issues,
         }
     )
+    receipt["exceptions"] = receipt_exceptions(receipt, mode)
+    refresh_exception_status(receipt)
+
+
+def receipt_exceptions(receipt: dict, mode: str) -> list[dict]:
+    """Classify unresolved extraction exceptions using deterministic rules."""
+
+    source_file = str(receipt.get("source_file") or "")
+    receipt_id = str(receipt.get("receipt_id") or stable_receipt_id("legacy", source_file))
+    reviewed = bool(receipt.get("reviewed"))
+    overrides = receipt.get("field_overrides", {})
+    evidence = receipt.get("field_evidence", {})
+    exceptions = []
+
+    def add(
+        suffix: str,
+        category: str,
+        severity: str,
+        label: str,
+        message: str,
+        *,
+        field: str | None = None,
+        line_id: str | None = None,
+        confidence: float | None = None,
+        reason: str = "",
+    ) -> None:
+        exceptions.append(
+            {
+                "id": f"{receipt_id}:{suffix}",
+                "receipt_id": receipt_id,
+                "source_file": source_file,
+                "category": category,
+                "severity": severity,
+                "label": label,
+                "message": message,
+                "field": field,
+                "line_id": line_id,
+                "confidence": confidence,
+                "reason": reason,
+            }
+        )
+
+    for field, field_label in EXTRACTED_FIELD_LABELS.items():
+        field_evidence = evidence.get(field, {}) if isinstance(evidence, dict) else {}
+        confidence = float(field_evidence.get("confidence") or 0.0)
+        reason = str(field_evidence.get("reason") or "")
+        missing = field in REQUIRED_EXPENSE_FIELDS and receipt.get(field) in (
+            None,
+            "",
+            "Unknown supplier",
+        )
+        if missing:
+            field_evidence["status"] = "blocking"
+            add(
+                f"field:{field}:missing",
+                "missing_field",
+                "blocking",
+                f"Missing {REQUIRED_EXPENSE_FIELDS[field]}",
+                f"{field_label} is required before finalization.",
+                field=field,
+                confidence=confidence,
+                reason=reason,
+            )
+        elif (
+            receipt.get(field) not in (None, "")
+            and confidence < FIELD_CONFIDENCE_THRESHOLD
+            and field not in overrides
+            and not reviewed
+        ):
+            field_evidence["status"] = "review"
+            add(
+                f"field:{field}:confidence",
+                "low_confidence_field",
+                "review",
+                f"Check {field_label.lower()}",
+                f"{field_label} has {confidence * 100:.0f}% extraction confidence.",
+                field=field,
+                confidence=confidence,
+                reason=reason,
+            )
+        else:
+            field_evidence["status"] = "ready"
+
+    for item in receipt.get("line_items", []):
+        if not isinstance(item, dict):
+            continue
+        line_id = str(item.get("line_id") or "line")
+        description = str(item.get("description") or "").strip()
+        amount = item.get("amount")
+        confidence = float(item.get("confidence") or 0.0)
+        reason = str(item.get("confidence_reason") or item.get("review_note") or "")
+        if not description or not isinstance(amount, (int, float)):
+            item["exception_status"] = "blocking"
+            add(
+                f"line:{line_id}:missing",
+                "missing_line_value",
+                "blocking",
+                "Incomplete receipt line",
+                "A receipt line needs both a description and an amount.",
+                line_id=line_id,
+                confidence=confidence,
+                reason=reason,
+            )
+            continue
+        uncertain_alcohol = bool(
+            mode == "ivado"
+            and not item.get("system_type")
+            and not item.get("manual")
+            and not item.get("alcohol_overridden")
+            and 0 < float(item.get("alcohol_confidence") or 0.0) < ALCOHOL_CONFIDENCE_THRESHOLD
+            and not item.get("reviewed")
+        )
+        if uncertain_alcohol:
+            item["exception_status"] = "review"
+            add(
+                f"line:{line_id}:alcohol",
+                "uncertain_alcohol",
+                "review",
+                f"Check alcohol: {description}",
+                (
+                    "Alcohol classification is uncertain at "
+                    f"{float(item.get('alcohol_confidence') or 0.0) * 100:.0f}%."
+                ),
+                line_id=line_id,
+                confidence=float(item.get("alcohol_confidence") or 0.0),
+                reason=str(item.get("alcohol_reason") or reason),
+            )
+        elif (
+            not item.get("system_type")
+            and not item.get("manual")
+            and confidence < LINE_CONFIDENCE_THRESHOLD
+            and not item.get("reviewed")
+        ):
+            item["exception_status"] = "review"
+            add(
+                f"line:{line_id}:confidence",
+                "low_confidence_line",
+                "review",
+                f"Check line: {description}",
+                f"This line has {confidence * 100:.0f}% extraction confidence.",
+                line_id=line_id,
+                confidence=confidence,
+                reason=reason,
+            )
+        else:
+            item["exception_status"] = "ready"
+
+    difference = receipt.get("difference")
+    if isinstance(difference, (int, float)) and abs(float(difference)) > 0.05:
+        difference_severity = "blocking" if receipt.get("blocking") else "review"
+        add(
+            "line-total",
+            "line_total_difference",
+            difference_severity,
+            "Receipt and line totals differ",
+            f"Extracted lines differ from the receipt total by {float(difference):+.2f}.",
+            reason="Receipt total and the sum of reviewed lines must agree within 0.05.",
+        )
+
+    if receipt.get("extraction_changes") and not receipt.get("changes_acknowledged_at"):
+        for change in receipt["extraction_changes"]:
+            add(
+                f"change:{change.get('id')}",
+                "extraction_change",
+                "review",
+                f"Extraction changed: {change.get('label')}",
+                "Compare the previous and current automatic values.",
+                field=change.get("field"),
+                reason=(
+                    "Your corrected value was preserved."
+                    if change.get("preserved_user_value")
+                    else "The current value follows the latest extraction."
+                ),
+            )
+    return exceptions
+
+
+def refresh_exception_status(receipt: dict) -> None:
+    exceptions = receipt.get("exceptions", [])
+    if any(item.get("severity") == "blocking" for item in exceptions):
+        receipt["exception_status"] = "blocking"
+    elif exceptions:
+        receipt["exception_status"] = "review"
+    else:
+        receipt["exception_status"] = "ready"
+
+
+def apply_likely_duplicate_exceptions(receipts: list[dict]) -> None:
+    groups: dict[tuple, list[dict]] = {}
+    for receipt in receipts:
+        amount = receipt.get("amount")
+        if not isinstance(amount, (int, float)):
+            continue
+        key = (
+            str(receipt.get("date") or ""),
+            re.sub(r"[^a-z0-9]+", "", str(receipt.get("vendor") or "").casefold()),
+            round(float(amount), 2),
+            str(receipt.get("currency") or "").upper(),
+        )
+        if key[0] and key[1] and key[3]:
+            groups.setdefault(key, []).append(receipt)
+    for matches in groups.values():
+        if len(matches) < 2:
+            continue
+        matches.sort(key=lambda receipt: str(receipt.get("source_file") or "").casefold())
+        first = matches[0]
+        for duplicate in matches[1:]:
+            if duplicate.get("reviewed"):
+                continue
+            duplicate.setdefault("exceptions", []).append(
+                {
+                    "id": f"{duplicate['receipt_id']}:duplicate:{first['receipt_id']}",
+                    "receipt_id": duplicate["receipt_id"],
+                    "source_file": duplicate["source_file"],
+                    "category": "likely_duplicate",
+                    "severity": "review",
+                    "label": "Likely duplicate receipt",
+                    "message": (
+                        f"This has the same vendor, date, amount, and currency as "
+                        f"{first['source_file']}."
+                    ),
+                    "field": None,
+                    "line_id": None,
+                    "confidence": None,
+                    "reason": "Deterministic duplicate key matched four receipt fields.",
+                }
+            )
+            refresh_exception_status(duplicate)
 
 
 def serialize_line_item(item: LineItem, line_id: str, mode: str) -> dict:
@@ -896,6 +1202,11 @@ def serialize_line_item(item: LineItem, line_id: str, mode: str) -> dict:
         "extracted_description": item.description,
         "extracted_amount": item.amount,
         "confidence": item.confidence,
+        "confidence_reason": (
+            item.confidence_reason
+            or item.review_note
+            or f"Extractor confidence {max(0.0, min(1.0, float(item.confidence or 0.0))) * 100:.0f}%."
+        ),
         "review_note": item.review_note,
         "alcohol_confidence": alcohol_confidence,
         "alcohol_reason": alcohol_reason,
@@ -1027,6 +1338,147 @@ def serialize_expense_fields(expense: Expense) -> dict:
         "paid_by": "traveller_personal",
         "number_of_people": max(1, int(expense.number_of_people or 1)),
     }
+
+
+def serialize_expense_field_evidence(expense: Expense, extracted: dict) -> dict[str, dict]:
+    """Persist confidence and a concise explanation for every extracted field."""
+
+    system_fields = {
+        "included",
+        "included_in_arvine",
+        "included_in_ivado",
+        "ivado_exclusion_reason",
+        "paid_by",
+        "number_of_people",
+        "manual_cad_override",
+        "manual_cad_note",
+        "review_note",
+    }
+    evidence = {}
+    for field, value in extracted.items():
+        explicit_confidence = expense.field_confidence.get(field)
+        explicit_reason = " ".join(str(expense.field_reasons.get(field) or "").split())
+        if explicit_confidence is not None:
+            confidence = max(0.0, min(1.0, float(explicit_confidence)))
+        elif field in system_fields or field in SYSTEM_TAX_LINES:
+            confidence = 1.0
+        elif value in (None, ""):
+            confidence = 0.0 if field in REQUIRED_EXPENSE_FIELDS else 1.0
+        else:
+            confidence = max(0.0, min(1.0, float(expense.confidence or 0.0)))
+        if explicit_reason:
+            reason = explicit_reason
+        elif value in (None, ""):
+            reason = (
+                "No value was extracted."
+                if field in REQUIRED_EXPENSE_FIELDS
+                else "No optional value was present in the extraction."
+            )
+        elif field in system_fields or field in SYSTEM_TAX_LINES:
+            reason = "Derived deterministically from the receipt review contract."
+        else:
+            reason = f"Extractor reported {confidence * 100:.0f}% confidence for this receipt."
+        evidence[field] = {
+            "confidence": round(confidence, 4),
+            "reason": reason[:240],
+            "extractor_version": expense.extractor_version or "receipt-v1",
+        }
+    return evidence
+
+
+def material_extraction_changes(
+    stored_receipt: dict,
+    extracted: dict,
+    extracted_lines: list[dict],
+) -> list[dict]:
+    """Return material automatic changes while leaving reviewed values untouched."""
+
+    old_extracted = (
+        stored_receipt.get("extracted") if isinstance(stored_receipt.get("extracted"), dict) else {}
+    )
+    overrides = (
+        stored_receipt.get("field_overrides")
+        if isinstance(stored_receipt.get("field_overrides"), dict)
+        else {}
+    )
+    changes = []
+    for field in EXTRACTED_FIELD_LABELS:
+        before = old_extracted.get(field)
+        after = extracted.get(field)
+        if not material_values_differ(before, after):
+            continue
+        changes.append(
+            {
+                "id": f"field:{field}",
+                "kind": "field",
+                "field": field,
+                "label": EXTRACTED_FIELD_LABELS[field],
+                "before": before,
+                "after": after,
+                "preserved_user_value": field in overrides,
+            }
+        )
+
+    old_lines = stored_receipt.get("extracted_line_items")
+    if not isinstance(old_lines, list):
+        old_lines = stored_receipt.get("line_items", [])
+    before_lines = extraction_line_snapshot(old_lines)
+    after_lines = extraction_line_snapshot(extracted_lines)
+    if before_lines != after_lines:
+        changes.append(
+            {
+                "id": "line_items",
+                "kind": "line_items",
+                "field": None,
+                "label": "Receipt lines",
+                "before": format_line_snapshot(before_lines),
+                "after": format_line_snapshot(after_lines),
+                "preserved_user_value": any(
+                    isinstance(item, dict) and line_has_user_decision(item)
+                    for item in stored_receipt.get("line_items", [])
+                ),
+            }
+        )
+    return changes
+
+
+def material_values_differ(before: object, after: object) -> bool:
+    if before in (None, "") and after in (None, ""):
+        return False
+    if isinstance(before, (int, float)) and isinstance(after, (int, float)):
+        return abs(float(before) - float(after)) > 0.01
+    return (
+        " ".join(str(before or "").split()).casefold()
+        != " ".join(str(after or "").split()).casefold()
+    )
+
+
+def extraction_line_snapshot(lines: list) -> list[tuple[str, float | None, bool]]:
+    snapshot = []
+    for item in lines:
+        if not isinstance(item, dict) or item.get("system_type") in SYSTEM_TAX_LINES:
+            continue
+        amount = item.get("extracted_amount", item.get("amount"))
+        snapshot.append(
+            (
+                " ".join(
+                    str(item.get("extracted_description", item.get("description")) or "").split()
+                ),
+                round(float(amount), 2) if isinstance(amount, (int, float)) else None,
+                bool(item.get("auto_is_alcohol", item.get("is_alcohol"))),
+            )
+        )
+    return snapshot
+
+
+def format_line_snapshot(lines: list[tuple[str, float | None, bool]]) -> str:
+    if not lines:
+        return "No extracted purchase lines"
+    formatted = []
+    for description, amount, _is_alcohol in lines:
+        amount_label = f"{amount:.2f}" if amount is not None else "amount missing"
+        formatted.append(f"{description or 'Unnamed line'} — {amount_label}")
+    return "; ".join(formatted)
 
 
 def preserve_expense_decisions(automatic: dict, stored: dict) -> None:
@@ -1245,6 +1697,7 @@ def deserialize_line_item(item: dict) -> LineItem:
         is_alcohol=bool(item.get("is_alcohol")),
         included=bool(item.get("included", True)),
         confidence=float(item.get("confidence") or 0.0),
+        confidence_reason=str(item.get("confidence_reason") or item.get("review_note") or ""),
         review_note=str(item.get("review_note") or ""),
         alcohol_confidence=float(item.get("alcohol_confidence") or 0.0),
         alcohol_reason=str(item.get("alcohol_reason") or ""),
@@ -1299,6 +1752,11 @@ def migrate_line_contract_fields(item: dict, mode: str) -> None:
     legacy_included = bool(item.get("included", True))
     item.setdefault("reviewed", False)
     item.setdefault("reviewed_at", None)
+    item.setdefault(
+        "confidence_reason",
+        item.get("review_note")
+        or f"Legacy extractor confidence {float(item.get('confidence') or 0.0) * 100:.0f}%.",
+    )
     if mode == "company":
         item["is_alcohol"] = False
         item["auto_is_alcohol"] = False
@@ -1352,6 +1810,11 @@ def migrate_receipt_contract_fields(receipt: dict, mode: str) -> None:
     receipt.setdefault("paid_by_overridden", False)
     receipt.setdefault("reviewed", False)
     receipt.setdefault("reviewed_at", None)
+    receipt.setdefault("extraction_changes", [])
+    receipt.setdefault("changes_acknowledged_at", None)
+    receipt.setdefault("extractor_version", "legacy-receipt-v1")
+    receipt.setdefault("review_rules_version", EXTRACTION_REVIEW_RULES_VERSION)
+    ensure_receipt_field_evidence(receipt)
     ensure_receipt_tax_lines(receipt)
     for item in receipt.get("line_items", []):
         if isinstance(item, dict):
@@ -1359,6 +1822,36 @@ def migrate_receipt_contract_fields(receipt: dict, mode: str) -> None:
     receipt["included"] = bool(
         receipt.get("included_in_ivado" if mode == "ivado" else "included_in_arvine", True)
     )
+
+
+def ensure_receipt_field_evidence(receipt: dict) -> None:
+    evidence = receipt.get("field_evidence")
+    if not isinstance(evidence, dict):
+        evidence = {}
+        receipt["field_evidence"] = evidence
+    overall = max(0.0, min(1.0, float(receipt.get("extraction_confidence") or 0.0)))
+    extractor_version = str(receipt.get("extractor_version") or "legacy-receipt-v1")
+    extracted = receipt.get("extracted") if isinstance(receipt.get("extracted"), dict) else {}
+    for field in EXPENSE_REVIEW_FIELDS - {"reviewed"}:
+        if isinstance(evidence.get(field), dict):
+            evidence[field].setdefault("extractor_version", extractor_version)
+            continue
+        value = extracted.get(field, receipt.get(field))
+        required_missing = field in REQUIRED_EXPENSE_FIELDS and value in (
+            None,
+            "",
+            "Unknown supplier",
+        )
+        confidence = 0.0 if required_missing else overall if value not in (None, "") else 1.0
+        evidence[field] = {
+            "confidence": round(confidence, 4),
+            "reason": (
+                "No value was extracted."
+                if required_missing
+                else f"Migrated legacy receipt confidence {confidence * 100:.0f}%."
+            ),
+            "extractor_version": extractor_version,
+        }
 
 
 def ensure_receipt_tax_lines(receipt: dict) -> None:
@@ -1606,6 +2099,7 @@ def load_line_item_review_state(trip_dir: Path) -> dict | None:
         2,
         3,
         4,
+        5,
         LINE_ITEM_REVIEW_VERSION,
     }:
         return None
@@ -1718,6 +2212,14 @@ def copy_receipt(receipt: dict) -> dict:
         extracted.setdefault(field, copied.get(field))
     copied["extracted"] = extracted
     copied["field_overrides"] = dict(receipt.get("field_overrides", {}))
+    copied["field_evidence"] = {
+        str(field): dict(values)
+        for field, values in receipt.get("field_evidence", {}).items()
+        if isinstance(values, dict)
+    }
+    copied["extraction_changes"] = [
+        dict(change) for change in receipt.get("extraction_changes", []) if isinstance(change, dict)
+    ]
     copied["overridden_fields"] = sorted(copied["field_overrides"])
     expense_type = str(copied.get("expense_type") or "other")
     extracted_type = str(extracted.get("expense_type") or "other")
@@ -1748,6 +2250,7 @@ def empty_line_item_review() -> dict:
         "quality": None,
         "mode": None,
         "receipts": [],
+        "exceptions": [],
         "summary": {
             "receipt_count": 0,
             "meal_receipt_count": 0,
@@ -1763,5 +2266,8 @@ def empty_line_item_review() -> dict:
             "line_review_count": 0,
             "blocking_count": 0,
             "field_issue_count": 0,
+            "exception_count": 0,
+            "exception_blocking_count": 0,
+            "exception_review_count": 0,
         },
     }

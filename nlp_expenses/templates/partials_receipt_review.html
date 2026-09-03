@@ -1,0 +1,399 @@
+{# Inputs: state, trip, trip_busy, line_review, receipt_quality #}
+        <section class="card line-item-card">
+          <div class="card-heading">
+            <div>
+              <p class="card-kicker">Step 3</p>
+              <h3>Extract and review receipts</h3>
+            </div>
+            {% if line_review.available %}
+              <span class="mode-badge">Last scan {{ line_review.synced_at|replace('T', ' ') }}</span>
+            {% endif %}
+          </div>
+          <p class="section-description">
+            Choose the receipt-reading method once, then review the extracted fields and meal items. The same method is reused
+            for reconciliation and Excel; statement parsing, matching, and workbook creation run locally.
+            When a statement has no exact CAD amount, the app may fetch a public weekly exchange rate and caches the evidence in the trip folder.
+          </p>
+          <div class="receipt-extraction">
+            <div>
+              <strong>Receipt extraction method</strong>
+              <span>This affects receipt fields and line items—not the Excel format or statement parser.</span>
+            </div>
+            <div class="quality-options">
+              <label class="quality-option {{ 'unavailable' if not state.system.openai_configured else '' }}">
+                <input type="radio" name="receipt-quality" value="best" {{ 'checked' if receipt_quality == 'best' else '' }}
+                  {{ 'disabled' if not state.system.openai_configured else '' }}>
+                <span>
+                  <strong>Best quality · OpenAI</strong>
+                  <small>
+                    Better for unclear scans, complex layouts, and foreign-language receipts. Requires a key and internet;
+                    receipt content is sent to OpenAI and API charges may apply.
+                  </small>
+                </span>
+              </label>
+              <label class="quality-option">
+                <input type="radio" name="receipt-quality" value="basic" {{ 'checked' if receipt_quality == 'basic' else '' }}>
+                <span>
+                  <strong>Basic / offline</strong>
+                  <small>
+                    Runs entirely on this Mac with OCR and local heuristics. No API key or API cost, but difficult scans
+                    are more likely to need manual correction.
+                  </small>
+                </span>
+              </label>
+            </div>
+            <div class="button-group">
+              <button class="button primary receipt-scan-button" id="sync-line-items-button"
+                data-only-unscanned="true"
+                {{ 'disabled' if trip_busy or not trip.receipts or trip.receipt_scan.unscanned_count == 0 }}>
+                {% if trip.receipt_scan.unscanned_count %}
+                  Scan {{ trip.receipt_scan.unscanned_count }} new/changed receipt{{ '' if trip.receipt_scan.unscanned_count == 1 else 's' }}
+                {% else %}
+                  All receipts scanned
+                {% endif %}
+              </button>
+              {% if line_review.available %}
+                <button class="button secondary receipt-scan-button" id="rescan-all-receipts-button"
+                  data-only-unscanned="false" {{ 'disabled' if trip_busy or not trip.receipts }}>
+                  Rescan all receipts
+                </button>
+              {% endif %}
+            </div>
+          </div>
+
+          {% if line_review.available %}
+            <div class="notice info">
+              <span>
+                Current receipt scan used
+                <strong>{{ 'Best quality · OpenAI' if line_review.quality == 'best' else 'Basic / offline' }}</strong>.
+                Rescanning with another method updates the automatic extraction; manual line choices are preserved for unchanged files.
+              </span>
+            </div>
+          {% endif %}
+          {% if not state.system.openai_configured %}
+            <div class="notice info">
+              <span>Best quality is unavailable until an OpenAI API key is saved locally in this project.</span>
+              <button class="button secondary small open-settings-button">Configure key</button>
+            </div>
+          {% endif %}
+          {% if not state.system.tesseract_available %}
+            <div class="notice warning">Basic/offline receipt scanning needs Tesseract. Install it with <code>brew install tesseract</code>, or use Best quality.</div>
+          {% endif %}
+
+          {% if trip.receipt_scan.unscanned_count %}
+            <div class="notice warning">
+              {{ trip.receipt_scan.unscanned_count }} new or changed receipt{{ '' if trip.receipt_scan.unscanned_count == 1 else 's' }} still need scanning.
+              Existing receipt reviews and card matches will be preserved.
+            </div>
+          {% elif line_review.stale %}
+            <div class="notice warning">The processing mode changed after the last scan. Rescan all receipts before editing, reconciling, or generating.</div>
+          {% endif %}
+
+          <div id="line-item-job-panel" class="job-panel {{ '' if state.line_item_job else 'hidden' }}">
+            <div class="progress-track"><span id="line-item-progress-bar"></span></div>
+            <div class="job-heading">
+              <strong id="line-item-job-message">{{ state.line_item_job.message if state.line_item_job else '' }}</strong>
+              <span id="line-item-job-status">{{ state.line_item_job.status|replace('_', ' ')|title if state.line_item_job else '' }}</span>
+            </div>
+            <div id="line-item-job-error" class="job-error">{{ state.line_item_job.error if state.line_item_job and state.line_item_job.error else '' }}</div>
+            <ul id="line-item-job-warnings">
+              {% if state.line_item_job %}{% for warning in state.line_item_job.warnings %}<li>{{ warning }}</li>{% endfor %}{% endif %}
+            </ul>
+          </div>
+
+          {% if line_review.available %}
+            <div class="line-review-summary">
+              <div><strong>{{ line_review.summary.line_count }}</strong><span>visible lines</span></div>
+              {% if trip.mode == 'ivado' %}
+                <div><strong>{{ line_review.summary.alcohol_count }}</strong><span>alcohol removed from IVADO</span></div>
+                <div><strong>{{ line_review.summary.excluded_count }}</strong><span>removed from IVADO</span></div>
+              {% endif %}
+              <div class="{{ 'review' if line_review.summary.review_count else '' }}"><strong id="receipt-review-count">{{ line_review.summary.review_count }}</strong><span>receipts need review</span></div>
+              <div><strong id="receipt-ok-count">{{ line_review.summary.ok_count }}</strong><span>receipts OK automatically</span></div>
+              <div><strong id="receipt-ready-count">{{ line_review.summary.ready_count }}</strong><span>receipts ready</span></div>
+            </div>
+            <div class="notice info">
+              {% if trip.mode == 'ivado' %}
+                The company report includes every uploaded receipt. Alcohol is identified only to remove it from the IVADO claim.
+              {% else %}
+                The company report includes every uploaded receipt. Alcohol classification and exclusions do not apply.
+              {% endif %}
+            </div>
+
+            <div class="exception-queue" id="receipt-exception-queue">
+              <div class="subsection-heading">
+                <div>
+                  <h4>Exceptions to review</h4>
+                  <p>Blocking and uncertain results appear once here; the complete extraction remains below.</p>
+                </div>
+                <span class="count-badge">{{ line_review.summary.exception_count }}</span>
+              </div>
+              {% if line_review.exceptions %}
+                <div class="exception-list">
+                  {% for exception in line_review.exceptions %}
+                    <article class="exception-item {{ exception.severity }}" data-exception-id="{{ exception.id }}">
+                      <div>
+                        <strong>{{ exception.label }}</strong>
+                        <span>{{ exception.source_file }} · {{ exception.message }}</span>
+                        {% if exception.reason %}<small>{{ exception.reason }}</small>{% endif %}
+                        {% if exception.confidence is not none %}<small>Confidence {{ (exception.confidence * 100)|round|int }}%</small>{% endif %}
+                      </div>
+                      <div class="button-group">
+                        <button type="button" class="button secondary small review-exception"
+                          data-source-file="{{ exception.source_file }}"
+                          data-field="{{ exception.field or '' }}"
+                          data-line-id="{{ exception.line_id or '' }}">Review</button>
+                        <a class="button secondary small" target="_blank" rel="noopener"
+                          href="/api/trips/{{ trip.name|urlencode }}/receipt?filename={{ exception.source_file|urlencode }}">Open source</a>
+                      </div>
+                    </article>
+                  {% endfor %}
+                </div>
+              {% else %}
+                <div class="notice success">No extraction exceptions remain. You can still inspect every value below.</div>
+              {% endif %}
+            </div>
+
+            <div class="receipt-collapse-tools">
+              <span>Receipt headers and totals stay visible when item details are collapsed.</span>
+              <div class="button-group">
+                <button type="button" class="button secondary small" id="collapse-all-receipts">Collapse all receipts</button>
+                <button type="button" class="button secondary small" id="expand-review-receipts">Expand receipts needing review</button>
+                <button type="button" class="button secondary small" id="expand-all-receipts">Expand all receipts</button>
+              </div>
+            </div>
+
+            <div class="line-receipt-list">
+              {% for receipt in line_review.receipts %}
+                <article id="receipt-{{ receipt.source_file }}" data-source-file="{{ receipt.source_file }}" class="line-receipt {{ 'needs-review' if receipt.exception_status != 'ready' else '' }}">
+                  <div class="line-receipt-heading">
+                    <div>
+                      <strong>{{ receipt.vendor or receipt.source_file }}</strong>
+                      <span>
+                        <button type="button" class="receipt-file-link receipt-preview" data-source-file="{{ receipt.source_file }}">{{ receipt.source_file }}</button>
+                        · {{ 'Meal' if receipt.is_meal else 'Travel – non-meal' }}
+                        {% if not receipt.is_meal and receipt.expense_type not in [none, 'other'] %}({{ receipt.expense_type }}){% endif %}
+                        · {{ receipt.currency or '' }} ·
+                        {{ receipt.number_of_people }} {{ 'person' if receipt.number_of_people == 1 else 'people' }} ·
+                        {% if trip.mode == 'ivado' %}
+                          {{ 'removed from IVADO' if not receipt.included_in_ivado else 'included in company report and IVADO' }}
+                        {% else %}
+                          included in company report
+                        {% endif %}
+                      </span>
+                      {% if receipt.field_issues %}<small class="field-issue">{{ receipt.field_issues|join(' · ') }}</small>{% endif %}
+                      <small>Extraction {{ receipt.exception_status|replace('_', ' ') }} · {{ (receipt.extraction_confidence * 100)|round|int }}% overall confidence</small>
+                    </div>
+                    <div class="line-receipt-actions">
+                      <label class="confirmation compact-confirmation" title="Meals use the meal deduction rate; all other travel costs use the normal rate.">
+                        <input type="checkbox" class="receipt-meal-toggle"
+                          data-source-file="{{ receipt.source_file }}"
+                          data-non-meal-type="{{ receipt.non_meal_expense_type }}"
+                          {{ 'checked' if receipt.is_meal }}
+                          {{ 'disabled' if trip_busy or line_review.stale }}>
+                        <span>Meal expense · {{ (trip.accounting_profile.meal_deduction_pct * 100)|round|int }}% deductible</span>
+                      </label>
+                      <div class="currency-review-form" data-source-file="{{ receipt.source_file }}">
+                        <label>
+                          Currency
+                          <input class="input currency-review-input" name="currency" list="currency-options"
+                            value="{{ receipt.currency or '' }}" data-saved-value="{{ receipt.currency or '' }}" placeholder="Search currency"
+                            {{ 'disabled' if trip_busy or line_review.stale }}>
+                        </label>
+                        <small class="inline-save-status" aria-live="polite"></small>
+                      </div>
+                      <div class="people-review-form" data-source-file="{{ receipt.source_file }}">
+                        <label>
+                          Employees sharing bill
+                          <input class="input people-review-input" name="number_of_people" type="number"
+                            min="1" max="99" step="1" value="{{ receipt.number_of_people }}"
+                            data-saved-value="{{ receipt.number_of_people }}"
+                            {{ 'disabled' if trip_busy or line_review.stale }}>
+                        </label>
+                        <small class="inline-save-status" aria-live="polite"></small>
+                      </div>
+                      <label class="review-check receipt-review-check {{ 'ready' if receipt.ready }}"
+                        title="{{ 'Correct required receipt fields before marking ready.' if receipt.field_issues else 'Resolve the receipt total before marking ready.' if receipt.blocking else 'Mark this receipt and all its lines as reviewed.' }}">
+                        <input type="checkbox" class="receipt-reviewed" data-source-file="{{ receipt.source_file }}"
+                          {{ 'checked' if receipt.reviewed }}
+                          {{ 'disabled' if trip_busy or line_review.stale or receipt.exception_status == 'blocking' }}>
+                        <span>{{ 'Ready' if receipt.ready else 'Review' }}</span>
+                      </label>
+                      <span class="match-badge receipt-status-badge {{ receipt.status }}" data-source-file="{{ receipt.source_file }}">{{ receipt.status|replace('_', ' ') }}</span>
+                      <button class="button secondary small edit-expense" data-source-file="{{ receipt.source_file }}"
+                        {{ 'disabled' if trip_busy or line_review.stale }}>Edit expense</button>
+                      <button class="button secondary small add-line-item" data-source-file="{{ receipt.source_file }}"
+                        {{ 'disabled' if trip_busy or line_review.stale }}>Add line</button>
+                      <button class="button secondary small reset-line-items" data-source-file="{{ receipt.source_file }}"
+                        {{ 'disabled' if trip_busy or line_review.stale }}>Reset automatic</button>
+                      <button type="button" class="button secondary small receipt-items-toggle"
+                        data-source-file="{{ receipt.source_file }}" data-item-count="{{ receipt.line_items|length }}"
+                        aria-expanded="true">Hide items</button>
+                    </div>
+                  </div>
+                  {% if receipt.extraction_changes %}
+                    <details class="extraction-diff" {{ 'open' if not receipt.changes_acknowledged_at else '' }}>
+                      <summary>Changes from the previous extraction ({{ receipt.extraction_changes|length }})</summary>
+                      <div class="extraction-diff-list">
+                        {% for change in receipt.extraction_changes %}
+                          <div>
+                            <strong>{{ change.label }}</strong>
+                            <span><del>{{ change.before if change.before not in [none, ''] else 'empty' }}</del> → <ins>{{ change.after if change.after not in [none, ''] else 'empty' }}</ins></span>
+                            {% if change.preserved_user_value %}<small>Your corrected value remains active.</small>{% endif %}
+                          </div>
+                        {% endfor %}
+                      </div>
+                      {% if receipt.changes_acknowledged_at %}
+                        <small>Acknowledged {{ receipt.changes_acknowledged_at|replace('T', ' ') }}</small>
+                      {% else %}
+                        <button type="button" class="button secondary small acknowledge-extraction-changes" data-source-file="{{ receipt.source_file }}">Acknowledge changes</button>
+                      {% endif %}
+                    </details>
+                  {% endif %}
+                  <div class="line-item-table-wrap">
+                    <table class="line-item-table">
+                      {% if trip.mode == 'ivado' %}
+                        <thead><tr><th>Reviewed</th><th>Receipt line</th><th>Amount</th><th>Alcohol</th><th>IVADO claim</th><th>IVADO exclusion / detection</th><th></th></tr></thead>
+                      {% else %}
+                        <thead><tr><th>Reviewed</th><th>Receipt line</th><th>Amount</th><th></th></tr></thead>
+                      {% endif %}
+                      <tbody>
+                        {% for item in receipt.line_items %}
+                          <tr id="line-{{ item.line_id }}" class="{{ 'system-line' if item.system_type else '' }} {{ 'excluded' if trip.mode == 'ivado' and not item.included_in_ivado else '' }} {{ 'needs-review' if item.exception_status != 'ready' else '' }}">
+                            <td>
+                              <label class="review-check {{ 'ready' if item.reviewed }}" title="Mark this receipt line as reviewed">
+                                <input type="checkbox" class="line-item-reviewed"
+                                  data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                                  {{ 'checked' if item.reviewed }} {{ 'disabled' if trip_busy or line_review.stale }}>
+                                <span>{{ 'Ready' if item.reviewed else 'Review' }}</span>
+                              </label>
+                            </td>
+                            <td>
+                              {% if item.system_type %}
+                                <strong class="system-line-label">{{ item.description }}</strong>
+                                <span class="synthetic-label">System tax line</span>
+                              {% else %}
+                                <input class="input compact-input line-item-description" value="{{ item.description }}"
+                                  data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                                  data-saved-value="{{ item.description }}" data-autosave-field="description"
+                                  {{ 'disabled' if trip_busy or line_review.stale }}>
+                                {% if item.synthetic %}<span class="synthetic-label">Generated review line</span>{% endif %}
+                              {% endif %}
+                              {% if item.inclusion_overridden %}<small>User inclusion override</small>{% endif %}
+                              {% if not item.system_type %}<small>{{ (item.confidence * 100)|round|int }}% confidence · {{ item.confidence_reason }}</small>{% endif %}
+                            </td>
+                            <td><input class="input compact-input line-item-amount" type="number" {% if item.system_type %}min="0"{% endif %} step="0.01"
+                              value="{{ '%.2f'|format(item.amount) if item.amount is not none else '' }}"
+                              data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                              data-saved-value="{{ '%.2f'|format(item.amount) if item.amount is not none else '' }}" data-autosave-field="amount"
+                              {{ 'disabled' if trip_busy or line_review.stale }}></td>
+                            {% if trip.mode == 'ivado' %}
+                              <td>
+                                {% if item.system_type %}
+                                  <span>No</span><small>Fixed tax row</small>
+                                {% else %}
+                                  <label class="alcohol-check">
+                                    <input type="checkbox" class="line-item-alcohol"
+                                      data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                                      {{ 'checked' if item.is_alcohol }} {{ 'disabled' if trip_busy or line_review.stale }}>
+                                    <span>{{ 'Alcohol' if item.is_alcohol else 'No' }}</span>
+                                  </label>
+                                  {% if item.alcohol_overridden %}<small>Corrected by user</small>{% endif %}
+                                {% endif %}
+                              </td>
+                              <td>
+                                {% if item.system_type %}
+                                  <span>Included</span><small>Follows the expense</small>
+                                {% else %}
+                                  <label class="include-switch" title="Included in IVADO sponsor claim">
+                                    <input type="checkbox" class="line-item-ivado"
+                                      data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                                      {{ 'checked' if item.included_in_ivado }}
+                                      {{ 'disabled' if trip_busy or line_review.stale or item.is_alcohol }}>
+                                    <span>{{ 'Included' if item.included_in_ivado else 'Removed' }}</span>
+                                  </label>
+                                {% endif %}
+                              </td>
+                              <td>
+                                {% if item.system_type %}
+                                  <strong>Structured tax</strong>
+                                  <small>Edit the amount here or in Edit expense.</small>
+                                {% elif item.is_alcohol %}
+                                  <strong>Alcohol — automatic</strong>
+                                  <small>Mark this line as not alcohol to include it in IVADO.</small>
+                                {% elif item.included_in_ivado %}
+                                  <span>Included — no exclusion</span>
+                                  <small>Turn off IVADO claim to choose an exclusion reason.</small>
+                                {% else %}
+                                  <select class="select compact-input line-item-ivado-reason"
+                                    data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                                    data-saved-value="{{ item.ivado_exclusion_reason or '' }}" data-autosave-field="ivado_exclusion_reason"
+                                    {{ 'disabled' if trip_busy or line_review.stale }}>
+                                    {% for value in ['non_business', 'policy_cap', 'missing_documentation', 'other'] %}
+                                      <option value="{{ value }}" {{ 'selected' if item.ivado_exclusion_reason == value }}>{{ value|replace('_', ' ')|title }}</option>
+                                    {% endfor %}
+                                  </select>
+                                  <small>Editable because this non-alcohol line is removed from IVADO.</small>
+                                {% endif %}
+                                <span>{{ item.alcohol_reason or 'No alcohol evidence' }}</span>
+                                {% if item.alcohol_matched_term %}<small>Matched “{{ item.alcohol_matched_term }}” · {{ (item.alcohol_confidence * 100)|round|int }}%</small>{% endif %}
+                              </td>
+                            {% endif %}
+                            <td class="line-actions">
+                              <small class="line-save-status" data-source-file="{{ receipt.source_file }}"
+                                data-line-id="{{ item.line_id }}" aria-live="polite"></small>
+                              {% if not item.system_type %}
+                                <button class="icon-button remove-line-item"
+                                  data-source-file="{{ receipt.source_file }}" data-line-id="{{ item.line_id }}"
+                                  title="Remove line" {{ 'disabled' if trip_busy or line_review.stale }}>×</button>
+                              {% endif %}
+                            </td>
+                          </tr>
+                        {% else %}
+                          <tr><td colspan="{{ 7 if trip.mode == 'ivado' else 4 }}" class="empty-line">No line items were extracted for this receipt. Add one manually.</td></tr>
+                        {% endfor %}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div class="line-totals" data-receipt-totals="{{ receipt.source_file }}">
+                    <div class="line-total-group">
+                      <small>Full bill</small>
+                      <span data-total-scope="full" data-total-kind="receipt">Receipt {{ '%.2f'|format(receipt.receipt_total) if receipt.receipt_total is not none else '—' }}</span>
+                      <span data-total-scope="full" data-total-kind="lines">Lines {{ '%.2f'|format(receipt.line_total) }}</span>
+                      <span data-total-scope="full" data-total-kind="company">Company {{ '%.2f'|format(receipt.arvine_included_total) }}</span>
+                      {% if trip.mode == 'ivado' %}
+                        <span data-total-scope="full" data-total-kind="ivado">IVADO {{ '%.2f'|format(receipt.ivado_included_total) }}</span>
+                        <span data-total-scope="full" data-total-kind="removed">IVADO removed {{ '%.2f'|format(receipt.ivado_excluded_total) }}</span>
+                      {% endif %}
+                    </div>
+                    {% if receipt.number_of_people > 1 %}
+                      <div class="line-total-group per-person-totals">
+                        <small>Per employee (÷ {{ receipt.number_of_people }})</small>
+                        <span data-total-scope="person" data-total-kind="receipt">Receipt {{ '%.2f'|format(receipt.per_person_receipt_total) if receipt.per_person_receipt_total is not none else '—' }}</span>
+                        <span data-total-scope="person" data-total-kind="lines">Lines {{ '%.2f'|format(receipt.per_person_line_total) }}</span>
+                        <span data-total-scope="person" data-total-kind="company">Company {{ '%.2f'|format(receipt.per_person_arvine_included_total) }}</span>
+                        {% if trip.mode == 'ivado' %}
+                          <span data-total-scope="person" data-total-kind="ivado">IVADO {{ '%.2f'|format(receipt.per_person_ivado_included_total) }}</span>
+                          <span data-total-scope="person" data-total-kind="removed">IVADO removed {{ '%.2f'|format(receipt.per_person_ivado_excluded_total) }}</span>
+                        {% endif %}
+                      </div>
+                    {% endif %}
+                    <strong data-total-kind="difference" class="{{ 'hidden' if receipt.difference is none or not receipt.difference else '' }}">Difference {{ '%+.2f'|format(receipt.difference or 0) }}</strong>
+                  </div>
+                  {% if receipt.blocking %}
+                    <div class="notice error">Excluded lines cannot be allocated safely until this receipt reconciles without an unreadable balancing line.</div>
+                  {% elif receipt.automatic_status == 'review' %}
+                    <div class="notice warning">Review the generated balancing line or receipt total. No exclusion is blocked unless claimable lines are deactivated.</div>
+                  {% elif receipt.status == 'review' %}
+                    <div class="notice info">Check the receipt fields and lines, then use the Reviewed checkmark to move this expense to Ready.</div>
+                  {% endif %}
+                </article>
+              {% endfor %}
+            </div>
+          {% else %}
+            <div class="empty reconciliation-empty">
+              <p><strong>No line-item scan has been run yet.</strong></p>
+              <p>Scan the receipts to review alcohol and choose which meal items belong in the claim.</p>
+            </div>
+          {% endif %}
+        </section>

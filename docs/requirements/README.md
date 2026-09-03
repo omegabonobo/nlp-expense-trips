@@ -28,6 +28,9 @@ documentation are complete.
 | R012 | [IVADO frontend parity](R012-ivado-frontend-parity.md) | P2 | Implemented | R001–R009 |
 | R015 | [App-first consolidation and finalization](R015-app-first-consolidation-and-finalization.md) | P0 | Implemented | R002–R014 |
 | R016 | [Minimal trip reimbursement contract and reports](R016-two-stage-trip-reimbursement-contract.md) | P0 | Implemented | R011, R013, R015 |
+| R017 | [Frontend modularity and browser reliability](R017-frontend-modularity-and-browser-reliability.md) | P0 | Implemented | R015 |
+| R019 | [Robust statement CSV ingestion](R019-robust-statement-csv-ingestion.md) | P0 | Implemented | R007, R009 |
+| R018 | [Exception-driven extraction review](R018-exception-driven-extraction-review.md) | P1 | Implemented | R013, R017 |
 
 ## Shared completion rules
 

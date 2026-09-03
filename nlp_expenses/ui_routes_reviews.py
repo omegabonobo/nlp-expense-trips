@@ -12,6 +12,7 @@ from nlp_expenses.consolidation import (
 )
 from nlp_expenses.jobs import JobManager
 from nlp_expenses.line_items import (
+    acknowledge_extraction_changes,
     add_line_item,
     ensure_line_item_review_ready,
     line_item_review_view,
@@ -157,6 +158,17 @@ def add_receipt_line(trip_name: str):
             data.get("amount"),
             included=bool(data.get("included", True)),
             is_alcohol=bool(data.get("is_alcohol", False)),
+        )
+    return jsonify({"line_item_review": view})
+
+
+@review_routes.post("/api/trips/<trip_name>/line-items/changes")
+def acknowledge_line_item_changes(trip_name: str):
+    data = request.get_json(silent=True) or {}
+    with jobs.mutation_guard(trip_name):
+        view = acknowledge_extraction_changes(
+            resolve_trip(root, trip_name),
+            str(data.get("source_file") or ""),
         )
     return jsonify({"line_item_review": view})
 

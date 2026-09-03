@@ -44,6 +44,13 @@ The main commands are:
 | `make check` | Run lint, formatting verification, and tests. |
 | `make build` | Create an sdist and wheel under `dist/`. |
 | `make package-check` | Build and verify all runtime/contributor archive assets. |
+| `make benchmark-extraction` | Compare Basic and Best on the versioned synthetic receipt set. |
+
+The extraction benchmark contains synthetic receipt text only—never customer,
+traveller, card, or banking data. Its JSON report is suitable for comparing
+field coverage, accuracy, line-total agreement, exception counts, runtime, and
+extractor versions between releases. Best quality requires the developer's
+locally configured OpenAI key.
 
 GitHub CI runs the same checks on the minimum supported Python 3.11, the local
 development series 3.12, and the current stable series 3.14. The 3.14 job also

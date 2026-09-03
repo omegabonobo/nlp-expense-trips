@@ -19,7 +19,10 @@ from nlp_expenses.lifecycle import (
 from nlp_expenses.reconciliation import (
     reconciliation_view,
 )
-from nlp_expenses.statement_normalizer import set_statement_date_convention
+from nlp_expenses.statement_normalizer import (
+    set_statement_date_convention,
+    set_statement_import_profile,
+)
 from nlp_expenses.trip_metadata import (
     normalize_claim_program,
     save_policy_exception,
@@ -218,6 +221,29 @@ def update_statement_date_convention(trip_name: str):
             trip,
             str(data.get("filename", "")),
             str(data.get("convention", "")),
+        )
+    return jsonify({"trip": trip_details(root, trip_name)})
+
+
+@trip_routes.post("/api/trips/<trip_name>/statement-import-profile")
+def update_statement_import_profile(trip_name: str):
+    data = request.get_json(silent=True) or {}
+    mapping = data.get("mapping")
+    if not isinstance(mapping, dict):
+        raise ValueError("Statement column mapping must be submitted as an object.")
+    try:
+        header_row = int(data.get("header_row", 0))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Header row must be a number.") from exc
+    with jobs.mutation_guard(trip_name):
+        trip = resolve_trip(root, trip_name)
+        set_statement_import_profile(
+            trip,
+            str(data.get("filename", "")),
+            header_row=header_row,
+            mapping=mapping,
+            sign_convention=str(data.get("sign_convention", "")),
+            date_convention=str(data.get("date_convention", "")),
         )
     return jsonify({"trip": trip_details(root, trip_name)})
 

@@ -1,0 +1,107 @@
+{# Inputs: state, trip, trip_busy #}
+        <section class="card workbooks-card">
+          <div class="card-heading">
+            <div>
+              <p class="card-kicker">Output</p>
+              <h3>Generated report bundle</h3>
+            </div>
+            <span class="count-badge">{{ trip.workbooks|length }}</span>
+          </div>
+          <div class="workbook-list">
+            {% for workbook in trip.workbooks %}
+              <div class="workbook-row">
+                <div>
+                  <strong>{{ workbook.name }}</strong>
+                  <span>{{ workbook.modified|replace('T', ' ') }} · {{ (workbook.size / 1024)|round(1) }} KB</span>
+                </div>
+                <div class="button-group">
+                  <button class="button primary open-workbook" data-filename="{{ workbook.name }}">Open in Excel</button>
+                  <button class="button secondary reveal-workbook" data-filename="{{ workbook.name }}">Finder</button>
+                  <a class="button secondary" href="/api/trips/{{ trip.name|urlencode }}/download-workbook?filename={{ workbook.name|urlencode }}">Download</a>
+                </div>
+              </div>
+            {% else %}
+              <div class="empty"><p>No workbook generated yet.</p></div>
+            {% endfor %}
+            {% for manifest in trip.manifests %}
+              <div class="workbook-row">
+                <div>
+                  <strong>{{ manifest.name }}</strong>
+                  <span>Shared accounting contract · {{ (manifest.size / 1024)|round(1) }} KB</span>
+                </div>
+                <div class="button-group">
+                  <a class="button secondary" href="/api/trips/{{ trip.name|urlencode }}/download-manifest?filename={{ manifest.name|urlencode }}">Download</a>
+                </div>
+              </div>
+            {% endfor %}
+          </div>
+        </section>
+
+        <section class="card lifecycle-card">
+          <div class="card-heading">
+            <div>
+              <p class="card-kicker">Review lifecycle</p>
+              <h3>{{ trip.lifecycle.label }}</h3>
+            </div>
+            <span class="lifecycle-badge {{ trip.lifecycle.status }}">{{ trip.lifecycle.label }}</span>
+          </div>
+          <p class="section-description">{{ trip.lifecycle.reason }}</p>
+          {% if trip.lifecycle.approval %}
+            <div class="approval-record {{ 'current' if trip.lifecycle.approval.current else 'stale' }}">
+              <strong>
+                {{ 'Current approval' if trip.lifecycle.approval.current else 'Prior approval — trip changed afterwards' }}
+              </strong>
+              <span>
+                {{ trip.lifecycle.approval.approved_at|replace('T', ' ') }} ·
+                {{ trip.lifecycle.approval.reviewer }} ·
+                {{ trip.lifecycle.approval.workbook }}
+              </span>
+              <small>{{ trip.lifecycle.approval.note }}</small>
+            </div>
+          {% endif %}
+          {% if trip.lifecycle.current_generation %}
+            <div class="notice info">
+              <span>
+                Current bundle: <strong>{{ trip.lifecycle.current_generation.workbook }}</strong>
+                {% if trip.lifecycle.current_generation.artifacts %}
+                  + {{ trip.lifecycle.current_generation.artifacts|length - 1 }} synchronized artifact(s)
+                {% endif %}
+                {% if trip.lifecycle.current_generation.manually_modified %} · manually updated after generation{% endif %}
+              </span>
+            </div>
+          {% endif %}
+          <div class="lifecycle-actions">
+            {% if trip.lifecycle.archived %}
+              <button class="button primary archive-trip-button" data-archived="false">Restore trip</button>
+            {% else %}
+              <button class="button primary" id="open-approval-button"
+                {{ 'disabled' if trip_busy or not trip.lifecycle.current_generation or trip.metadata_gaps }}>
+                {{ 'Approve current version' if trip.lifecycle.approval else 'Approve trip' }}
+              </button>
+              <button class="button secondary" id="export-package-button"
+                {{ 'disabled' if trip_busy or not trip.lifecycle.approval_current }}>
+                Export approved ZIP
+              </button>
+              <button class="button secondary archive-trip-button" data-archived="true" {{ 'disabled' if trip_busy }}>Archive trip</button>
+            {% endif %}
+          </div>
+          {% if trip.packages %}
+            <div class="package-list">
+              {% for package in trip.packages %}
+                <div>
+                  <span>{{ package.name }} · {{ (package.size / 1024)|round(1) }} KB</span>
+                  <a class="button secondary small" href="/api/trips/{{ trip.name|urlencode }}/download-package?filename={{ package.name|urlencode }}">Download</a>
+                </div>
+              {% endfor %}
+            </div>
+          {% endif %}
+          <div class="trip-danger-zone">
+            <div>
+              <strong>Delete trip and all data</strong>
+              <span>Permanently remove receipts, statements, reviews, generated reports, manifests, and packages.</span>
+            </div>
+            <button class="button danger" id="open-delete-trip-button" {{ 'disabled' if trip_busy }}>
+              Delete trip
+            </button>
+          </div>
+        </section>

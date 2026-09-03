@@ -439,6 +439,53 @@ class UITests(unittest.TestCase):
         self.assertEqual(validation["date_convention"], "month_first")
         self.assertIn("2026-07-01", validation["date_samples"][0])
 
+    def test_ambiguous_statement_columns_can_be_mapped_and_previewed(self):
+        trip = ensure_trip(self.root, "202607_statement-mapping", mode="arvine")
+        statement = (
+            b"Example Card export\n"
+            b"When,Merchant Label,Txn Value,ISO Code\n"
+            b"13/07/2026,TRAIN,-45.20,CAD\n"
+        )
+        uploaded = self.client.post(
+            f"/api/trips/{trip.name}/upload/statements",
+            data={"files": (BytesIO(statement), "custom.csv")},
+            content_type="multipart/form-data",
+            headers=self.headers,
+        )
+        self.assertEqual(uploaded.status_code, 200)
+        validation = uploaded.get_json()["trip"]["statements"][0]["validation"]
+        self.assertTrue(validation["mapping_required"])
+        self.assertTrue(validation["errors"])
+        self.assertEqual(validation["header_row"], 2)
+
+        mapped = self.client.post(
+            f"/api/trips/{trip.name}/statement-import-profile",
+            json={
+                "filename": "custom.csv",
+                "header_row": 2,
+                "mapping": {
+                    "transaction_date": 0,
+                    "description": 1,
+                    "amount": 2,
+                    "settlement_currency": 3,
+                },
+                "sign_convention": "negative_purchase",
+                "date_convention": "day_first",
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(mapped.status_code, 200)
+        validation = mapped.get_json()["trip"]["statements"][0]["validation"]
+        self.assertFalse(validation["errors"])
+        self.assertTrue(validation["profile_reused"])
+        self.assertEqual(validation["preview"][0]["description"], "TRAIN")
+        self.assertEqual(validation["preview"][0]["settlement_amount"], 45.20)
+
+        html = self.client.get(f"/?trip={trip.name}").get_data(as_text=True)
+        self.assertIn("Review statement mapping", html)
+        self.assertIn("saved mapping reused", html)
+        self.assertIn("Row 3", html)
+
     def test_generation_gates_and_progress_polling(self):
         trip = ensure_trip(self.root, "202607_montreal", mode="arvine")
         no_receipt = self.client.post(
@@ -493,6 +540,22 @@ class UITests(unittest.TestCase):
             load_workbook(workbook_path, read_only=True).sheetnames,
             ["Expense Report", "Accounting Rows"],
         )
+        accounting = load_workbook(workbook_path, data_only=False)["Accounting Rows"]
+        self.assertEqual(
+            [accounting.cell(row, 4).value for row in range(2, 8)],
+            [
+                "Travel – Non-meal",
+                "Meals – Deductible (50%)",
+                "Meals – Non-deductible (50%)",
+                "GST Receivable",
+                "QST Receivable",
+                "Shareholder Current Account",
+            ],
+        )
+        self.assertEqual(accounting["B2"].value, "Expense report – Client workshop")
+        self.assertEqual(accounting["B7"].value, "Florent - Client workshop")
+        self.assertEqual(accounting["C7"].value, "Payment of business trip")
+        self.assertEqual(accounting["E7"].value, "Bank – Checking")
         manifest_path = trip / "trip-reimbursement-manifest.v3.ndjson"
         records = [
             json.loads(line)
@@ -597,7 +660,7 @@ class UITests(unittest.TestCase):
         self.assertEqual(bistro_row[14], 20)
         self.assertEqual(bistro_row[15], 95)
         self.assertEqual(bistro_row[16], 20)
-        self.assertEqual(bistro_row[17], 95)
+        self.assertEqual(bistro_row[17], 115)
         self.assertNotIn("Receipt Line", {value for row in rows for value in row})
         records = [
             json.loads(line)
@@ -608,12 +671,56 @@ class UITests(unittest.TestCase):
         ]
         receipt_record = records[0]
         report_record = records[-1]
-        self.assertEqual(receipt_record["arvine_reimbursable_cad"], 95)
+        self.assertEqual(receipt_record["arvine_reimbursable_cad"], 115)
         self.assertEqual(receipt_record["ivado_claimable_cad"], 95)
         self.assertEqual(receipt_record["ivado_excluded_cad"], 20)
+        self.assertEqual(report_record["employee_reimbursement_total_cad"], 115)
+        self.assertEqual(report_record["ivado_claim_total_cad"], 95)
+
+        accounting = load_workbook(primary, data_only=False)["Accounting Rows"]
+        posting_rows = [
+            tuple(accounting.cell(row, column).value for column in range(2, 7))
+            for row in range(2, 7)
+        ]
         self.assertEqual(
-            report_record["employee_reimbursement_total_cad"],
-            report_record["ivado_claim_total_cad"],
+            posting_rows,
+            [
+                (
+                    "Florent",
+                    "Reimbursable travel expense (passthrough IVADO)",
+                    "Expenses Recoverable from Clients",
+                    "Shareholder Current Account",
+                    95,
+                ),
+                (
+                    "Florent",
+                    "Arvine-borne alcohol – deductible 50%",
+                    "Meals – Deductible (50%)",
+                    "Shareholder Current Account",
+                    10,
+                ),
+                (
+                    "Florent",
+                    "Arvine-borne alcohol – non-deductible 50%",
+                    "Meals – Non-deductible (50%)",
+                    "Shareholder Current Account",
+                    10,
+                ),
+                (
+                    "IVADO Labs",
+                    "Client workshop - Invoice sent to IL by Arvine",
+                    "Accounts Receivable",
+                    "Expenses Recoverable from Clients",
+                    95,
+                ),
+                (
+                    "IVADO Labs",
+                    "Client workshop - Reimbursement from IL",
+                    "Bank – Checking",
+                    "Accounts Receivable",
+                    95,
+                ),
+            ],
         )
 
     def test_workbook_generation_inherits_the_receipt_scan_quality(self):

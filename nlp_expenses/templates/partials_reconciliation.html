@@ -1,0 +1,349 @@
+{# Inputs: state, trip, trip_busy, reconciliation #}
+        <section id="reconciliation" class="card reconciliation-card">
+            <div class="card-heading">
+              <div>
+                <p class="card-kicker">Step 4</p>
+                <h3>Reconcile invoices and card statements</h3>
+              </div>
+              {% if reconciliation.available %}
+                <span class="mode-badge">Last sync {{ reconciliation.synced_at|replace('T', ' ') }} · {{ 'unmatched only' if reconciliation.sync_scope == 'unmatched' else 'all automatic matches' }}</span>
+              {% endif %}
+            </div>
+            <p class="section-description">
+              Match only receipts that do not have a card transaction yet. Existing mappings—including manual matches—stay unchanged.
+            </p>
+            <div class="reconciliation-toolbar">
+              <div class="inherited-method">
+                <span>Receipt extraction inherited from Step 3</span>
+                <strong>
+                  {{ 'Best quality · OpenAI' if line_review.available and line_review.quality == 'best'
+                    else 'Basic / offline' if line_review.available
+                    else 'Scan receipts first' }}
+                </strong>
+                <small>Card-statement parsing and matching run locally. Public weekly FX data is fetched only when no exact CAD amount exists.</small>
+              </div>
+              <button class="button primary" id="sync-reconciliation-button"
+                {{ 'disabled' if trip_busy or not trip.receipts or not trip.statements or trip.statement_errors or line_review_required else '' }}>
+                Sync unmatched receipts
+              </button>
+              {% if reconciliation.available %}
+                <button class="button secondary" id="rebuild-reconciliation-button"
+                  title="Recalculate automatic matches for every receipt; manual matches remain protected."
+                  {{ 'disabled' if trip_busy or not trip.receipts or not trip.statements or trip.statement_errors or line_review_required else '' }}>
+                  Rebuild automatic matches
+                </button>
+              {% endif %}
+            </div>
+
+            {% if line_review_required %}
+              <div class="notice warning">Scan the current receipts in Step 3 before reconciliation.</div>
+            {% endif %}
+            {% if reconciliation.stale %}
+              <div class="notice warning">Receipts or statements changed after the last sync. Sync again before reviewing the mappings.</div>
+            {% endif %}
+
+            <div id="reconciliation-job-panel" class="job-panel {{ '' if state.reconciliation_job else 'hidden' }}">
+              <div class="progress-track"><span id="reconciliation-progress-bar"></span></div>
+              <div class="job-heading">
+                <strong id="reconciliation-job-message">{{ state.reconciliation_job.message if state.reconciliation_job else '' }}</strong>
+                <span id="reconciliation-job-status">{{ state.reconciliation_job.status|replace('_', ' ')|title if state.reconciliation_job else '' }}</span>
+              </div>
+              <div id="reconciliation-job-error" class="job-error">{{ state.reconciliation_job.error if state.reconciliation_job and state.reconciliation_job.error else '' }}</div>
+              <ul id="reconciliation-job-warnings">
+                {% if state.reconciliation_job %}{% for warning in state.reconciliation_job.warnings %}<li>{{ warning }}</li>{% endfor %}{% endif %}
+              </ul>
+            </div>
+
+            {% if reconciliation.available %}
+              <div class="reconciliation-summary">
+                <div><strong>{{ reconciliation.summary.matched_invoice_count }}/{{ reconciliation.summary.invoice_count }}</strong><span>invoices matched</span></div>
+                <div><strong>{{ reconciliation.summary.matched_transaction_count }}/{{ reconciliation.summary.transaction_count }}</strong><span>card transactions mapped</span></div>
+                <div class="{{ 'review' if reconciliation.summary.needs_review_count else '' }}"><strong>{{ reconciliation.summary.needs_review_count }}</strong><span>items need review</span></div>
+              </div>
+
+              {% if trip.mode == 'company' %}
+              <div class="coverage-panel">
+                <div class="subsection-heading">
+                  <div>
+                    <h4>Statement coverage</h4>
+                    <p>Evidence for the “all statements added” confirmation.</p>
+                  </div>
+                </div>
+                <div class="coverage-grid">
+                  {% for account in reconciliation.coverage.accounts %}
+                    <div class="coverage-account {{ 'review' if account.unresolved_duplicate_count else '' }}">
+                      <strong>{{ account.label }}</strong>
+                      <span>
+                        {{ account.earliest_date or 'date unavailable' }} → {{ account.latest_date or 'date unavailable' }}
+                      </span>
+                      <small>
+                        {{ account.transaction_count }} transactions · {{ account.match_eligible_count }} match eligible ·
+                        {{ account.source_files|join(', ') }}
+                      </small>
+                      {% if account.overlapping_files %}<small>Overlapping file date ranges</small>{% endif %}
+                    </div>
+                  {% else %}
+                    <p class="empty-line">No normalized statement coverage is available.</p>
+                  {% endfor %}
+                </div>
+                {% if reconciliation.coverage.expected_start %}
+                  <p class="coverage-window">
+                    Expected trip coverage:
+                    <strong>{{ reconciliation.coverage.expected_start }} → {{ reconciliation.coverage.expected_end }}</strong>
+                    {% if reconciliation.coverage.buffer_days %}({{ reconciliation.coverage.buffer_days }} day buffer){% endif %}
+                  </p>
+                {% else %}
+                  <p class="coverage-window">Add trip start and end dates to validate statement coverage against the travel window.</p>
+                {% endif %}
+                <label class="field-label coverage-expected">
+                  Accounts expected for this trip (optional)
+                  <small>
+                    Completeness checklist only; this does not affect transaction matching. Add every card or
+                    account that should have a statement above, one per line. We will flag any missing account.
+                  </small>
+                  <textarea class="input" id="expected-accounts" rows="3" placeholder="AMEX ••••1003">{{ reconciliation.coverage.expected_accounts|join('\n') }}</textarea>
+                </label>
+                <button class="button secondary small" id="save-coverage-settings" {{ 'disabled' if trip_busy }}>Save completeness checklist</button>
+                {% if reconciliation.coverage.gaps %}
+                  <div class="notice warning coverage-gaps">
+                    <div>
+                      <strong>Coverage gaps need acknowledgement</strong>
+                      {% for gap in reconciliation.coverage.gaps %}<span>{{ gap.message }}</span>{% endfor %}
+                    </div>
+                  </div>
+                {% endif %}
+              </div>
+              {% endif %}
+
+              {% if reconciliation.policy_warnings %}
+                <div class="policy-warning-panel">
+                  <div class="subsection-heading">
+                    <div>
+                      <h4>Policy review</h4>
+                      <p>Warnings stay visible; a documented exception resolves them for approval.</p>
+                    </div>
+                  </div>
+                  {% for warning in reconciliation.policy_warnings %}
+                    <div class="policy-warning-row {{ 'resolved' if warning.resolved else '' }}">
+                      <div>
+                        <strong>{{ warning.message }}</strong>
+                        {% if warning.exception_note %}<span>Exception: {{ warning.exception_note }}</span>{% endif %}
+                      </div>
+                      <button class="button secondary small policy-exception"
+                        data-warning-id="{{ warning.id }}"
+                        data-note="{{ warning.exception_note }}"
+                        {{ 'disabled' if trip_busy }}>
+                        {{ 'Edit exception' if warning.resolved else 'Document exception' }}
+                      </button>
+                    </div>
+                  {% endfor %}
+                </div>
+              {% endif %}
+
+              <div class="review-subsection">
+                <div class="subsection-heading">
+                  <div>
+                    <h4>Receipt and card matches</h4>
+                    <p>Review each receipt and its card transaction in one place. Strong same-date, same-amount matches are assumed OK but remain editable.</p>
+                  </div>
+                </div>
+                <div class="reconciliation-table-wrap">
+                  <table class="reconciliation-table invoice-review-table">
+                  <thead>
+                    <tr>
+                      <th>Invoice</th>
+                      <th>Receipt total</th>
+                      <th>Status</th>
+                      <th>CAD used and FX</th>
+                      <th>Card match</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for expense in reconciliation.expenses %}
+                      <tr class="{{ 'needs-review' if expense.review_status == 'review' else '' }}">
+                        <td>
+                          <strong>{{ expense.vendor or expense.source_file }}</strong>
+                          <span>{{ expense.date or 'date missing' }} · {{ expense.expense_type or 'type missing' }}</span>
+                          <button type="button" class="receipt-file-link receipt-preview" data-source-file="{{ expense.source_file }}">{{ expense.source_file }}</button>
+                        </td>
+                        <td>
+                          <strong>{{ '%.2f'|format(expense.amount) if expense.amount is not none else '?' }} {{ expense.currency or '' }}</strong>
+                          {% if expense.overridden_fields %}
+                            <span class="override-note">Overridden: {{ expense.overridden_fields|join(', ') }}</span>
+                          {% endif %}
+                        </td>
+                        <td>
+                          <span class="match-badge {{ expense.review_status }}">{{ expense.review_status|replace('_', ' ') }}</span>
+                          {% if expense.review_note %}<small title="{{ expense.review_note }}">{{ expense.review_note }}</small>{% endif %}
+                        </td>
+                        <td>
+                          {% if expense.cad_amount_used is not none %}
+                            <strong>{{ '%.2f'|format(expense.cad_amount_used) }} CAD</strong>
+                            <span>
+                              {% if expense.cad_source == 'manual' %}Manual override
+                              {% elif expense.cad_source == 'statement_aggregated' %}Aggregated statement CAD
+                              {% elif expense.cad_source == 'statement' %}Exact statement CAD
+                              {% else %}CAD invoice total{% endif %}
+                            </span>
+                            {% if expense.fx_rate is not none %}<small>FX {{ '%.6f'|format(expense.fx_rate) }}</small>{% endif %}
+                            {% if expense.statement_receipt_difference is not none and expense.statement_receipt_difference > 0.005 %}
+                              <small>Includes {{ '%.2f'|format(expense.statement_receipt_difference) }} {{ expense.statement_purchase_currency }} above the receipt (tip or adjustment).</small>
+                            {% endif %}
+                          {% else %}
+                            <strong>Unavailable</strong>
+                            <span>Map complete statement funding or add a manual CAD amount</span>
+                          {% endif %}
+                        </td>
+                        <td class="receipt-match-cell">
+                          {% if expense.statement_matches %}
+                            <div class="current-matches">
+                              {% for match in expense.statement_matches %}
+                                <div class="current-match-card">
+                                  <div class="current-match-details">
+                                    <strong>{{ match.description or 'No description' }}</strong>
+                                    <span>{{ match.transaction_date or 'date missing' }} · {{ match.provider|upper }} {{ match.account_label }}</span>
+                                    <small>
+                                      {{ '%.2f'|format(match.purchase_amount) if match.purchase_amount is not none else '?' }} {{ match.purchase_currency or '' }} ·
+                                      {% if match.cad_amount is not none %}{{ '%.2f'|format(match.cad_amount) }} CAD{% else %}CAD unavailable{% endif %}
+                                    </small>
+                                  </div>
+                                  {% if match.allocation_status in [none, 'none'] %}
+                                    <button type="button" class="receipt-unmatch" data-group-id="{{ match.group_id }}" title="Remove this match">×</button>
+                                  {% endif %}
+                                </div>
+                                {% if trip.mode == 'company' and match.cad_completeness == 'complete' %}
+                                  <button class="button secondary small edit-allocations" data-group-id="{{ match.group_id }}"
+                                    {{ 'disabled' if trip_busy or reconciliation.stale }}>
+                                    {{ 'Edit split' if match.allocation_status not in [none, 'none'] else 'Split / allocate' }}
+                                  </button>
+                                {% endif %}
+                              {% endfor %}
+                            </div>
+                            {% if expense.number_of_people > 1 %}
+                              <div class="statement-basis-review" data-source-file="{{ expense.source_file }}">
+                                <label>
+                                  <span>Card amount represents</span>
+                                  <select class="select statement-basis-select">
+                                    <option value="full_receipt" {{ 'selected' if expense.statement_amount_basis == 'full_receipt' }}>Full group receipt</option>
+                                    <option value="personal_share" {{ 'selected' if expense.statement_amount_basis == 'personal_share' }}>Traveller personal share</option>
+                                  </select>
+                                </label>
+                                <small>
+                                  {% if expense.statement_amount_basis == 'personal_share' %}
+                                    The matched card charge is already one traveller’s share. Its effective CAD rate is applied to the reviewed alcohol-free share without dividing the card amount again.
+                                  {% else %}
+                                    The matched card charge covers the group receipt and is divided across {{ expense.number_of_people }} travellers.
+                                  {% endif %}
+                                </small>
+                              </div>
+                            {% endif %}
+                            {% if expense.review_status == 'review' and expense.statement_matches|length == 1 and not reconciliation.stale %}
+                              <button type="button" class="button primary small confirm-receipt-match"
+                                data-source-file="{{ expense.source_file }}"
+                                data-group-id="{{ expense.statement_matches[0].group_id }}"
+                                {{ 'disabled' if trip_busy }}>Confirm current match</button>
+                            {% endif %}
+                          {% else %}
+                            <small>No card transaction matched yet.</small>
+                          {% endif %}
+                          {% if reconciliation.stale %}
+                            <button type="button" class="button secondary small resync-card-matcher"
+                              {{ 'disabled' if trip_busy }}>Resync to search card transactions</button>
+                            <small>The receipt changed after the last sync. Refresh matching before choosing a transaction.</small>
+                          {% else %}
+                            <button type="button" class="button secondary small open-receipt-matcher"
+                              data-source-file="{{ expense.source_file }}" {{ 'disabled' if trip_busy }}>
+                              {{ 'Change card match' if expense.statement_matches else 'Match card transaction' }}
+                            </button>
+                            <small>
+                              {{ expense.match_suggestions|length }} prioritized transaction(s). Exact totals may differ because of tips; search every uploaded card in the matcher.
+                            </small>
+                          {% endif %}
+                        </td>
+                        <td>
+                          <button class="button secondary edit-expense" data-source-file="{{ expense.source_file }}"
+                            {{ 'disabled' if trip_busy else '' }}>Edit expense</button>
+                        </td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                  </table>
+                </div>
+
+              </div>
+
+              <div id="unmatched-statements" class="review-subsection">
+                <div class="subsection-heading">
+                  <div>
+                    <h4>Statement transactions without a receipt</h4>
+                    <p>Use this list to spot missing receipts. Click × to remove an unrelated or duplicate charge; excluded transactions can be restored below.</p>
+                  </div>
+                </div>
+                {% if reconciliation.unmatched_transactions %}
+                  <div class="reconciliation-table-wrap">
+                    <table class="reconciliation-table unmatched-statement-table">
+                      <thead><tr><th>Card transaction</th><th>Statement amount</th><th>Status</th><th>Action</th></tr></thead>
+                      <tbody>
+                        {% for transaction in reconciliation.unmatched_transactions %}
+                          <tr>
+                            <td>
+                              <strong>{{ transaction.description or 'No description' }}</strong>
+                              <span>{{ transaction.transaction_date or 'date missing' }} · {{ transaction.provider|upper }} {{ transaction.account_label }}</span>
+                              <small>{% for source in transaction.source_rows %}{{ source.file }} row {{ source.row }}{{ ' · ' if not loop.last else '' }}{% endfor %}</small>
+                            </td>
+                            <td>
+                              <strong>{{ '%.2f'|format(transaction.purchase_amount) if transaction.purchase_amount is not none else '?' }} {{ transaction.purchase_currency or '' }}</strong>
+                              <span>{% if transaction.cad_amount is not none %}{{ '%.2f'|format(transaction.cad_amount) }} CAD{% else %}CAD unavailable{% endif %}</span>
+                            </td>
+                            <td>
+                              <span class="match-badge audit">Unmatched</span>
+                              <small>Not linked to this trip.</small>
+                              {% if transaction.suggested_expense_label %}<small>Possible receipt: {{ transaction.suggested_expense_label }}</small>{% endif %}
+                              {% if transaction.match_review_reason %}<small>{{ transaction.match_review_reason }}</small>{% endif %}
+                            </td>
+                            <td>
+                              <div class="transaction-actions">
+                                {% if transaction.possible_duplicate %}
+                                  <button class="button secondary small keep-transaction" data-group-id="{{ transaction.group_id }}"
+                                    {{ 'disabled' if trip_busy or reconciliation.stale else '' }}>Keep</button>
+                                {% endif %}
+                                {% if trip.mode == 'company' %}
+                                  <button class="button secondary small edit-allocations" data-group-id="{{ transaction.group_id }}"
+                                    {{ 'disabled' if trip_busy or reconciliation.stale or transaction.cad_completeness != 'complete' }}>Split / allocate</button>
+                                {% endif %}
+                                <button class="icon-button exclude-transaction" data-group-id="{{ transaction.group_id }}"
+                                  aria-label="Exclude {{ transaction.description or 'transaction' }} from trip"
+                                  title="Exclude from this trip"
+                                  {{ 'disabled' if trip_busy or reconciliation.stale else '' }}>×</button>
+                              </div>
+                            </td>
+                          </tr>
+                        {% endfor %}
+                      </tbody>
+                    </table>
+                  </div>
+                {% else %}
+                  <div class="notice info">Every included statement transaction is matched or allocated to a receipt.</div>
+                {% endif %}
+
+                {% if reconciliation.ignored_transactions %}
+                  <details class="excluded-transactions">
+                    <summary>{{ reconciliation.ignored_transactions|length }} excluded statement transaction(s) · restore if needed</summary>
+                    {% for transaction in reconciliation.ignored_transactions %}
+                      <div>
+                        <span>{{ transaction.transaction_date or 'date missing' }} · {{ transaction.description or 'No description' }} · {{ transaction.purchase_amount or '?' }} {{ transaction.purchase_currency or '' }}</span>
+                        <button class="button secondary small restore-transaction" data-group-id="{{ transaction.group_id }}"
+                          {{ 'disabled' if trip_busy or reconciliation.stale else '' }}>Restore</button>
+                      </div>
+                    {% endfor %}
+                  </details>
+                {% endif %}
+              </div>
+            {% else %}
+              <div class="empty reconciliation-empty">
+                <p><strong>No reconciliation has been run yet.</strong></p>
+                <p>Sync after uploading invoices and statements to review mappings and accounting exchange rates here.</p>
+              </div>
+            {% endif %}
+        </section>

@@ -1,7 +1,7 @@
 PYTHON := .venv/bin/python
 RUFF := .venv/bin/ruff
 
-.PHONY: setup setup-dev test test-integration coverage lint format format-check check build package-check generate-melbourne
+.PHONY: setup setup-dev test test-integration coverage lint format format-check check build package-check benchmark-extraction generate-melbourne
 
 setup:
 	./scripts/setup_local_env.sh
@@ -35,6 +35,9 @@ build:
 
 package-check: build
 	$(PYTHON) scripts/check_distribution.py dist
+
+benchmark-extraction:
+	$(PYTHON) scripts/benchmark_extraction.py
 
 generate-melbourne:
 	$(PYTHON) -m nlp_expenses generate trips/202606_melbourne

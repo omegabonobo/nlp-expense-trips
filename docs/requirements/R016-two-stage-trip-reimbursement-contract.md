@@ -61,8 +61,12 @@ sum(total_cad)
   = ivado_claim_total_cad + ivado_excluded_total_cad
 
 employee_reimbursement_total_cad + corporate_paid_total_cad
-  = ivado_claim_total_cad
+  = sum(total_cad)
 ```
+
+The IVADO claim is a pass-through receivable, not an Arvine travel expense.
+Alcohol removed from that claim remains in the full Arvine reimbursement and
+is recorded as an Arvine-borne meal expense.
 
 All controls use a CAD 0.02 tolerance.
 
@@ -75,8 +79,10 @@ Two tabs:
 1. `Expense Report`: traveller, report date, purpose, and one row per receipt
    with full receipt, `1/N` share, payer, reviewed CAD, reimbursement, and
    IVADO amounts.
-2. `Accounting Rows`: the five derived accounting components and a control
-   against the employee reimbursement.
+2. `Accounting Rows`: posting-ready journal rows. Ordinary trips contain the
+   travel/meal/tax expense booking and shareholder payment. IVADO-sponsored
+   trips contain the client-recoverable travel booking, 50/50 Arvine-borne
+   alcohol rows, the IVADO receivable invoice, and the bank reimbursement.
 
 ### IVADO workbook
 
@@ -121,6 +127,8 @@ both repositories, and producer/consumer fixtures.
 - Alcohol excluded from IVADO remains visible with the amount removed.
 - IVADO `Expense Report` equals `ivado_claim_total_cad`.
 - Corporate-paid receipts do not increase employee reimbursement.
-- In IVADO mode, employee reimbursement and accounting components equal the
-  IVADO claim after alcohol and other reviewed exclusions.
+- In IVADO mode, Arvine reimburses the full reviewed business share. The IVADO
+  claim excludes alcohol; eligible travel is posted to `Expenses Recoverable
+  from Clients`, while Arvine-borne alcohol is split 50/50 between deductible
+  and non-deductible meal accounts.
 - Contract copies in both repositories are byte-for-byte identical.

@@ -1,0 +1,89 @@
+{# Inputs: state, trip, trip_busy, reconciliation #}
+        <section class="page-title">
+          <div>
+            <p class="eyebrow">{{ trip.name }}</p>
+            <h2>{{ trip.label }}</h2>
+          </div>
+          <div class="mode-field">
+            <label for="claim-program-select">Reimbursement program</label>
+            <select id="claim-program-select" class="select" data-trip="{{ trip.name }}" {{ 'disabled' if trip_busy else '' }}>
+              <option value="" {{ 'selected' if not trip.claim_program }}>Choose…</option>
+              <option value="company_reimbursed" {{ 'selected' if trip.claim_program == 'company_reimbursed' }}>Own-company reimbursement</option>
+              <option value="ivado_reimbursed" {{ 'selected' if trip.claim_program == 'ivado_reimbursed' }}>IVADO-reimbursed trip</option>
+            </select>
+            <span class="lifecycle-badge {{ trip.lifecycle.status }}">{{ trip.lifecycle.label }}</span>
+          </div>
+        </section>
+
+        {% if trip_busy %}
+          <div class="notice info">
+            {{ 'Invoice and statement sync' if state.active_job.kind == 'reconciliation' else 'Receipt line-item scan' if state.active_job.kind == 'line_items' else 'Workbook generation' }}
+            is running. Source files and mappings are locked until it finishes.
+          </div>
+        {% endif %}
+
+        <section class="card trip-summary-card">
+          <div class="card-heading">
+            <div>
+              <p class="card-kicker">At a glance</p>
+              <h3>Trip progress</h3>
+            </div>
+            <div class="button-group">
+              <button class="button secondary small" id="refresh-files-button">Refresh files</button>
+              <button class="button secondary small finder-button" data-target="trip">Reveal in folder</button>
+            </div>
+          </div>
+          <div class="process-summary-grid">
+            <div>
+              <strong>{{ state.process_summary.receipt_scanned }} / {{ state.process_summary.receipt_total }}</strong>
+              <span>receipts scanned</span>
+              <small>{{ state.process_summary.receipt_total - state.process_summary.receipt_scanned }} still to scan</small>
+            </div>
+            <div>
+              <strong>{{ state.process_summary.receipt_reviewed }} / {{ state.process_summary.receipt_review_total }}</strong>
+              <span>receipts reviewed</span>
+              <small>{{ state.process_summary.receipt_review_total - state.process_summary.receipt_reviewed }} still to review</small>
+            </div>
+            <div>
+              <strong>{{ state.process_summary.matched_receipts }} / {{ state.process_summary.matched_receipt_total }}</strong>
+              <span>receipts matched to cards</span>
+              <small>{{ state.process_summary.matched_transactions }} / {{ state.process_summary.transaction_total }} card transactions matched</small>
+            </div>
+            <div>
+              <strong>${{ '%.2f'|format(state.process_summary.reviewed_total_cad) }} CAD</strong>
+              <span>reviewed receipt value</span>
+              <small>Based on the current reviewed receipts</small>
+            </div>
+            <div>
+              <strong>${{ '%.2f'|format(state.process_summary.claimable_total_cad) }} CAD</strong>
+              <span>claimable amount</span>
+              <small>Ready for the reimbursement report</small>
+            </div>
+          </div>
+          {% if not reconciliation.available %}
+            <p class="summary-note">Add receipts and statements, then run the sync to see card matches and final amounts.</p>
+          {% elif reconciliation.stale %}
+            <p class="summary-note">Receipts or statements changed since the last sync. Run the sync again to refresh these figures.</p>
+          {% endif %}
+        </section>
+
+        <section class="card trip-metadata-card">
+          <div class="card-heading">
+            <div>
+              <p class="card-kicker">Trip record</p>
+              <h3>Traveller and trip context</h3>
+            </div>
+            <button class="button secondary small" id="open-trip-metadata-button" {{ 'disabled' if trip_busy }}>Edit trip details</button>
+          </div>
+          <div class="metadata-grid">
+            <div><span>Traveller</span><strong>{{ trip.metadata.traveller or 'Not set' }}</strong></div>
+            <div><span>Travel dates (optional)</span><strong>{{ trip.metadata.start_date or 'Not set' }} → {{ trip.metadata.end_date or 'Not set' }}</strong></div>
+            <div><span>Purpose (optional)</span><strong>{{ trip.metadata.business_purpose or 'Not set' }}</strong></div>
+            <div><span>Default payment source</span><strong>{{ 'Traveller’s personal funds/card' if trip.metadata.default_paid_by == 'traveller_personal' else 'Company funds/card' }}</strong></div>
+          </div>
+          {% if trip.metadata_gaps %}
+            <div class="notice warning">
+              Complete before approval: {{ trip.metadata_gaps|join(', ') }}.
+            </div>
+          {% endif %}
+        </section>

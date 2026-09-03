@@ -44,6 +44,7 @@ EXPECTED_ROUTES = [
     ("/api/trips/<trip_name>/finalize", ("POST",)),
     ("/api/trips/<trip_name>/generate", ("POST",)),
     ("/api/trips/<trip_name>/line-items/add", ("POST",)),
+    ("/api/trips/<trip_name>/line-items/changes", ("POST",)),
     ("/api/trips/<trip_name>/line-items/expense", ("POST",)),
     ("/api/trips/<trip_name>/line-items/item", ("POST",)),
     ("/api/trips/<trip_name>/line-items/remove", ("POST",)),
@@ -65,6 +66,7 @@ EXPECTED_ROUTES = [
     ("/api/trips/<trip_name>/remove-file", ("POST",)),
     ("/api/trips/<trip_name>/reveal", ("POST",)),
     ("/api/trips/<trip_name>/statement-date-convention", ("POST",)),
+    ("/api/trips/<trip_name>/statement-import-profile", ("POST",)),
     ("/api/trips/<trip_name>/upload/<kind>", ("POST",)),
     ("/static/<path:filename>", ("GET",)),
 ]
@@ -105,6 +107,10 @@ def workbook_semantic_contract(path: Path) -> dict:
                             if worksheet.title == "expense_summary"
                             and cell.coordinate == "B1"
                             and worksheet["A1"].value == "Report date"
+                            else "<generated-profile-effective-date>"
+                            if worksheet.title == "expense_summary"
+                            and cell.coordinate == "T3"
+                            and worksheet["S3"].value == "Effective date"
                             else serializable_cell_value(cell.value)
                         ),
                         "number_format": cell.number_format,
@@ -456,7 +462,7 @@ class CharacterizationTests(unittest.TestCase):
 
             self.assertEqual(
                 workbook_contract_digest(output),
-                "7a8a2f918ad4d930b98d037dc87c80b76af4efb6d217c012a685fcc21a184171",
+                "cf65fa9c7f48300ddc39217e9fbe50f4cd33b6178c64d99d7564294865952244",
             )
 
     def test_contract_bundle_removes_completed_artifacts_after_later_failure(self):

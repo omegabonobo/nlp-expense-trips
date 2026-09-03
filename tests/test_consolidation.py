@@ -112,7 +112,8 @@ class ConsolidationTests(unittest.TestCase):
             19.86,
         )
         self.assertEqual(preview["summary"]["ivado_claim_total_cad"], 7_532.51)
-        self.assertEqual(preview["summary"]["employee_reimbursement_total_cad"], 7_532.51)
+        self.assertEqual(preview["summary"]["employee_reimbursement_total_cad"], 7_617.57)
+        self.assertEqual(preview["summary"]["ivado_excluded_total_cad"], 85.06)
 
     def test_accounting_rounding_residual_is_identified_and_balanced(self):
         expense = {
@@ -358,9 +359,43 @@ class ConsolidationTests(unittest.TestCase):
 
         result = calculate_expense_result(receipt, reconciled, "ivado_reimbursed")
 
-        self.assertEqual(result["arvine_reimbursable_cad"], 88.0)
+        self.assertEqual(result["arvine_reimbursable_cad"], 110.0)
         self.assertEqual(result["ivado_claimable_cad"], 88.0)
         self.assertEqual(result["ivado_excluded_cad"], 22.0)
+
+    def test_ivado_accounting_uses_passthrough_and_only_expenses_company_borne_amount(self):
+        expense = {
+            "expense_type": "meal",
+            "currency": "CAD",
+            "included_in_arvine": True,
+            "included_in_ivado": True,
+            "arvine_reimbursable_cad": 115.0,
+            "ivado_claimable_cad": 95.0,
+            "arvine_claimable_ratio": 1.0,
+            "ivado_claimable_ratio": 95 / 115,
+            "fx_rate": 1.0,
+            "gst_hst": 0.0,
+            "qst": 0.0,
+        }
+
+        accounting = calculate_accounting_summary(
+            [expense],
+            builtin_accounting_profile(),
+            "ivado",
+        )
+
+        self.assertEqual(
+            accounting["rows"],
+            [
+                {"account": "Expenses Recoverable from Clients", "amount_cad": 95.0},
+                {"account": "Meals – Deductible (50%)", "amount_cad": 10.0},
+                {"account": "Meals – Non-deductible (50%)", "amount_cad": 10.0},
+            ],
+        )
+        self.assertEqual(accounting["journal_total"], 115.0)
+        self.assertEqual(accounting["claim_total"], 115.0)
+        self.assertEqual(accounting["expenses_recoverable_from_clients_cad"], 95.0)
+        self.assertEqual(accounting["business_expense_total_cad"], 20.0)
 
     def test_exact_idr_statement_cad_is_not_rebuilt_from_rounded_fx(self):
         receipt = {

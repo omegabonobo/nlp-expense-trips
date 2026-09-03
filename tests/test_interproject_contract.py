@@ -256,7 +256,7 @@ class InterprojectContractTests(unittest.TestCase):
                         "included_in_ivado": True,
                         "number_of_people": 1,
                         "total_cad": 115.0,
-                        "arvine_reimbursable_cad": 95.0,
+                        "arvine_reimbursable_cad": 115.0,
                         "corporate_paid_cad": 0.0,
                         "ivado_claimable_cad": 95.0,
                         "ivado_excluded_cad": 20.0,
@@ -295,7 +295,7 @@ class InterprojectContractTests(unittest.TestCase):
                     }
                 ],
                 "summary": {
-                    "employee_reimbursement_total_cad": 95.0,
+                    "employee_reimbursement_total_cad": 115.0,
                     "corporate_paid_total_cad": 0.0,
                     "ivado_claim_total_cad": 95.0,
                     "ivado_excluded_total_cad": 20.0,
@@ -303,15 +303,19 @@ class InterprojectContractTests(unittest.TestCase):
                 },
                 "accounting": {
                     "rows": [
-                        {"account": "Meals – Deductible (50%)", "amount_cad": 47.5},
-                        {"account": "Meals – Non-deductible (50%)", "amount_cad": 47.5},
+                        {
+                            "account": "Expenses Recoverable from Clients",
+                            "amount_cad": 95.0,
+                        },
+                        {"account": "Meals – Deductible (50%)", "amount_cad": 10.0},
+                        {"account": "Meals – Non-deductible (50%)", "amount_cad": 10.0},
                     ]
                 },
             }
             records = build_trip_manifest_records(root, trip, view=view)
             validate_manifest_records(records)
             self.assertEqual([record["kind"] for record in records], ["receipt", "trip_report"])
-            self.assertEqual(records[0]["arvine_reimbursable_cad"], 95.0)
+            self.assertEqual(records[0]["arvine_reimbursable_cad"], 115.0)
             self.assertEqual(records[0]["ivado_claimable_cad"], 95.0)
             self.assertEqual(records[0]["number_of_people"], 1)
             self.assertEqual(

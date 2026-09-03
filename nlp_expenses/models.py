@@ -12,6 +12,7 @@ class LineItem:
     is_alcohol: bool = False
     included: bool = True
     confidence: float = 0.0
+    confidence_reason: str = ""
     review_note: str = ""
     alcohol_confidence: float = 0.0
     alcohol_reason: str = ""
@@ -36,6 +37,9 @@ class Expense:
     line_items: list[LineItem] = field(default_factory=list)
     raw_text: str = ""
     confidence: float = 0.0
+    field_confidence: dict[str, float] = field(default_factory=dict)
+    field_reasons: dict[str, str] = field(default_factory=dict)
+    extractor_version: str = "receipt-v1"
     review_note: str = ""
     description: str = ""
     country: str = ""
@@ -117,6 +121,19 @@ class NormalizedTransaction:
 class StatementFileReport:
     source_file: Path
     provider: str = ""
+    encoding: str = ""
+    delimiter: str = ""
+    header_row: int = 0
+    mapping_confidence: float = 0.0
+    column_mapping: dict[str, int] = field(default_factory=dict)
+    column_labels: dict[str, str] = field(default_factory=dict)
+    mapping_options: list[dict[str, object]] = field(default_factory=list)
+    mapping_required: bool = False
+    sign_convention: str = ""
+    sign_convention_required: bool = False
+    profile_reused: bool = False
+    structure_fingerprint: str = ""
+    preview: list[dict[str, object]] = field(default_factory=list)
     rows_read: int = 0
     rows_normalized: int = 0
     rows_skipped: int = 0

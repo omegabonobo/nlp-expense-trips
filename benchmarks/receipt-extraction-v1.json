@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "receipt-extraction-synthetic-v1",
+  "privacy": "synthetic",
+  "description": "Synthetic receipts with no personal, customer, card, or banking data.",
+  "cases": [
+    {
+      "id": "canadian-cafe",
+      "source_text": "MAPLE TEST CAFE\n2026-08-10\nLunch 20.00\nGST 1.00\nQST 1.99\nTOTAL CAD 22.99",
+      "expected": {
+        "date": "2026-08-10",
+        "vendor": "MAPLE TEST CAFE",
+        "expense_type": "meal",
+        "amount": 22.99,
+        "currency": "CAD",
+        "gst_hst": 1.0,
+        "qst": 1.99
+      }
+    },
+    {
+      "id": "airport-taxi",
+      "source_text": "SYNTHETIC AIRPORT TAXI\n2026-08-11\nAirport transfer 48.00\nTOTAL CAD 48.00",
+      "expected": {
+        "date": "2026-08-11",
+        "vendor": "SYNTHETIC AIRPORT TAXI",
+        "expense_type": "taxi",
+        "amount": 48.0,
+        "currency": "CAD"
+      }
+    },
+    {
+      "id": "hotel-stay",
+      "source_text": "DEMO HOTEL\n2026-08-12\nRoom charge 180.00\nGST 9.00\nTOTAL CAD 189.00",
+      "expected": {
+        "date": "2026-08-12",
+        "vendor": "DEMO HOTEL",
+        "expense_type": "hotel",
+        "amount": 189.0,
+        "currency": "CAD",
+        "gst_hst": 9.0
+      }
+    }
+  ]
+}

@@ -50,24 +50,17 @@ def consolidation_view(root: Path, trip_dir: Path) -> dict:
             "receipt-review",
         )
     else:
-        if review["summary"]["blocking_count"]:
+        for exception in review.get("exceptions", []):
+            if exception.get("severity") != "blocking":
+                continue
             add_issue(
                 issues,
-                "receipt_lines",
+                f"extraction:{exception['id']}",
                 "blocking",
-                f"{review['summary']['blocking_count']} receipt(s) have excluded lines without a reconciled total.",
+                f"{exception['source_file']}: {exception['message']}",
                 "receipt-review",
+                exception["id"],
             )
-        for receipt in review["receipts"]:
-            for field_issue in receipt.get("field_issues", []):
-                add_issue(
-                    issues,
-                    "expense_fields",
-                    "blocking",
-                    f"{receipt['source_file']}: {field_issue}.",
-                    f"receipt-{receipt['source_file']}",
-                    receipt["source_file"],
-                )
 
     if statements_present:
         if not reconciliation["available"]:
@@ -197,9 +190,8 @@ def consolidation_view(root: Path, trip_dir: Path) -> dict:
     corporate_paid = round(sum(item["corporate_paid_cad"] or 0 for item in expenses), 2)
     ivado_claim = round(sum(item["ivado_claimable_cad"] or 0 for item in expenses), 2)
     ivado_excluded = round(sum(item["ivado_excluded_cad"] or 0 for item in expenses), 2)
-    payer_exclusions = ivado_excluded if claim_program == "ivado_reimbursed" else 0.0
     payer_control = round(
-        reviewed_total - employee_reimbursement - corporate_paid - payer_exclusions,
+        reviewed_total - employee_reimbursement - corporate_paid,
         2,
     )
     ivado_control = (
@@ -212,10 +204,7 @@ def consolidation_view(root: Path, trip_dir: Path) -> dict:
         (
             "payer_control",
             payer_control,
-            (
-                "Reviewed total does not equal traveller reimbursement, company-paid amounts, "
-                "and program exclusions"
-            ),
+            ("Reviewed total does not equal traveller reimbursement and company-paid amounts"),
         ),
         (
             "ivado_control",
@@ -422,7 +411,10 @@ def calculate_expense_result(
         )
         ivado_excluded_cad = round((arvine_total_cad or 0.0) - ivado_claimable_cad, 2)
     claimable_cad = ivado_claimable_cad if claim_program == "ivado_reimbursed" else arvine_total_cad
-    reimbursement_cad = claimable_cad
+    # The sponsor claim and Arvine's obligation to the traveller are independent.
+    # On an IVADO trip Arvine reimburses the full reviewed business share; the
+    # sponsor claim removes alcohol (and any other IVADO-only exclusions).
+    reimbursement_cad = arvine_total_cad
     arvine_reimbursable_cad = reimbursement_cad if paid_by == "traveller_personal" else 0.0
     corporate_paid_cad = reimbursement_cad if paid_by == "company_card" else 0.0
     active_claim_ratio = (
@@ -556,14 +548,28 @@ def calculate_accounting_summary(expenses: list[dict], profile: dict, mode: str)
     tax_recoverable = 0.0
     for expense in expenses:
         claimable = expense.get("arvine_reimbursable_cad")
-        included = (
-            expense.get("included_in_ivado", False)
-            if mode == "ivado"
-            else expense.get("included_in_arvine", False)
-        )
+        included = expense.get("included_in_arvine", False)
         if claimable is None or not included:
             continue
         is_meal = str(expense.get("expense_type") or "").startswith("meal")
+        if mode == "ivado":
+            passthrough = min(claimable, expense.get("ivado_claimable_cad") or 0.0)
+            company_borne = round(claimable - passthrough, 2)
+            accounts[profile["account_mapping"]["expenses_recoverable_from_clients"]] += passthrough
+            if is_meal:
+                deductible = (
+                    company_borne * profile["meal_deduction_pct"] * profile["commercial_use_pct"]
+                )
+                accounts[profile["account_mapping"]["meal_deductible"]] += deductible
+                accounts[profile["account_mapping"]["meal_nondeductible"]] += (
+                    company_borne - deductible
+                )
+            else:
+                accounts[profile["account_mapping"]["non_meal"]] += company_borne
+            # Sponsored amounts are pass-through balances, not Arvine expenses.
+            # Only the sponsor-excluded gross portion is characterized as an
+            # Arvine expense; no receipt tax receivable is split out from it.
+            continue
         recovery_pct = (
             profile["meal_tax_recovery_pct"] if is_meal else profile["normal_tax_recovery_pct"]
         ) * profile["commercial_use_pct"]
@@ -627,6 +633,15 @@ def calculate_accounting_summary(expenses: list[dict], profile: dict, mode: str)
         "rounding_adjustment_cad": rounding_adjustment,
         "rounding_adjustment_account": rounding_adjustment_account,
         "recoverable_tax_cad": round(tax_recoverable, 2),
+        "expenses_recoverable_from_clients_cad": round(
+            accounts.get(profile["account_mapping"]["expenses_recoverable_from_clients"], 0.0),
+            2,
+        ),
+        "business_expense_total_cad": round(
+            journal_total
+            - accounts.get(profile["account_mapping"]["expenses_recoverable_from_clients"], 0.0),
+            2,
+        ),
         "profile_version": profile["version"],
         "counter_account": profile["counter_account"],
         "commercial_use_pct": profile["commercial_use_pct"],

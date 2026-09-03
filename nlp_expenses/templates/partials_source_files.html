@@ -1,0 +1,189 @@
+{# Inputs: state, trip, trip_busy #}
+        <div class="upload-grid">
+          <section class="card file-card">
+            <div class="card-heading">
+              <div>
+                <p class="card-kicker">Step 1</p>
+                <h3>Receipts</h3>
+              </div>
+              <div class="button-group">
+                <span class="count-badge">{{ trip.receipts|length }}</span>
+                <button class="button secondary small finder-button" data-target="receipts">Reveal folder in Finder</button>
+              </div>
+            </div>
+            <label class="drop-zone" data-upload-kind="receipts">
+              <input type="file" multiple accept="{{ state.system.receipt_accept }}" {{ 'disabled' if trip_busy else '' }}>
+              <strong>Drop receipts here</strong>
+              <span>or click to choose {{ state.system.receipt_extensions|join(', ')|upper }} files</span>
+            </label>
+            <div class="file-list">
+              {% for file in trip.receipts %}
+                <div class="file-row">
+                  <div class="file-name">
+                    <strong>{{ file.name }}</strong>
+                    <span>{{ (file.size / 1024)|round(1) }} KB</span>
+                    {% if file.scan.status == 'scanned' %}
+                      <span class="match-badge ok">Scanned{% if file.scan.quality %} · {{ 'OpenAI' if file.scan.quality == 'best' else 'Offline' }}{% endif %}</span>
+                    {% elif file.scan.status == 'changed' %}
+                      <span class="match-badge review">Changed · needs scan</span>
+                    {% else %}
+                      <span class="match-badge unmatched">Not scanned</span>
+                    {% endif %}
+                  </div>
+                  <button class="icon-button remove-file" title="Remove file" data-kind="receipts" data-filename="{{ file.name }}" {{ 'disabled' if trip_busy else '' }}>×</button>
+                </div>
+              {% else %}
+                <p class="empty-line">No receipts uploaded.</p>
+              {% endfor %}
+            </div>
+          </section>
+
+          <section class="card file-card">
+            <div class="card-heading">
+              <div>
+                <p class="card-kicker">Step 2</p>
+                <h3>Statements</h3>
+              </div>
+              <div class="button-group">
+                <span class="count-badge">{{ trip.statements|length }}</span>
+                <button class="button secondary small finder-button" data-target="statements">Reveal folder in Finder</button>
+              </div>
+            </div>
+            <label class="drop-zone" data-upload-kind="statements">
+              <input type="file" multiple accept="{{ '.csv,.xls,.xlsx' if trip.mode == 'company' else '.csv,.xls,.xlsx,.pdf' }}" {{ 'disabled' if trip_busy else '' }}>
+              <strong>Drop statements here</strong>
+              <span>{{ 'CSV, XLS, or XLSX' if trip.mode == 'company' else 'CSV, XLS, XLSX, or PDF' }}</span>
+            </label>
+            {% if trip.mode == 'company' %}
+              <details class="statement-template-help">
+                <summary>Bank format not recognized?</summary>
+                <p>
+                  Download the standard CSV, open it in Excel or Google Sheets, and paste your transactions under the headers.
+                  Required: transaction date, description, purchase amount, and purchase currency.
+                </p>
+                <code>transaction_date · description · purchase_amount · purchase_currency</code>
+                <a class="button secondary small"
+                  href="/static/standard-statement-template.csv"
+                  download="nlp-expenses-standard-statement.csv">Download standard CSV</a>
+                <small>
+                  Use YYYY-MM-DD dates and three-letter currencies. Positive amounts are purchases; negative amounts are refunds.
+                  CAD amount is optional and should contain the exact card settlement when available.
+                  Optional transaction types: purchase, refund, payment, cashback, cash, fee, transfer, or deposit.
+                </small>
+              </details>
+            {% endif %}
+            <div class="file-list">
+              {% for file in trip.statements %}
+                <div class="file-row statement-row">
+                  <div class="file-name">
+                    <strong>{{ file.name }}</strong>
+                    {% if file.validation %}
+                      {% if file.validation.errors %}
+                        <span class="validation error">Needs attention</span>
+                      {% else %}
+                        <span class="validation ok">{{ file.validation.provider|upper }} · {{ file.validation.rows_normalized }} rows</span>
+                      {% endif %}
+                    {% else %}
+                      <span>{{ (file.size / 1024)|round(1) }} KB</span>
+                    {% endif %}
+                  </div>
+                  <button class="icon-button remove-file" title="Remove file" data-kind="statements" data-filename="{{ file.name }}" {{ 'disabled' if trip_busy else '' }}>×</button>
+                  {% if file.validation %}
+                    {% for error in file.validation.errors %}<p class="file-message error">{{ error }}</p>{% endfor %}
+                    {% for warning in file.validation.warnings %}<p class="file-message warning">{{ warning }}</p>{% endfor %}
+                    {% if file.validation.encoding or file.validation.delimiter %}
+                      <p class="file-message">
+                        Import: {{ file.validation.encoding }}
+                        {% if file.validation.delimiter %} · {{ 'tab' if file.validation.delimiter == '\t' else file.validation.delimiter }} delimiter{% endif %}
+                        · header row {{ file.validation.header_row }}
+                        {% if file.validation.provider == 'generic' %} · mapping {{ '%.0f'|format(file.validation.mapping_confidence * 100) }}% confidence{% endif %}
+                        {% if file.validation.rows_skipped %} · {{ file.validation.rows_skipped }} skipped{% endif %}
+                        {% if file.validation.profile_reused %} · saved mapping reused{% endif %}
+                      </p>
+                    {% endif %}
+                    {% if file.validation.provider == 'generic' and file.validation.mapping_options %}
+                      <details class="statement-mapping" {{ 'open' if file.validation.mapping_required or file.validation.sign_convention_required else '' }}>
+                        <summary>{{ 'Map statement columns' if file.validation.mapping_required or file.validation.sign_convention_required else 'Review statement mapping' }}</summary>
+                        <div class="statement-mapping-form" data-filename="{{ file.name }}">
+                          <label>
+                            Header row
+                            <input class="input statement-header-row" type="number" min="1" value="{{ file.validation.header_row }}">
+                          </label>
+                          {% set mapping_fields = [
+                            ('transaction_date', 'Transaction date'),
+                            ('posted_date', 'Posted date'),
+                            ('description', 'Description'),
+                            ('amount', 'Signed amount'),
+                            ('debit', 'Debit / charge'),
+                            ('credit', 'Credit / refund'),
+                            ('purchase_amount', 'Purchase amount'),
+                            ('purchase_currency', 'Purchase currency'),
+                            ('settlement_amount', 'Settlement amount'),
+                            ('settlement_currency', 'Settlement currency'),
+                            ('account', 'Account / card'),
+                            ('cardholder', 'Cardholder'),
+                            ('transaction_type', 'Transaction type'),
+                            ('category', 'Category')
+                          ] %}
+                          {% for field, label in mapping_fields %}
+                            <label>
+                              {{ label }}{{ ' *' if field in ['transaction_date', 'description'] else '' }}
+                              <select class="select statement-column-map" data-field="{{ field }}">
+                                <option value="">Not mapped</option>
+                                {% for option in file.validation.mapping_options %}
+                                  <option value="{{ option.index }}" {{ 'selected' if file.validation.column_mapping.get(field) == option.index else '' }}>{{ option.label }}</option>
+                                {% endfor %}
+                              </select>
+                            </label>
+                          {% endfor %}
+                          <label>
+                            Amount signs
+                            <select class="select statement-sign-convention">
+                              <option value="positive_purchase" {{ 'selected' if file.validation.sign_convention == 'positive_purchase' else '' }}>Positive values are purchases</option>
+                              <option value="negative_purchase" {{ 'selected' if file.validation.sign_convention == 'negative_purchase' else '' }}>Negative values are purchases</option>
+                              <option value="debit_credit" {{ 'selected' if file.validation.sign_convention == 'debit_credit' else '' }}>Separate debit and credit columns</option>
+                            </select>
+                          </label>
+                          <label>
+                            Numeric date order
+                            <select class="select statement-profile-date-convention">
+                              <option value="">Infer when unambiguous</option>
+                              <option value="day_first" {{ 'selected' if file.validation.date_convention == 'day_first' else '' }}>Day-first</option>
+                              <option value="month_first" {{ 'selected' if file.validation.date_convention == 'month_first' else '' }}>Month-first</option>
+                            </select>
+                          </label>
+                          <button class="button secondary small save-statement-mapping" data-filename="{{ file.name }}"
+                            {{ 'disabled' if trip_busy else '' }}>Preview and save mapping</button>
+                        </div>
+                      </details>
+                    {% endif %}
+                    {% if file.validation.preview %}
+                      <div class="statement-preview">
+                        {% for row in file.validation.preview %}
+                          <span>Row {{ row.source_row }} · {{ row.date or 'no date' }} · {{ row.description or 'no description' }} · {{ row.purchase_amount if row.purchase_amount is not none else '—' }} {{ row.purchase_currency or '' }}{% if row.settlement_amount is not none %} → {{ row.settlement_amount }} {{ row.settlement_currency or '' }}{% endif %}</span>
+                        {% endfor %}
+                      </div>
+                    {% endif %}
+                    {% if file.validation.date_samples %}
+                      <p class="file-message">Dates: {{ file.validation.date_samples|join(' · ') }}</p>
+                    {% endif %}
+                    {% if file.validation.date_convention_required %}
+                      <div class="date-convention-control">
+                        <select class="select date-convention-select" data-filename="{{ file.name }}">
+                          <option value="day_first">Day-first (31/07/2026)</option>
+                          <option value="month_first">Month-first (07/31/2026)</option>
+                        </select>
+                        <button class="button secondary small save-date-convention" data-filename="{{ file.name }}"
+                          {{ 'disabled' if trip_busy else '' }}>Use convention</button>
+                      </div>
+                    {% elif file.validation.date_convention %}
+                      <p class="file-message">Date convention: {{ file.validation.date_convention|replace('_', '-') }}</p>
+                    {% endif %}
+                  {% endif %}
+                </div>
+              {% else %}
+                <p class="empty-line">No statements uploaded.</p>
+              {% endfor %}
+            </div>
+          </section>
+        </div>

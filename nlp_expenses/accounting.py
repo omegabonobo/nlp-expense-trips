@@ -23,6 +23,9 @@ ACCOUNT_MAPPING_KEYS = {
     "meal_nondeductible",
     "gst_hst_receivable",
     "qst_receivable",
+    "expenses_recoverable_from_clients",
+    "accounts_receivable",
+    "bank_checking",
 }
 
 
@@ -45,8 +48,11 @@ def builtin_accounting_profile() -> dict:
             "non_meal": "Travel – Non-meal",
             "meal_deductible": "Meals – Deductible (50%)",
             "meal_nondeductible": "Meals – Non-deductible (50%)",
-            "gst_hst_receivable": "GST/HST Receivable",
+            "gst_hst_receivable": "GST Receivable",
             "qst_receivable": "QST Receivable",
+            "expenses_recoverable_from_clients": "Expenses Recoverable from Clients",
+            "accounts_receivable": "Accounts Receivable",
+            "bank_checking": "Bank – Checking",
         },
     }
 

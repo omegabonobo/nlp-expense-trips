@@ -18,6 +18,7 @@ from nlp_expenses.storage import write_json_atomic
 SUPPORTED_STATEMENT_EXTENSIONS = {".csv", ".xls", ".xlsx"}
 STATEMENT_SETTINGS_FILE = ".nlp-expenses-statement-settings.json"
 DATE_CONVENTIONS = {"day_first", "month_first"}
+SIGN_CONVENTIONS = {"positive_purchase", "negative_purchase", "debit_credit"}
 PROVIDER_DATE_CONVENTIONS = {
     "standard": "iso",
     "amex": "month_first",
@@ -37,6 +38,109 @@ STANDARD_TRANSACTION_TYPES = {
 }
 STANDARD_INCOMING_TYPES = {"refund", "cashback", "deposit"}
 
+GENERIC_FIELD_ALIASES = {
+    "transaction_date": {
+        "date",
+        "transaction_date",
+        "transaction_day",
+        "purchase_date",
+        "activity_date",
+        "booking_date",
+        "booked_date",
+        "trans_date",
+    },
+    "posted_date": {
+        "posted_date",
+        "date_posted",
+        "date_processed",
+        "processing_date",
+        "value_date",
+        "posting_date",
+        "posted_on",
+    },
+    "description": {
+        "description",
+        "merchant",
+        "merchant_name",
+        "merchant_details",
+        "details",
+        "transaction",
+        "transaction_description",
+        "card_transaction",
+        "name",
+        "memo",
+        "narrative",
+        "payee",
+    },
+    "amount": {
+        "amount",
+        "transaction_amount",
+        "transaction_value",
+        "cad_amount",
+        "charges_adjustments",
+        "net_amount",
+    },
+    "debit": {
+        "debit",
+        "debit_amount",
+        "charge",
+        "charges",
+        "withdrawal",
+        "withdrawal_amount",
+        "money_out",
+    },
+    "credit": {
+        "credit",
+        "credit_amount",
+        "deposit_amount",
+        "money_in",
+    },
+    "purchase_amount": {
+        "purchase_amount",
+        "original_amount",
+        "foreign_amount",
+        "local_amount",
+        "transaction_currency_amount",
+    },
+    "purchase_currency": {
+        "purchase_currency",
+        "original_currency",
+        "foreign_currency",
+        "local_currency",
+        "transaction_currency",
+    },
+    "settlement_amount": {
+        "settlement_amount",
+        "billing_amount",
+        "billed_amount",
+        "card_amount",
+        "statement_amount",
+        "home_amount",
+    },
+    "settlement_currency": {
+        "settlement_currency",
+        "billing_currency",
+        "billed_currency",
+        "card_currency",
+        "statement_currency",
+        "home_currency",
+        "currency",
+    },
+    "account": {
+        "account",
+        "account_number",
+        "card",
+        "card_number",
+        "card_no",
+        "last_four",
+    },
+    "cardholder": {"cardholder", "card_member", "cardholder_name", "employee"},
+    "transaction_type": {"transaction_type", "type", "debit_credit", "credit_debit"},
+    "category": {"category", "merchant_category", "expense_category"},
+}
+
+GENERIC_MAPPING_FIELDS = tuple(GENERIC_FIELD_ALIASES)
+
 
 class StatementNormalizationError(ValueError):
     pass
@@ -50,6 +154,268 @@ def list_statement_files(statement_dir: Path) -> list[Path]:
     )
 
 
+def prepare_statement_file(path: Path) -> dict:
+    rows, metadata = read_tabular_rows_with_metadata(path)
+    settings = load_statement_settings(path.parent.parent)
+    file_override = settings.get("file_import_overrides", {}).get(
+        statement_file_fingerprint(path), {}
+    )
+    override_header = file_override.get("header_index") if isinstance(file_override, dict) else None
+    if isinstance(override_header, int) and 0 <= override_header < len(rows):
+        provider, header_index = "generic", override_header
+    else:
+        provider, header_index = detect_provider(rows)
+    raw_headers = list(rows[header_index]) if header_index < len(rows) else []
+    option_width = max((len(row) for row in rows[:60]), default=len(raw_headers))
+    options = [
+        {
+            "index": index,
+            "label": clean_text(raw_headers[index])
+            if index < len(raw_headers) and clean_text(raw_headers[index])
+            else f"Column {index + 1}",
+        }
+        for index in range(option_width)
+    ]
+    plan = {
+        "rows": rows,
+        "provider": provider,
+        "header_index": header_index,
+        "encoding": metadata.get("encoding", ""),
+        "delimiter": metadata.get("delimiter", ""),
+        "mapping": {},
+        "mapping_options": options,
+        "mapping_confidence": 1.0,
+        "mapping_required": False,
+        "sign_convention": "",
+        "sign_convention_required": False,
+        "profile_reused": False,
+        "structure_fingerprint": statement_structure_fingerprint(raw_headers),
+        "saved_profile": {},
+        "errors": [],
+    }
+    if provider != "generic":
+        plan["rows_read"] = count_data_rows(rows, header_index)
+        return plan
+
+    profiles = settings.get("import_profiles", {})
+    saved_profile = profiles.get(plan["structure_fingerprint"], {})
+    if not isinstance(saved_profile, dict):
+        saved_profile = {}
+    inferred, confidence, ambiguous = infer_generic_column_mapping(rows, header_index)
+    saved_mapping = normalize_saved_mapping(saved_profile.get("mapping"), len(raw_headers))
+    mapping = saved_mapping or inferred
+    plan["mapping"] = mapping
+    plan["mapping_confidence"] = 1.0 if saved_mapping else confidence
+    plan["profile_reused"] = bool(saved_mapping)
+    plan["saved_profile"] = saved_profile
+
+    missing = missing_generic_mapping_fields(mapping)
+    if missing:
+        plan["mapping_required"] = True
+        plan["errors"].append("statement columns need mapping for " + ", ".join(missing) + ".")
+    blocking_ambiguous = ambiguous & {"description"}
+    if not ({"transaction_date", "posted_date"} & set(mapping)):
+        blocking_ambiguous.update(ambiguous & {"transaction_date", "posted_date"})
+    if "amount" in ambiguous and not any(
+        field in mapping for field in ("debit", "credit", "purchase_amount", "settlement_amount")
+    ):
+        blocking_ambiguous.add("amount")
+    if blocking_ambiguous and not saved_mapping:
+        plan["mapping_required"] = True
+        plan["errors"].append(
+            "multiple columns could represent " + ", ".join(sorted(blocking_ambiguous)) + "."
+        )
+
+    saved_sign = clean_text(saved_profile.get("sign_convention"))
+    sign, sign_required = infer_sign_convention(raw_headers, mapping, saved_sign)
+    plan["sign_convention"] = sign
+    plan["sign_convention_required"] = sign_required
+    if sign_required:
+        plan["errors"].append(
+            "purchase signs are ambiguous. Choose whether positive or negative values are purchases."
+        )
+
+    plan["rows"] = apply_generic_column_mapping(rows, header_index, mapping)
+    plan["rows_read"] = count_data_rows(plan["rows"], header_index)
+    return plan
+
+
+def apply_import_plan_to_report(report: StatementFileReport, plan: dict) -> None:
+    report.provider = str(plan.get("provider", ""))
+    report.encoding = str(plan.get("encoding", ""))
+    report.delimiter = str(plan.get("delimiter", ""))
+    report.header_row = int(plan.get("header_index", 0)) + 1
+    report.mapping_confidence = float(plan.get("mapping_confidence", 0.0))
+    report.column_mapping = dict(plan.get("mapping", {}))
+    options = list(plan.get("mapping_options", []))
+    labels = {int(item["index"]): str(item["label"]) for item in options}
+    report.column_labels = {
+        field: labels.get(index, f"Column {index + 1}")
+        for field, index in report.column_mapping.items()
+    }
+    report.mapping_options = options
+    report.mapping_required = bool(plan.get("mapping_required"))
+    report.sign_convention = str(plan.get("sign_convention", ""))
+    report.sign_convention_required = bool(plan.get("sign_convention_required"))
+    report.profile_reused = bool(plan.get("profile_reused"))
+    report.structure_fingerprint = str(plan.get("structure_fingerprint", ""))
+    report.rows_read = int(plan.get("rows_read", 0))
+
+
+def count_data_rows(rows: list[list[object]], header_index: int) -> int:
+    return sum(1 for row in rows[header_index + 1 :] if any(clean_text(value) for value in row))
+
+
+def statement_structure_fingerprint(headers: list[object]) -> str:
+    normalized = [normalize_key(value) for value in headers]
+    payload = json.dumps(normalized, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
+
+
+def normalize_saved_mapping(value: object, width: int) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    mapping: dict[str, int] = {}
+    for field, index in value.items():
+        if field not in GENERIC_MAPPING_FIELDS or isinstance(index, bool):
+            continue
+        try:
+            selected = int(index)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= selected < width:
+            mapping[field] = selected
+    return mapping
+
+
+def infer_generic_column_mapping(
+    rows: list[list[object]], header_index: int
+) -> tuple[dict[str, int], float, set[str]]:
+    headers = [normalize_key(value) for value in rows[header_index]]
+    mapping: dict[str, int] = {}
+    ambiguous: set[str] = set()
+    scores: list[float] = []
+    for field, aliases in GENERIC_FIELD_ALIASES.items():
+        candidates: list[tuple[float, int]] = []
+        for index, header in enumerate(headers):
+            if not header:
+                continue
+            if header in aliases:
+                score = 1.0
+            else:
+                matches = [alias for alias in aliases if len(alias) >= 5 and alias in header]
+                score = 0.72 if matches else 0.0
+            if score:
+                score += column_value_score(field, rows, header_index, index)
+                candidates.append((score, index))
+        if not candidates:
+            continue
+        candidates.sort(reverse=True)
+        best_score, best_index = candidates[0]
+        tied = [index for score, index in candidates if abs(score - best_score) < 0.01]
+        if len(tied) > 1:
+            ambiguous.add(field)
+            continue
+        mapping[field] = best_index
+        scores.append(min(best_score, 1.0))
+    required_detected = [field for field in ("transaction_date", "description") if field in mapping]
+    amount_detected = any(
+        field in mapping
+        for field in ("amount", "debit", "credit", "purchase_amount", "settlement_amount")
+    )
+    confidence_parts = scores + [len(required_detected) / 2, float(amount_detected)]
+    confidence = sum(confidence_parts) / len(confidence_parts) if confidence_parts else 0.0
+    return mapping, round(confidence, 2), ambiguous
+
+
+def column_value_score(
+    field: str, rows: list[list[object]], header_index: int, column_index: int
+) -> float:
+    values = [
+        row[column_index]
+        for row in rows[header_index + 1 : header_index + 16]
+        if column_index < len(row) and clean_text(row[column_index])
+    ]
+    if not values:
+        return 0.0
+    if field in {"transaction_date", "posted_date"}:
+        matches = sum(
+            bool(parse_date(value, "day_first") or parse_date(value, "month_first"))
+            for value in values
+        )
+    elif field in {"amount", "debit", "credit", "purchase_amount", "settlement_amount"}:
+        matches = sum(parse_number(value) is not None for value in values)
+    elif field in {"purchase_currency", "settlement_currency"}:
+        matches = sum(currency_code(value) is not None for value in values)
+    else:
+        matches = sum(bool(clean_text(value)) for value in values)
+    return 0.18 * matches / len(values)
+
+
+def missing_generic_mapping_fields(mapping: dict[str, int]) -> list[str]:
+    missing = []
+    if "transaction_date" not in mapping and "posted_date" not in mapping:
+        missing.append("transaction date")
+    if "description" not in mapping:
+        missing.append("description")
+    if not any(
+        field in mapping
+        for field in ("amount", "debit", "credit", "purchase_amount", "settlement_amount")
+    ):
+        missing.append("amount")
+    return missing
+
+
+def infer_sign_convention(
+    headers: list[object], mapping: dict[str, int], saved: str = ""
+) -> tuple[str, bool]:
+    if saved in SIGN_CONVENTIONS:
+        return saved, False
+    if "debit" in mapping or "credit" in mapping:
+        return "debit_credit", False
+    amount_fields = [
+        field for field in ("amount", "purchase_amount", "settlement_amount") if field in mapping
+    ]
+    if not amount_fields:
+        return "", False
+    labels = {field: normalize_key(headers[mapping[field]]) for field in amount_fields}
+    explicit_positive = {alias for field in amount_fields for alias in GENERIC_FIELD_ALIASES[field]}
+    if all(label in explicit_positive for label in labels.values()):
+        return "positive_purchase", False
+    return "", True
+
+
+def apply_generic_column_mapping(
+    rows: list[list[object]], header_index: int, mapping: dict[str, int]
+) -> list[list[object]]:
+    transformed = [list(row) for row in rows]
+    headers = [normalize_key(value) for value in transformed[header_index]]
+    for field, index in mapping.items():
+        while len(headers) <= index:
+            headers.append("")
+        headers[index] = field
+    transformed[header_index] = headers
+    return transformed
+
+
+def transaction_preview(
+    transactions: list[NormalizedTransaction], limit: int = 3
+) -> list[dict[str, object]]:
+    return [
+        {
+            "source_row": item.source_row,
+            "date": item.transaction_date,
+            "description": item.description,
+            "purchase_amount": item.purchase_amount,
+            "purchase_currency": item.purchase_currency,
+            "settlement_amount": item.settlement_amount,
+            "settlement_currency": item.settlement_currency,
+            "transaction_type": item.transaction_type,
+        }
+        for item in transactions[:limit]
+    ]
+
+
 def preflight_statement_files(paths: list[Path]) -> list[StatementFileReport]:
     reports: list[StatementFileReport] = []
     for path in paths:
@@ -61,11 +427,16 @@ def preflight_statement_files(paths: list[Path]) -> list[StatementFileReport]:
             reports.append(report)
             continue
         try:
-            rows = read_tabular_rows(path)
-            provider, header_index = detect_provider(rows)
-            report.provider = provider
-            report.rows_read = max(len(rows) - header_index - 1, 0)
-            date_profile = statement_date_profile(path, provider, rows, header_index)
+            plan = prepare_statement_file(path)
+            apply_import_plan_to_report(report, plan)
+            if plan["errors"]:
+                report.errors.extend(f"{path.name}: {message}" for message in plan["errors"])
+                reports.append(report)
+                continue
+            rows = plan["rows"]
+            provider = plan["provider"]
+            header_index = plan["header_index"]
+            date_profile = statement_date_profile(path, provider, rows, header_index, plan)
             apply_date_profile_to_report(report, date_profile)
             if report.date_convention_required:
                 report.errors.append(
@@ -78,8 +449,11 @@ def preflight_statement_files(paths: list[Path]) -> list[StatementFileReport]:
                 rows,
                 header_index,
                 date_profile["convention"],
+                plan,
             )
             report.rows_normalized = len(transactions)
+            report.rows_skipped = max(report.rows_read - report.rows_normalized, 0)
+            report.preview = transaction_preview(transactions)
             if report.rows_read and not transactions:
                 raise StatementNormalizationError(
                     f"{path.name}: recognized as {provider}, but no valid transactions could be normalized."
@@ -114,19 +488,24 @@ def normalize_statement_files(
             result.errors.append(message)
             continue
         try:
-            rows = read_tabular_rows(path)
-            provider, header_index = detect_provider(rows)
-            report.provider = provider
-            report.rows_read = max(len(rows) - header_index - 1, 0)
-            date_profile = statement_date_profile(path, provider, rows, header_index)
+            plan = prepare_statement_file(path)
+            apply_import_plan_to_report(report, plan)
+            if plan["errors"]:
+                raise StatementNormalizationError("; ".join(plan["errors"]))
+            rows = plan["rows"]
+            provider = plan["provider"]
+            header_index = plan["header_index"]
+            date_profile = statement_date_profile(path, provider, rows, header_index, plan)
             apply_date_profile_to_report(report, date_profile)
             if report.date_convention_required:
                 raise StatementNormalizationError(
                     "dates are ambiguous. Choose day-first or month-first before syncing."
                 )
             adapter = ADAPTERS[provider]
-            transactions = adapter(path, rows, header_index, date_profile["convention"])
+            transactions = adapter(path, rows, header_index, date_profile["convention"], plan)
             report.rows_normalized = len(transactions)
+            report.rows_skipped = max(report.rows_read - report.rows_normalized, 0)
+            report.preview = transaction_preview(transactions)
             if report.rows_read and not transactions:
                 raise StatementNormalizationError(
                     f"recognized as {provider}, but no valid transactions could be normalized."
@@ -169,15 +548,27 @@ def normalize_statement_files(
 
 
 def read_tabular_rows(path: Path) -> list[list[object]]:
+    rows, _metadata = read_tabular_rows_with_metadata(path)
+    return rows
+
+
+def read_tabular_rows_with_metadata(path: Path) -> tuple[list[list[object]], dict[str, str]]:
     suffix = path.suffix.lower()
     if suffix == ".csv":
-        text = path.read_text(encoding="utf-8-sig", errors="replace")
+        text, encoding = decode_csv_text(path.read_bytes())
         delimiter = detect_delimiter(text)
         lines = [unwrap_quoted_delimited_line(line, delimiter) for line in text.splitlines()]
-        return [list(row) for row in csv.reader(lines, delimiter=delimiter)]
+        try:
+            rows = [list(row) for row in csv.reader(lines, delimiter=delimiter)]
+        except csv.Error as exc:
+            raise StatementNormalizationError(f"CSV quoting is malformed: {exc}.") from exc
+        return rows, {"encoding": encoding, "delimiter": delimiter}
     if suffix == ".xlsx":
         workbook = load_workbook(path, data_only=True, read_only=True)
-        return [list(row) for row in workbook.active.iter_rows(values_only=True)]
+        return [list(row) for row in workbook.active.iter_rows(values_only=True)], {
+            "encoding": "spreadsheet",
+            "delimiter": "",
+        }
     if suffix == ".xls":
         try:
             import xlrd
@@ -187,18 +578,46 @@ def read_tabular_rows(path: Path) -> list[list[object]]:
         sheet = workbook.sheet_by_index(0)
         return [
             [sheet.cell_value(row, col) for col in range(sheet.ncols)] for row in range(sheet.nrows)
-        ]
+        ], {"encoding": "spreadsheet", "delimiter": ""}
     raise StatementNormalizationError(
         f"Unsupported statement format: {suffix or '(none)'}. Use CSV, XLS, or XLSX."
     )
 
 
+def decode_csv_text(payload: bytes) -> tuple[str, str]:
+    if payload.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return payload.decode("utf-16"), "utf-16"
+    if payload.startswith(b"\xef\xbb\xbf"):
+        return payload.decode("utf-8-sig"), "utf-8-sig"
+    if b"\x00" in payload[:200]:
+        try:
+            return payload.decode("utf-16"), "utf-16"
+        except UnicodeDecodeError:
+            pass
+    try:
+        return payload.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError:
+        return payload.decode("cp1252"), "cp1252"
+
+
 def detect_delimiter(text: str) -> str:
-    lines = [line for line in text.splitlines()[:20] if line.strip()]
+    lines = [line for line in text.splitlines()[:40] if line.strip()]
     if not lines:
         return ","
     candidates = [",", ";", "\t"]
-    return max(candidates, key=lambda delimiter: sum(line.count(delimiter) for line in lines))
+    sample = "\n".join(lines)
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=";,\t")
+        if dialect.delimiter in candidates:
+            return dialect.delimiter
+    except csv.Error:
+        pass
+    scores = {}
+    for delimiter in candidates:
+        counts = [len(next(csv.reader([line], delimiter=delimiter))) for line in lines]
+        common = max(set(counts), key=counts.count)
+        scores[delimiter] = (sum(count == common and count > 1 for count in counts), common)
+    return max(candidates, key=lambda delimiter: scores[delimiter])
 
 
 def unwrap_quoted_delimited_line(line: str, delimiter: str) -> str:
@@ -252,9 +671,39 @@ def detect_provider(rows: list[list[object]]) -> tuple[str, int]:
             return "wise", index
         if has_generic_signature(headers):
             return "generic", index
+    candidate = generic_header_candidate(rows)
+    if candidate is not None:
+        return "generic", candidate
     raise StatementNormalizationError(
-        "Statement columns are not recognized; a provider adapter is required."
+        "Statement columns are not recognized; choose a CSV with a tabular header row."
     )
+
+
+def generic_header_candidate(rows: list[list[object]]) -> int | None:
+    aliases = set().union(*GENERIC_FIELD_ALIASES.values())
+    candidates: list[tuple[float, int]] = []
+    for index, row in enumerate(rows[:60]):
+        values = [clean_text(value) for value in row]
+        nonempty = [value for value in values if value]
+        if len(nonempty) < 2:
+            continue
+        normalized = [normalize_key(value) for value in nonempty]
+        alias_hits = sum(value in aliases for value in normalized)
+        text_like = sum(
+            parse_number(value) is None and not numeric_date_parts(value) for value in nonempty
+        )
+        following = [
+            candidate
+            for candidate in rows[index + 1 : index + 5]
+            if any(clean_text(value) for value in candidate)
+        ]
+        width_consistency = sum(len(candidate) >= len(row) - 1 for candidate in following)
+        score = alias_hits * 10 + text_like + width_consistency * 2 + min(len(nonempty), 10) / 10
+        candidates.append((score, index))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][1]
 
 
 def has_generic_signature(headers: set[str]) -> bool:
@@ -295,6 +744,7 @@ def statement_date_profile(
     provider: str,
     rows: list[list[object]],
     header_index: int,
+    plan: dict | None = None,
 ) -> dict:
     date_values = statement_date_values(rows, header_index)
     if provider != "generic":
@@ -309,6 +759,9 @@ def statement_date_profile(
     settings = load_statement_settings(path.parent.parent)
     saved = settings.get("date_conventions", {}).get(statement_file_fingerprint(path), {})
     saved_convention = saved.get("convention") if isinstance(saved, dict) else None
+    if not saved_convention and plan:
+        profile = plan.get("saved_profile") or {}
+        saved_convention = profile.get("date_convention")
     convention = inferred or (saved_convention if saved_convention in DATE_CONVENTIONS else "")
     ambiguous = has_ambiguous_numeric_dates(date_values)
     required = ambiguous and not convention
@@ -371,10 +824,16 @@ def has_ambiguous_numeric_dates(values: list[object]) -> bool:
 def numeric_date_parts(value: object) -> tuple[int, int, int] | None:
     if isinstance(value, (datetime, int, float)):
         return None
-    match = re.match(r"^\s*(\d{1,2})/(\d{1,2})/(\d{4})(?:\D|$)", clean_text(value))
+    match = re.match(
+        r"^\s*(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{2}|\d{4})(?:\D|$)",
+        clean_text(value),
+    )
     if not match:
         return None
-    return tuple(int(part) for part in match.groups())
+    first, second, year = (int(part) for part in match.groups())
+    if year < 100:
+        year += 2000
+    return first, second, year
 
 
 def parsed_date_samples(values: list[object], convention: str, limit: int = 3) -> list[str]:
@@ -421,6 +880,66 @@ def set_statement_date_convention(
     save_statement_settings(trip_dir, settings)
 
 
+def set_statement_import_profile(
+    trip_dir: Path,
+    filename: str,
+    *,
+    header_row: int,
+    mapping: dict[str, object],
+    sign_convention: str,
+    date_convention: str = "",
+) -> None:
+    if not filename or filename != Path(filename).name:
+        raise ValueError("Invalid statement filename.")
+    statements_dir = (trip_dir / "card_statements").resolve()
+    path = (statements_dir / filename).resolve()
+    if path.parent != statements_dir or not path.is_file():
+        raise FileNotFoundError("Statement file was not found.")
+    if path.suffix.lower() != ".csv":
+        raise ValueError("Manual import profiles are available for CSV statements only.")
+    rows, _metadata = read_tabular_rows_with_metadata(path)
+    header_index = header_row - 1
+    if header_index < 0 or header_index >= len(rows):
+        raise ValueError("Header row is outside the CSV file.")
+    headers = list(rows[header_index])
+    selected_mapping = normalize_saved_mapping(mapping, len(headers))
+    missing = missing_generic_mapping_fields(selected_mapping)
+    if missing:
+        raise ValueError("Map " + ", ".join(missing) + " before saving.")
+    if sign_convention not in SIGN_CONVENTIONS:
+        raise ValueError("Choose whether positive or negative values are purchases.")
+    if sign_convention == "debit_credit" and not ({"debit", "credit"} & set(selected_mapping)):
+        raise ValueError("Separate debit/credit signs require a debit or credit column.")
+    if date_convention and date_convention not in DATE_CONVENTIONS:
+        raise ValueError("Choose day-first or month-first.")
+
+    structure = statement_structure_fingerprint(headers)
+    settings = load_statement_settings(trip_dir)
+    settings["version"] = 2
+    profiles = settings.setdefault("import_profiles", {})
+    profiles[structure] = {
+        "headers": [clean_text(value) for value in headers],
+        "mapping": selected_mapping,
+        "sign_convention": sign_convention,
+        "date_convention": date_convention,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    overrides = settings.setdefault("file_import_overrides", {})
+    overrides[statement_file_fingerprint(path)] = {
+        "filename": filename,
+        "header_index": header_index,
+        "structure_fingerprint": structure,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    if date_convention:
+        settings.setdefault("date_conventions", {})[statement_file_fingerprint(path)] = {
+            "filename": filename,
+            "convention": date_convention,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+    save_statement_settings(trip_dir, settings)
+
+
 def statement_file_fingerprint(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -432,16 +951,27 @@ def statement_file_fingerprint(path: Path) -> str:
 def load_statement_settings(trip_dir: Path) -> dict:
     path = trip_dir / STATEMENT_SETTINGS_FILE
     if not path.exists():
-        return {"version": 1, "date_conventions": {}}
+        return statement_settings_defaults()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {"version": 1, "date_conventions": {}}
+        return statement_settings_defaults()
     if not isinstance(data, dict):
-        return {"version": 1, "date_conventions": {}}
+        return statement_settings_defaults()
     data.setdefault("version", 1)
     data.setdefault("date_conventions", {})
+    data.setdefault("import_profiles", {})
+    data.setdefault("file_import_overrides", {})
     return data
+
+
+def statement_settings_defaults() -> dict:
+    return {
+        "version": 2,
+        "date_conventions": {},
+        "import_profiles": {},
+        "file_import_overrides": {},
+    }
 
 
 def save_statement_settings(trip_dir: Path, settings: dict) -> None:
@@ -454,6 +984,7 @@ def normalize_amex(
     rows: list[list[object]],
     header_index: int,
     date_convention: str,
+    _plan: dict | None = None,
 ) -> list[NormalizedTransaction]:
     transactions: list[NormalizedTransaction] = []
     for source_row, row in rows_as_dicts(rows, header_index):
@@ -510,6 +1041,7 @@ def normalize_bmo(
     rows: list[list[object]],
     header_index: int,
     date_convention: str,
+    _plan: dict | None = None,
 ) -> list[NormalizedTransaction]:
     transactions: list[NormalizedTransaction] = []
     for source_row, row in rows_as_dicts(rows, header_index):
@@ -569,6 +1101,7 @@ def normalize_bnc(
     rows: list[list[object]],
     header_index: int,
     date_convention: str,
+    _plan: dict | None = None,
 ) -> list[NormalizedTransaction]:
     transactions: list[NormalizedTransaction] = []
     for source_row, row in rows_as_dicts(rows, header_index):
@@ -634,6 +1167,7 @@ def normalize_wise(
     rows: list[list[object]],
     header_index: int,
     date_convention: str,
+    _plan: dict | None = None,
 ) -> list[NormalizedTransaction]:
     transactions: list[NormalizedTransaction] = []
     for source_row, row in rows_as_dicts(rows, header_index):
@@ -733,49 +1267,98 @@ def normalize_generic(
     rows: list[list[object]],
     header_index: int,
     date_convention: str,
+    plan: dict | None = None,
 ) -> list[NormalizedTransaction]:
     transactions: list[NormalizedTransaction] = []
+    sign_convention = str((plan or {}).get("sign_convention") or "positive_purchase")
     for source_row, row in rows_as_dicts(rows, header_index):
         description = clean_text(
             first_value(row, ["description", "merchant", "details", "transaction", "name"])
         )
+        raw_date = first_value(
+            row, ["date", "transaction_date", "posted_date", "date_posted", "date_processed"]
+        )
+        if not parse_date(raw_date, date_convention) and normalize_key(description) in {
+            "balance",
+            "closing_balance",
+            "ending_balance",
+            "opening_balance",
+            "statement_total",
+            "total",
+            "totals",
+        }:
+            continue
         debit = parse_number(first_value(row, ["debit", "charge", "withdrawal"]))
         credit = parse_number(first_value(row, ["credit"]))
-        amount = parse_number(first_value(row, ["amount", "cad_amount", "charges_adjustments"]))
+        amount = parse_number(
+            first_value(row, ["settlement_amount", "amount", "cad_amount", "charges_adjustments"])
+        )
+        raw_purchase_value = first_value(
+            row, ["purchase_amount", "foreign_amount", "original_amount"]
+        )
+        purchase_amount = parse_number(raw_purchase_value)
+        if amount is None:
+            amount = purchase_amount
         special_credit_type = classify_credit(description)
         special_credit_type = special_credit_type if special_credit_type != "refund" else None
+        raw_type = normalize_key(first_value(row, ["transaction_type", "type"]))
+        explicit_types = {
+            "purchase": "purchase",
+            "debit": "purchase",
+            "charge": "purchase",
+            "refund": "refund",
+            "credit": special_credit_type or "refund",
+            "payment": "payment",
+            "cashback": "cashback",
+            "deposit": "deposit",
+            "fee": "fee",
+            "cash": "cash",
+            "withdrawal": "cash",
+            "transfer": "transfer",
+        }
         if debit not in (None, 0):
             transaction_type = "purchase"
             signed_amount = abs(debit)
         elif credit not in (None, 0):
             transaction_type = special_credit_type or "refund"
             signed_amount = -abs(credit)
+        elif raw_type in explicit_types and amount is not None:
+            transaction_type = explicit_types[raw_type]
+            signed_amount = signed_amount_for_type(amount, transaction_type)
         elif amount is not None:
             if special_credit_type:
                 transaction_type = special_credit_type
                 signed_amount = -abs(amount)
-            elif amount < 0:
-                transaction_type = "refund"
-                signed_amount = -abs(amount)
             else:
-                transaction_type = "purchase"
-                signed_amount = abs(amount)
+                purchase_sign = (
+                    amount >= 0 if sign_convention == "positive_purchase" else amount < 0
+                )
+                transaction_type = "purchase" if purchase_sign else "refund"
+                signed_amount = abs(amount) if purchase_sign else -abs(amount)
         else:
             continue
-        date = parse_date(
+        date = parse_date(raw_date, date_convention)
+        settlement_currency = (
+            currency_code(first_value(row, ["settlement_currency", "currency"])) or "CAD"
+        )
+        purchase_currency = currency_code(
+            first_value(row, ["purchase_currency", "foreign_currency", "original_currency"])
+        )
+        foreign_amount, embedded_foreign_currency = parse_foreign_value(
             first_value(
-                row, ["date", "transaction_date", "posted_date", "date_posted", "date_processed"]
-            ),
-            date_convention,
+                row,
+                ["foreign_spend_amount", "foreign_amount", "original_amount"],
+            )
+            or raw_purchase_value
         )
-        currency = currency_code(first_value(row, ["currency", "settlement_currency"])) or "CAD"
-        foreign_amount, foreign_currency = parse_foreign_value(
-            first_value(row, ["foreign_spend_amount", "foreign_amount", "original_amount"])
-        )
+        if purchase_amount is None:
+            purchase_amount = foreign_amount
+        if purchase_currency is None:
+            purchase_currency = embedded_foreign_currency or settlement_currency
         match_eligible = transaction_type in {"purchase", "refund"}
-        if foreign_amount is not None:
-            foreign_amount = (
-                abs(foreign_amount) if transaction_type == "purchase" else -abs(foreign_amount)
+        if purchase_amount is not None:
+            purchase_amount = (
+                abs(purchase_amount) if transaction_type == "purchase" else -abs(purchase_amount)
             )
         group_id = source_group_id("generic", path, source_row)
         transactions.append(
@@ -800,15 +1383,15 @@ def normalize_generic(
                 status="completed",
                 direction="out" if signed_amount >= 0 else "in",
                 match_eligible=match_eligible,
-                purchase_amount=(foreign_amount if foreign_amount is not None else signed_amount)
+                purchase_amount=(purchase_amount if purchase_amount is not None else signed_amount)
                 if match_eligible
                 else None,
-                purchase_currency=(foreign_currency or currency) if match_eligible else None,
+                purchase_currency=purchase_currency if match_eligible else None,
                 settlement_amount=signed_amount,
-                settlement_currency=currency,
-                cad_amount=signed_amount if currency == "CAD" else None,
+                settlement_currency=settlement_currency,
+                cad_amount=signed_amount if settlement_currency == "CAD" else None,
                 cad_completeness="complete"
-                if match_eligible and currency == "CAD"
+                if match_eligible and settlement_currency == "CAD"
                 else ("incomplete" if match_eligible else "not_applicable"),
                 match_status="unmatched" if match_eligible else "ignored",
             )
@@ -821,6 +1404,7 @@ def normalize_standard(
     rows: list[list[object]],
     header_index: int,
     date_convention: str,
+    _plan: dict | None = None,
 ) -> list[NormalizedTransaction]:
     """Normalize the documented provider-neutral CSV template."""
 
@@ -909,7 +1493,7 @@ def normalize_standard(
 
 ADAPTERS: dict[
     str,
-    Callable[[Path, list[list[object]], int, str], list[NormalizedTransaction]],
+    Callable[[Path, list[list[object]], int, str, dict | None], list[NormalizedTransaction]],
 ] = {
     "standard": normalize_standard,
     "amex": normalize_amex,
@@ -1102,7 +1686,21 @@ def clean_text(value: object) -> str:
 
 def currency_code(value: object) -> str | None:
     text = clean_text(value).upper()
-    return text if re.fullmatch(r"[A-Z]{3}", text) else None
+    match = re.search(r"\b([A-Z]{3})\b", text)
+    if match:
+        return match.group(1)
+    symbols = {
+        "C$": "CAD",
+        "CA$": "CAD",
+        "US$": "USD",
+        "A$": "AUD",
+        "AU$": "AUD",
+        "€": "EUR",
+        "£": "GBP",
+        "¥": "JPY",
+        "$": "CAD",
+    }
+    return symbols.get(text)
 
 
 def parse_number(value: object) -> float | None:
@@ -1110,9 +1708,42 @@ def parse_number(value: object) -> float | None:
         return None
     if isinstance(value, (int, float)):
         return float(value)
-    text = clean_text(value)
+    text = clean_text(value).replace("\u00a0", "").replace("\u202f", "")
     negative = text.startswith("(") and text.endswith(")")
-    text = text.strip("()").replace("$", "").replace(",", "").strip()
+    if re.search(r"\bCR\s*$", text, flags=re.IGNORECASE):
+        negative = True
+    text = re.sub(r"\b(?:CR|DR)\s*$", "", text, flags=re.IGNORECASE)
+    text = text.strip("()").strip()
+    text = re.sub(r"[^0-9,.'+\-]", "", text).replace("'", "")
+    if not text or text in {"+", "-"}:
+        return None
+    comma_positions = [match.start() for match in re.finditer(",", text)]
+    dot_positions = [match.start() for match in re.finditer(r"\.", text)]
+    if comma_positions and dot_positions:
+        decimal = "," if comma_positions[-1] > dot_positions[-1] else "."
+        other = "." if decimal == "," else ","
+        decimals = len(text) - text.rfind(decimal) - 1
+        if decimals in {1, 2}:
+            text = text.replace(other, "").replace(decimal, ".")
+        else:
+            text = text.replace(",", "").replace(".", "")
+    elif comma_positions:
+        decimals = len(text) - comma_positions[-1] - 1
+        if decimals in {1, 2}:
+            text = (
+                text.replace(",", ".")
+                if len(comma_positions) == 1
+                else text.replace(",", "", len(comma_positions) - 1).replace(",", ".")
+            )
+        else:
+            text = text.replace(",", "")
+    elif len(dot_positions) > 1:
+        decimals = len(text) - dot_positions[-1] - 1
+        if decimals in {1, 2}:
+            head, tail = text.rsplit(".", 1)
+            text = head.replace(".", "") + "." + tail
+        else:
+            text = text.replace(".", "")
     try:
         number = float(text)
     except ValueError:
@@ -1133,6 +1764,7 @@ def parse_date(value: object, convention: str = "") -> str | None:
         for format_string in (
             "%Y-%m-%d",
             "%Y/%m/%d",
+            "%Y.%m.%d",
             "%Y%m%d",
             "%d-%b-%y",
             "%d-%B-%y",
@@ -1141,6 +1773,8 @@ def parse_date(value: object, convention: str = "") -> str | None:
             "%d %b %Y",
             "%d %B %Y",
             "%d %b. %Y",
+            "%d.%m.%Y",
+            "%d.%m.%y",
             "%Y-%m-%d %H:%M:%S",
         ):
             try:
@@ -1263,6 +1897,14 @@ def classify_credit(description: str) -> str:
     if re.search(r"transfer", description, re.I):
         return "transfer"
     return "refund"
+
+
+def signed_amount_for_type(amount: float, transaction_type: str) -> float:
+    if transaction_type == "purchase" or transaction_type in {"fee", "cash"}:
+        return abs(amount)
+    if transaction_type in STANDARD_INCOMING_TYPES or transaction_type == "payment":
+        return -abs(amount)
+    return amount
 
 
 def classify_bnc_debit(description: str, category: str) -> str:

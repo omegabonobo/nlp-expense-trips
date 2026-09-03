@@ -1,0 +1,225 @@
+{# Inputs: state, trip, trip_busy, consolidation, and workflow readiness flags #}
+        <section id="final-review" class="card consolidation-card">
+          <div class="card-heading">
+            <div>
+              <p class="card-kicker">Step 5</p>
+              <h3>Review and finalize the claim</h3>
+            </div>
+            <span class="mode-badge {{ 'finalized' if consolidation.is_finalized else '' }}">
+              {{ 'Finalized' if consolidation.is_finalized else consolidation.summary.blocking_count|string + ' blocking' }}
+            </span>
+          </div>
+          <p class="section-description">
+            This is the claim that will be exported. Correct receipt fields, people, included lines, and statement mappings above;
+            calculated CAD and accounting results update here before Excel is created.
+          </p>
+
+          <div class="claim-summary">
+            <div><span>Traveller reimbursement</span><strong>{{ '%.2f'|format(consolidation.summary.employee_reimbursement_total_cad) }} CAD</strong></div>
+            <div><span>Corporate-paid</span><strong>{{ '%.2f'|format(consolidation.summary.corporate_paid_total_cad) }} CAD</strong></div>
+            {% if consolidation.claim_program == 'ivado_reimbursed' %}
+              <div><span>IVADO claim</span><strong>{{ '%.2f'|format(consolidation.summary.ivado_claim_total_cad) }} CAD</strong></div>
+              <div><span>IVADO excluded</span><strong>{{ '%.2f'|format(consolidation.summary.ivado_excluded_total_cad) }} CAD</strong></div>
+            {% else %}
+              <div><span>Reviewed total</span><strong>{{ '%.2f'|format(consolidation.summary.reviewed_total_cad) }} CAD</strong></div>
+            {% endif %}
+            <div class="{{ 'review' if consolidation.summary.blocking_count else '' }}"><span>Blocking issues</span><strong>{{ consolidation.summary.blocking_count }}</strong></div>
+          </div>
+
+          <div class="issue-queue">
+            <div class="subsection-heading">
+              <div><h4>Review queue</h4><p>Every blocking item must be resolved before finalization.</p></div>
+            </div>
+            {% for issue in consolidation.issues %}
+              <a class="issue-row {{ issue.severity }}" href="#{{ issue.target }}">
+                <span>{{ issue.kind|replace('_', ' ')|title }}</span>
+                <strong>{{ issue.message }}</strong>
+              </a>
+            {% else %}
+              <div class="notice info">No blocking review items remain. Check the calculated expense ledger, then finalize.</div>
+            {% endfor %}
+          </div>
+
+          <div class="reconciliation-table-wrap result-ledger">
+            <table class="reconciliation-table">
+              <thead>
+                <tr><th>Expense</th><th>Payment source and basis</th><th>CAD and FX</th><th>Company result</th>{% if consolidation.claim_program == 'ivado_reimbursed' %}<th>IVADO result</th>{% endif %}<th>Status</th></tr>
+              </thead>
+              <tbody>
+                {% for expense in consolidation.expenses %}
+                  <tr class="{{ 'audit-row' if not expense.included else 'needs-review' if expense.status == 'review' else '' }}">
+                    <td>
+                      <strong>{{ expense.vendor or expense.source_file }}</strong>
+                      <span>{{ expense.date or 'date missing' }} · {{ expense.expense_type or 'type missing' }}</span>
+                      <small>{{ expense.source_file }}</small>
+                    </td>
+                    <td>
+                      <strong>{{ '%.2f'|format(expense.claimable_original) }} {{ expense.currency or '' }}</strong>
+                      <span>
+                        {{ expense.paid_by|replace('_', ' ')|title }} ·
+                        {{ 'Excluded' if not expense.included else
+                           ('Included lines ÷ ' + expense.number_of_people|string + (' people' if expense.number_of_people != 1 else ' person')) }}
+                      </span>
+                    </td>
+                    <td>
+                      {% if expense.cad_amount_used is not none %}
+                        <strong>{{ '%.2f'|format(expense.cad_amount_used) }} CAD source</strong>
+                        <span>{{ expense.cad_source|replace('_', ' ')|title }}</span>
+                        {% if expense.fx_rate is not none %}<small>FX {{ '%.6f'|format(expense.fx_rate) }} CAD/{{ expense.currency }}</small>{% endif %}
+                        {% if expense.fx_basis_amount_used is not none %}
+                          <small>
+                            FX basis {{ '%.2f'|format(expense.fx_basis_amount_used) }} {{ expense.currency }}
+                            · {{ expense.fx_basis_status|replace('_', ' ') }}
+                          </small>
+                        {% endif %}
+                      {% else %}
+                        <strong>CAD unavailable</strong>
+                      {% endif %}
+                    </td>
+                    <td>
+                      <strong>{{ '%.2f CAD'|format(expense.arvine_reimbursable_cad) if expense.arvine_reimbursable_cad is not none else '—' }}</strong>
+                      <span>Traveller reimbursement</span>
+                      {% if expense.cad_source in ['statement', 'statement_aggregated', 'allocation', 'allocation_aggregated'] and expense.statement_receipt_difference is not none and expense.statement_receipt_difference > 0.005 %}
+                        <small>Full card charge used; receipt taxes are not increased for the {{ '%.2f'|format(expense.statement_receipt_difference) }} {{ expense.statement_purchase_currency }} tip/adjustment.</small>
+                      {% endif %}
+                      {% if expense.corporate_paid_cad %}<small>{{ '%.2f CAD'|format(expense.corporate_paid_cad) }} corporate-paid</small>{% endif %}
+                    </td>
+                    {% if consolidation.claim_program == 'ivado_reimbursed' %}
+                      <td>
+                        <strong>{{ '%.2f CAD'|format(expense.ivado_claimable_cad) }}</strong>
+                        <span>Claim · {{ '%.2f CAD'|format(expense.ivado_excluded_cad) }} excluded</span>
+                      </td>
+                    {% endif %}
+                    <td><span class="match-badge {{ 'ok' if expense.status == 'ready' else 'audit' if expense.status == 'excluded' else 'review' }}">{{ expense.status }}</span></td>
+                  </tr>
+                {% else %}
+                  <tr><td colspan="{{ 6 if consolidation.claim_program == 'ivado_reimbursed' else 5 }}" class="empty-line">Scan receipts to calculate the claim.</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+
+          {% if consolidation.accounting.available %}
+            <div class="accounting-preview">
+              <div>
+                <strong>Accounting preview</strong>
+                <span>
+                  {% if consolidation.claim_program == 'ivado_reimbursed' %}
+                    IVADO-eligible expenses are client-recoverable pass-throughs; Arvine-borne meal/alcohol is split
+                    {{ '%.0f'|format(consolidation.accounting.meal_deduction_pct * 100) }}% deductible
+                  {% else %}
+                    Meals: {{ '%.0f'|format(consolidation.accounting.meal_deduction_pct * 100) }}% deductible ·
+                    {{ '%.0f'|format(consolidation.accounting.meal_tax_recovery_pct * 100) }}% tax recovery where registered
+                  {% endif %} ·
+                  counter-account: {{ consolidation.accounting.counter_account }}
+                </span>
+              </div>
+              <div class="accounting-preview-rows">
+                {% for row in consolidation.accounting.rows %}
+                  <span>
+                    {{ row.account }} <strong>{{ '%.2f'|format(row.amount_cad) }} CAD</strong>
+                    {% if row.rounding_adjustment_cad %}<small>includes {{ '%+.2f'|format(row.rounding_adjustment_cad) }} rounding</small>{% endif %}
+                  </span>
+                {% endfor %}
+              </div>
+              <div class="accounting-check {{ 'review' if consolidation.accounting.balance_difference|abs >= 0.01 else '' }}">
+                Journal {{ '%.2f'|format(consolidation.accounting.journal_total) }} CAD ·
+                claim {{ '%.2f'|format(consolidation.accounting.claim_total) }} CAD ·
+                difference {{ '%+.2f'|format(consolidation.accounting.balance_difference) }}
+                {% if consolidation.accounting.rounding_adjustment_cad %}
+                  <small>
+                    Account totals initially differed by {{ '%+.2f'|format(consolidation.accounting.pre_adjustment_difference) }} CAD after cent rounding.
+                    A {{ '%+.2f'|format(consolidation.accounting.rounding_adjustment_cad) }} CAD adjustment was applied to {{ consolidation.accounting.rounding_adjustment_account }}.
+                  </small>
+                {% endif %}
+              </div>
+            </div>
+          {% endif %}
+
+          {% if trip.mode == 'company' %}
+            <label class="confirmation">
+              <input type="checkbox" id="statements-complete" {{ 'checked' if consolidation.is_finalized }}>
+              <span>I confirm that all card and bank statements for this trip have been added.</span>
+            </label>
+            {% if reconciliation and reconciliation.available and reconciliation.coverage.gaps %}
+              <label class="field-label">
+                Coverage gap explanation
+                <textarea class="input" id="coverage-acknowledgement" rows="3" placeholder="Explain why finalization can proceed despite the gaps." required>{{ reconciliation.coverage.confirmation.note if reconciliation.coverage.confirmation else '' }}</textarea>
+              </label>
+            {% endif %}
+          {% endif %}
+
+          {% if consolidation.is_finalized %}
+            <div class="notice info">
+              Finalized {{ consolidation.finalized_at|replace('T', ' ') }}. Any source or review change automatically reopens it.
+            </div>
+          {% endif %}
+          <button class="button primary large" id="finalize-button"
+            {{ 'disabled' if trip_busy or not consolidation.is_ready }}>
+            {{ 'Finalize current review again' if consolidation.is_finalized else 'Finalize current review' }}
+          </button>
+        </section>
+
+        <section class="card generate-card">
+          <div class="card-heading">
+            <div>
+              <p class="card-kicker">Step 6</p>
+              <h3>Export the finalized claim to Excel</h3>
+            </div>
+            <span class="mode-badge">{{ trip.mode|upper }}</span>
+          </div>
+
+          {% if trip.mode == 'company' %}
+            <div class="accounting-assumptions">
+              <div>
+                <strong>Accounting assumptions · profile {{ trip.accounting_profile.version }}</strong>
+                <span>
+                  {{ trip.accounting_profile.counter_account }} ·
+                  GST/HST {{ 'registered' if trip.accounting_profile.gst_hst_registrant else 'not registered' }} ·
+                  QST {{ 'registered' if trip.accounting_profile.qst_registrant else 'not registered' }} ·
+                  meals {{ (trip.accounting_profile.meal_deduction_pct * 100)|round|int }}% deductible
+                </span>
+              </div>
+              <button class="button secondary small" id="open-accounting-button" {{ 'disabled' if trip_busy }}>Review assumptions</button>
+            </div>
+          {% endif %}
+
+          {% if not state.system.heic_available %}
+            <div class="notice info">HEIC is not enabled in this environment. Re-run local setup, or export iPhone scans as PDF, JPEG, or PNG.</div>
+          {% endif %}
+          {% if trip.statement_errors %}
+            <div class="notice error">Resolve the statement errors above before generating.</div>
+          {% endif %}
+          {% if reconciliation_required %}
+            <div class="notice warning">Run Sync and auto-match with the current receipts and statements before generating.</div>
+          {% endif %}
+          {% if allocation_required %}
+            <div class="notice warning">Finish all split allocations so their CAD totals balance before generating.</div>
+          {% endif %}
+          {% if line_review_required %}
+            <div class="notice warning">Scan and review the current receipt line items before generating.</div>
+          {% endif %}
+          {% if line_review_blocking %}
+            <div class="notice error">Resolve excluded lines on receipts with incomplete line totals before generating.</div>
+          {% endif %}
+          {% if finalization_required %}
+            <div class="notice warning">Finalize the current app review above before exporting Excel.</div>
+          {% endif %}
+
+          <button class="button primary large" id="generate-button" data-trip="{{ trip.name }}"
+            {{ 'disabled' if trip_busy or not trip.receipts or trip.statement_errors or reconciliation_required or allocation_required or line_review_required or line_review_blocking or finalization_required else '' }}>
+            Generate report bundle
+          </button>
+
+          <div id="job-panel" class="job-panel {{ '' if state.job else 'hidden' }}">
+            <div class="progress-track"><span id="progress-bar"></span></div>
+            <div class="job-heading">
+              <strong id="job-message">{{ state.job.message if state.job else '' }}</strong>
+              <span id="job-status">{{ state.job.status|replace('_', ' ')|title if state.job else '' }}</span>
+            </div>
+            <div id="job-error" class="job-error">{{ state.job.error if state.job and state.job.error else '' }}</div>
+            <ul id="job-warnings">
+              {% if state.job %}{% for warning in state.job.warnings %}<li>{{ warning }}</li>{% endfor %}{% endif %}
+            </ul>
+          </div>
+        </section>

@@ -277,11 +277,7 @@ def validate_manifest_records(records: list[dict]) -> None:
         ),
         "corporate paid": (
             sum(
-                (
-                    record["ivado_claimable_cad"]
-                    if report["claim_program"] == "ivado_sponsored"
-                    else record["total_cad"]
-                )
+                record["total_cad"]
                 for record in receipts
                 if record["paid_by"] == "arvine_corporate_bmo"
             ),
@@ -303,16 +299,6 @@ def validate_manifest_records(records: list[dict]) -> None:
                 f"Manifest {label} detail differs from the trip report by {difference:.2f} CAD."
             )
     if report["claim_program"] == "ivado_sponsored":
-        reimbursed_total = round(
-            report["employee_reimbursement_total_cad"] + report["corporate_paid_total_cad"],
-            2,
-        )
-        difference = round(reimbursed_total - report["ivado_claim_total_cad"], 2)
-        if abs(difference) > CONTROL_TOLERANCE_CAD:
-            raise ValueError(
-                "Manifest traveller/company reimbursement differs from the IVADO claim "
-                f"by {difference:.2f} CAD."
-            )
         reviewed_total = round(sum(record["total_cad"] for record in receipts), 2)
         ivado_reviewed_total = round(
             report["ivado_claim_total_cad"] + report["ivado_excluded_total_cad"],
@@ -325,10 +311,21 @@ def validate_manifest_records(records: list[dict]) -> None:
                 f"total by {difference:.2f} CAD."
             )
     component_total = round(sum(report["accounting_summary"].values()), 2)
-    difference = round(component_total - report["employee_reimbursement_total_cad"], 2)
+    expected_components = report["employee_reimbursement_total_cad"]
+    if report["claim_program"] == "ivado_sponsored":
+        employee_ivado_claim = round(
+            sum(
+                record["ivado_claimable_cad"]
+                for record in receipts
+                if record["paid_by"] == "employee_personal"
+            ),
+            2,
+        )
+        expected_components = round(expected_components - employee_ivado_claim, 2)
+    difference = round(component_total - expected_components, 2)
     if abs(difference) > CONTROL_TOLERANCE_CAD:
         raise ValueError(
-            f"Manifest accounting components differ from traveller reimbursement by {difference:.2f} CAD."
+            f"Manifest business-expense components differ from Arvine-borne expenses by {difference:.2f} CAD."
         )
 
 

@@ -81,6 +81,7 @@ The program decisions are coupled as follows:
 
 ### Arvine
 
+- These rules apply to an Arvine-only business trip.
 - The reviewed receipt total remains authoritative.
 - Alcohol does not change reimbursement, GST/HST, QST, deductibility, or
   journal amounts.
@@ -93,6 +94,11 @@ The program decisions are coupled as follows:
 - Removed items remain visible in the IVADO `Receipt Items` sheet.
 - A meal with excluded lines must reconcile to its receipt total before
   generation.
+- Arvine reimburses the full reviewed business share even though IVADO removes
+  alcohol from its sponsor claim.
+- IVADO-eligible amounts are posted as `Expenses Recoverable from Clients`, not
+  as Arvine travel expenses. Arvine-borne alcohol is a gross meal expense split
+  50/50 between deductible and non-deductible meal accounts.
 
 ## Migration
 

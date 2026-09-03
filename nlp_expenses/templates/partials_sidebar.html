@@ -1,0 +1,39 @@
+{# Inputs: state #}
+    <aside class="sidebar">
+      <div class="sidebar-heading">
+        <h2>Business trips</h2>
+        <button class="button small primary" id="new-trip-button">New trip</button>
+      </div>
+      <a class="archive-toggle" href="/{% if not state.show_archived %}?archived=1{% endif %}">
+        {{ 'Hide archived trips' if state.show_archived else 'Show archived trips' }}
+      </a>
+      {% if state.trips %}
+        <label class="field-label" for="trip-select">Current trip</label>
+        <select id="trip-select" class="select full-width">
+          {% for trip in state.trips %}
+            <option value="{{ trip.name }}" {{ 'selected' if state.selected and state.selected.name == trip.name else '' }}>
+              {{ trip.label }}
+            </option>
+          {% endfor %}
+        </select>
+        <div class="trip-list">
+          {% for trip in state.trips %}
+            <div class="trip-item-row">
+              <a class="trip-item {{ 'active' if state.selected and state.selected.name == trip.name else '' }}" href="/?trip={{ trip.name|urlencode }}{% if state.show_archived %}&archived=1{% endif %}">
+                <strong>{{ trip.label }}</strong>
+                <span>{{ 'ARCHIVED · ' if trip.archived else '' }}{{ 'IVADO-reimbursed trip' if trip.claim_program == 'ivado_reimbursed' else 'Own-company reimbursement' if trip.claim_program == 'company_reimbursed' else 'Program not confirmed' }} · {{ trip.receipt_count }} receipts · {{ trip.statement_count }} statements</span>
+              </a>
+              <button type="button" class="icon-button trip-delete-button"
+                aria-label="Delete {{ trip.label }}" title="Delete trip"
+                data-trip-name="{{ trip.name }}" data-trip-label="{{ trip.label }}"
+                data-receipts="{{ trip.receipt_count }}" data-statements="{{ trip.statement_count }}">×</button>
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="empty compact">
+          <p>No trips yet.</p>
+          <p>Create one to get started.</p>
+        </div>
+      {% endif %}
+    </aside>

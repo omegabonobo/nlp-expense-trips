@@ -40,7 +40,7 @@ def build_reimbursement_report_workbook(
     accounting_ws = workbook.create_sheet("Accounting Rows")
 
     write_minimal_arvine_report_sheet(report_ws, trip_dir, report, receipts)
-    write_minimal_accounting_sheet(accounting_ws, report)
+    write_minimal_accounting_sheet(accounting_ws, report, receipts)
     style_minimal_report_workbook(workbook)
     return save_workbook_atomic(workbook, output_path)
 
@@ -202,7 +202,8 @@ def write_minimal_arvine_report_sheet(
     ws["A6"] = (
         "When a receipt is matched, the reimbursement basis is the full card charge, "
         "including any tip or adjustment; receipt tax amounts remain unchanged. "
-        "For IVADO trips, traveller reimbursement equals the IVADO claim after reviewed removals."
+        "For IVADO trips, Arvine reimburses the full reviewed business share while the "
+        "IVADO claim excludes alcohol and other sponsor-only removals."
     )
     ws.merge_cells(start_row=6, start_column=1, end_row=6, end_column=len(MINIMAL_ARVINE_HEADERS))
     header_row = 7
@@ -245,22 +246,225 @@ def write_minimal_arvine_report_sheet(
     set_filter_range(ws, len(MINIMAL_ARVINE_HEADERS), max(total_row - 1, header_row + 1))
 
 
-def write_minimal_accounting_sheet(ws, report: dict) -> None:
-    ws.append(["Accounting component", "Amount CAD"])
-    labels = [
-        ("Travel / non-meal", "travel_non_meal_cad"),
-        ("Meals - deductible", "meal_deductible_cad"),
-        ("Meals - non-deductible", "meal_non_deductible_cad"),
-        ("GST/HST receivable", "gst_receivable_cad"),
-        ("QST receivable", "qst_receivable_cad"),
+def write_minimal_accounting_sheet(ws, report: dict, receipts: list[dict]) -> None:
+    """Write posting-ready journal rows for ordinary and IVADO-sponsored trips."""
+
+    headers = [
+        "Invoice Date",
+        "Vendor / Customer",
+        "Description",
+        "Account",
+        "Counter-Account",
+        "Amount CAD",
+        "Posting Step",
     ]
-    for label, key in labels:
-        ws.append([label, report.get("accounting_summary", {}).get(key, 0.0)])
-    ws.append(["TOTAL", "=SUM(B2:B6)"])
-    ws.append(["Traveller reimbursement", report.get("employee_reimbursement_total_cad")])
-    ws.append(["Difference", "=ROUND(B7-B8,2)"])
-    ws.append(["Status", '=IF(ABS(B9)<=0.02,"PASS","REVIEW")'])
+    ws.append(headers)
+    report_date = excel_date(str(report.get("report_date") or ""))
+    trip_label = str(report.get("description") or report.get("trip_id") or "Business trip")
+    traveller = str(report.get("traveller") or "Traveller")
+    summary = report.get("accounting_summary", {})
+    employee_total = round(float(report.get("employee_reimbursement_total_cad") or 0), 2)
+
+    rows: list[list[object]] = []
+    if report.get("claim_program") == "ivado_sponsored":
+        employee_ivado_claim = round(
+            sum(
+                float(receipt.get("ivado_claimable_cad") or 0)
+                for receipt in receipts
+                if receipt.get("paid_by") == "employee_personal"
+            ),
+            2,
+        )
+        alcohol_borne = round(
+            sum(employee_ivado_alcohol_cad(receipt) for receipt in receipts),
+            2,
+        )
+        alcohol_deductible = round(alcohol_borne * 0.5, 2)
+        alcohol_nondeductible = round(alcohol_borne - alcohol_deductible, 2)
+        meal_deductible = round(float(summary.get("meal_deductible_cad") or 0), 2)
+        meal_nondeductible = round(float(summary.get("meal_non_deductible_cad") or 0), 2)
+        origin_rows = [
+            (
+                "Reimbursable travel expense (passthrough IVADO)",
+                "Expenses Recoverable from Clients",
+                employee_ivado_claim,
+            ),
+            (
+                "Arvine-borne alcohol – deductible 50%",
+                "Meals – Deductible (50%)",
+                alcohol_deductible,
+            ),
+            (
+                "Arvine-borne alcohol – non-deductible 50%",
+                "Meals – Non-deductible (50%)",
+                alcohol_nondeductible,
+            ),
+        ]
+        for description, account, amount in origin_rows:
+            if amount or "passthrough" in description:
+                rows.append(
+                    [
+                        report_date,
+                        traveller,
+                        description,
+                        account,
+                        "Shareholder Current Account",
+                        round(amount, 2),
+                        "Record traveller expenses",
+                    ]
+                )
+
+        other_meal_rows = [
+            (
+                "Arvine-borne IVADO exclusion – meal deductible",
+                "Meals – Deductible (50%)",
+                round(meal_deductible - alcohol_deductible, 2),
+            ),
+            (
+                "Arvine-borne IVADO exclusion – meal non-deductible",
+                "Meals – Non-deductible (50%)",
+                round(meal_nondeductible - alcohol_nondeductible, 2),
+            ),
+        ]
+        for description, account, amount in other_meal_rows:
+            if amount > 0.005:
+                rows.append(
+                    [
+                        report_date,
+                        traveller,
+                        description,
+                        account,
+                        "Shareholder Current Account",
+                        amount,
+                        "Record traveller expenses",
+                    ]
+                )
+
+        # Preserve a posting path for an unusual IVADO-only exclusion that is
+        # not a meal/alcohol item instead of silently forcing it into alcohol.
+        non_meal = round(float(summary.get("travel_non_meal_cad") or 0), 2)
+        if non_meal:
+            rows.append(
+                [
+                    report_date,
+                    traveller,
+                    "Arvine-borne IVADO exclusion – non-meal",
+                    "Travel – Non-meal",
+                    "Shareholder Current Account",
+                    non_meal,
+                    "Record traveller expenses",
+                ]
+            )
+
+        sponsor_claim = round(float(report.get("ivado_claim_total_cad") or 0), 2)
+        rows.extend(
+            [
+                [
+                    report_date,
+                    "IVADO Labs",
+                    f"{trip_label} - Invoice sent to IL by Arvine",
+                    "Accounts Receivable",
+                    "Expenses Recoverable from Clients",
+                    sponsor_claim,
+                    "Invoice IVADO",
+                ],
+                [
+                    report_date,
+                    "IVADO Labs",
+                    f"{trip_label} - Reimbursement from IL",
+                    "Bank – Checking",
+                    "Accounts Receivable",
+                    sponsor_claim,
+                    "Receive IVADO reimbursement",
+                ],
+            ]
+        )
+        control_label = "Traveller expense booking"
+        control_expected = employee_total
+        origin_amounts = [row[5] for row in rows if row[6] == "Record traveller expenses"]
+    else:
+        vendor = f"Expense report – {trip_label}"
+        components = [
+            (
+                "Airfare + taxi, excluding GST/QST",
+                "Travel – Non-meal",
+                "travel_non_meal_cad",
+            ),
+            (
+                "Meal deductible 50%, excluding GST/QST",
+                "Meals – Deductible (50%)",
+                "meal_deductible_cad",
+            ),
+            (
+                "Meal non-deductible 50%, excluding GST/QST",
+                "Meals – Non-deductible (50%)",
+                "meal_non_deductible_cad",
+            ),
+            ("GST paid on travel + meal", "GST Receivable", "gst_receivable_cad"),
+            ("QST paid on travel + meal", "QST Receivable", "qst_receivable_cad"),
+        ]
+        for description, account, key in components:
+            rows.append(
+                [
+                    report_date,
+                    vendor,
+                    description,
+                    account,
+                    "Shareholder Current Account",
+                    round(float(summary.get(key) or 0), 2),
+                    "Record expense report",
+                ]
+            )
+        rows.append(
+            [
+                report_date,
+                f"{traveller} - {trip_label}",
+                "Payment of business trip",
+                "Shareholder Current Account",
+                "Bank – Checking",
+                employee_total,
+                "Pay traveller",
+            ]
+        )
+        control_label = "Expense report booking"
+        control_expected = employee_total
+        origin_amounts = [row[5] for row in rows if row[6] == "Record expense report"]
+
+    for row in rows:
+        ws.append(row)
+    control_row = ws.max_row + 2
+    ws.cell(control_row, 1, control_label)
+    ws.cell(control_row, 6, round(sum(float(value) for value in origin_amounts), 2))
+    ws.cell(control_row + 1, 1, "Expected traveller reimbursement")
+    ws.cell(control_row + 1, 6, control_expected)
+    ws.cell(control_row + 2, 1, "Difference")
+    ws.cell(control_row + 2, 6, f"=ROUND(F{control_row}-F{control_row + 1},2)")
+    ws.cell(control_row + 3, 1, "Status")
+    ws.cell(control_row + 3, 6, f'=IF(ABS(F{control_row + 2})<=0.02,"PASS","REVIEW")')
     ws.freeze_panes = "A2"
+    set_filter_range(ws, len(headers), 1 + len(rows))
+
+
+def employee_ivado_alcohol_cad(receipt: dict) -> float:
+    """Allocate a receipt's exact CAD removal to its excluded alcohol lines."""
+
+    if receipt.get("paid_by") != "employee_personal":
+        return 0.0
+    removed_cad = round(
+        max(
+            0.0,
+            float(receipt.get("total_cad") or 0) - float(receipt.get("ivado_claimable_cad") or 0),
+        ),
+        2,
+    )
+    if removed_cad <= 0:
+        return 0.0
+    alcohol_original = max(0.0, ivado_removed_original(receipt, alcohol=True))
+    other_original = max(0.0, ivado_removed_original(receipt, alcohol=False))
+    removed_original = alcohol_original + other_original
+    if removed_original <= 0:
+        return 0.0
+    return round(removed_cad * alcohol_original / removed_original, 2)
 
 
 def replace_support_sheet(
@@ -504,7 +708,8 @@ def write_ivado_reconciliation_sheet(
     ws["H2"] = report.get("ivado_excluded_total_cad")
     ws["A3"] = (
         "Gross statement CAD establishes the FX evidence. The IVADO claim and traveller "
-        "reimbursement exclude alcohol and any manually reviewed exclusions."
+        "reimbursement are independent: Arvine reimburses the full reviewed business share, "
+        "while IVADO excludes alcohol and any manually reviewed sponsor removals."
     )
     ws.merge_cells(
         start_row=3,
@@ -951,10 +1156,18 @@ def style_minimal_report_workbook(workbook: Workbook) -> None:
         for cell in report_ws[get_column_letter(column)][7:]:
             cell.number_format = "#,##0.00;[Red]-#,##0.00"
     accounting_ws = workbook["Accounting Rows"]
-    style_table_header(accounting_ws, 1, 2)
-    accounting_ws.column_dimensions["A"].width = 28
-    accounting_ws.column_dimensions["B"].width = 18
-    for cell in accounting_ws["B"][1:]:
+    style_table_header(accounting_ws, 1, 7)
+    accounting_ws.column_dimensions["A"].width = 15
+    accounting_ws.column_dimensions["B"].width = 32
+    accounting_ws.column_dimensions["C"].width = 52
+    accounting_ws.column_dimensions["D"].width = 35
+    accounting_ws.column_dimensions["E"].width = 36
+    accounting_ws.column_dimensions["F"].width = 18
+    accounting_ws.column_dimensions["G"].width = 30
+    for cell in accounting_ws["A"][1:]:
+        if hasattr(cell.value, "year"):
+            cell.number_format = "yyyy-mm-dd"
+    for cell in accounting_ws["F"][1:]:
         cell.number_format = "#,##0.00;[Red]-#,##0.00"
     workbook.calculation.fullCalcOnLoad = True
     workbook.calculation.forceFullCalc = True
