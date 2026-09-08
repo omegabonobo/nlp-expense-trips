@@ -9,10 +9,12 @@ from nlp_expenses.models import Expense, LineItem
 from nlp_expenses.tax_lines import SYSTEM_TAX_LINES, tax_line_type
 
 from .receipts import (
+    MULTI_DOCUMENT_RECEIPT_PROMPT,
     SUPPORTED_CURRENCIES,
     append_note,
     apply_missing_date_fallback,
     heuristic_parse_receipt,
+    is_multi_page_pdf,
     money_matches_in_line,
     receipt_date_candidates,
     receipt_image_inputs,
@@ -39,8 +41,11 @@ def parse_arvine_receipt(
     raw_text, method = extract_text(path)
     parsed = heuristic_parse_arvine_receipt(path, raw_text)
     needs_help = arvine_quality_score(parsed) < 6.0
-    if use_llm and (force_llm or needs_help or method == "empty"):
-        include_images = method == "empty" or parsed.amount is None or parsed.confidence < 0.72
+    multi_page = is_multi_page_pdf(path)
+    if use_llm and (force_llm or multi_page or needs_help or method == "empty"):
+        include_images = (
+            multi_page or method == "empty" or parsed.amount is None or parsed.confidence < 0.72
+        )
         llm = llm_parse_arvine_receipt(path, raw_text, parsed, model, include_images)
         if llm and (force_llm or arvine_quality_score(llm) >= arvine_quality_score(parsed)):
             preserve_reconciled_heuristic_lines(llm, parsed)
@@ -116,10 +121,16 @@ def normalize_arvine_line_items(expense: Expense) -> None:
         )
         if kind:
             extracted_tax_lines.setdefault(kind, item)
-        elif not item.description.startswith("Receipt total") and item.description not in {
-            "Unreconciled meal item - review",
-            "Alcohol adjustment - manual",
-        }:
+        elif (
+            not item.description.startswith("Receipt total")
+            and item.description
+            not in {"Unreconciled meal item - review", "Alcohol adjustment - manual"}
+            and not (
+                item.synthetic
+                and item.description == "Tip"
+                and item.review_note.startswith("Tip inferred from the positive gap")
+            )
+        ):
             purchase_items.append(item)
 
     items = purchase_items
@@ -145,18 +156,16 @@ def normalize_arvine_line_items(expense: Expense) -> None:
         )
     if expense.amount is not None:
         gap = round(expense.amount - sum(item.amount or 0 for item in items), 2)
-        if gap > max(0.05, expense.amount * 0.03):
+        if gap > 0.05:
             is_meal = expense.expense_type == "meal"
             items.append(
                 LineItem(
-                    description=(
-                        "Unreconciled meal item - review" if is_meal else "Receipt subtotal"
-                    ),
+                    description="Tip" if is_meal else "Receipt subtotal",
                     amount=gap,
                     included=True,
-                    confidence=0.0 if is_meal else 0.75,
+                    confidence=0.5 if is_meal else 0.75,
                     review_note=(
-                        "Generated gap line because extracted meal items and tax did not add up to the receipt total."
+                        "Tip inferred from the positive gap between extracted meal lines and the final receipt total."
                         if is_meal
                         else "Generated from the receipt total less tax because no complete itemized non-meal breakdown was stored."
                     ),
@@ -399,7 +408,8 @@ def llm_parse_arvine_receipt(
                     "content": (
                         "Extract one business-expense receipt for Canadian bookkeeping. "
                         "Use ISO date yyyy-mm-dd and one expense_type from flight, hotel, transport, meal, other. "
-                        "Treat a date visible in the receipt or invoice as authoritative. Use a source-filename date "
+                        + MULTI_DOCUMENT_RECEIPT_PROMPT
+                        + "Treat a date visible in the receipt or invoice as authoritative. Use a source-filename date "
                         "only when no reliable date is present in the receipt content, and never override a clear receipt date. "
                         "Extract clearly itemized purchase, fare, fee, and service components for every receipt type. "
                         "For meal receipts, extract purchased food and drink line items without classifying them. "

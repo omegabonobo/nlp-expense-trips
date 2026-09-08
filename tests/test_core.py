@@ -13,12 +13,15 @@ from openpyxl import load_workbook
 from nlp_expenses.config import ask_openai_for_run
 from nlp_expenses.extraction.alcohol import detect_alcohol, is_alcohol
 from nlp_expenses.extraction.receipts import (
+    MULTI_DOCUMENT_RECEIPT_PROMPT,
     apply_missing_date_fallback,
     find_date,
     find_filename_date,
     find_invoice_date,
     heuristic_parse_receipt,
+    is_multi_page_pdf,
     line_item_from_llm,
+    parse_receipt,
 )
 from nlp_expenses.extraction.statements import parse_csv_statement
 from nlp_expenses.generator import (
@@ -442,7 +445,7 @@ class CoreTests(unittest.TestCase):
             self.assertIn("Pisco Sour", alcohol_items)
             self.assertTrue(any("Chardonnay" in description for description in alcohol_items))
 
-    def test_positive_meal_shortfall_gets_explicit_review_gap_line(self):
+    def test_positive_meal_shortfall_defaults_to_tip(self):
         with tempfile.TemporaryDirectory() as tmp:
             file_path = Path(tmp) / "Scanned_20260605-1429.pdf"
             file_path.write_bytes(b"dummy")
@@ -458,14 +461,72 @@ class CoreTests(unittest.TestCase):
                 ]
             )
             expense = heuristic_parse_receipt(file_path, text)
-            gap_items = [
-                item
-                for item in expense.line_items
-                if item.description == "Unreconciled meal item - review"
-            ]
+            gap_items = [item for item in expense.line_items if item.description == "Tip"]
             self.assertEqual(len(gap_items), 1)
             self.assertAlmostEqual(gap_items[0].amount, 5.0)
-            self.assertIn("Unreconciled meal item line added", expense.review_note)
+            self.assertIn("Tip inferred from the positive gap", gap_items[0].review_note)
+
+    def test_small_positive_meal_shortfall_also_defaults_to_tip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            file_path = Path(tmp) / "meal.pdf"
+            file_path.write_bytes(b"dummy")
+            expense = heuristic_parse_receipt(
+                file_path,
+                "Bistro Restaurant\n7 Sep 2026\nDinner $98.00\nTotal $100.00",
+            )
+            tips = [item for item in expense.line_items if item.description == "Tip"]
+            self.assertEqual(len(tips), 1)
+            self.assertEqual(tips[0].amount, 2.0)
+
+    def test_multi_document_prompt_covers_split_bill_tip_and_surcharge(self):
+        self.assertIn(
+            "itemized bill/invoice and a card/EFTPOS payment receipt", MULTI_DOCUMENT_RECEIPT_PROMPT
+        )
+        self.assertIn("'Meal share'", MULTI_DOCUMENT_RECEIPT_PROMPT)
+        self.assertIn("remaining difference as a line named 'Tip'", MULTI_DOCUMENT_RECEIPT_PROMPT)
+        self.assertIn("explicitly shown tip, gratuity, surcharge", MULTI_DOCUMENT_RECEIPT_PROMPT)
+
+    def test_multi_page_pdf_is_detected(self):
+        from pypdf import PdfWriter
+
+        with tempfile.TemporaryDirectory() as tmp:
+            one_page = Path(tmp) / "one.pdf"
+            two_pages = Path(tmp) / "two.pdf"
+            writer = PdfWriter()
+            writer.add_blank_page(width=100, height=100)
+            with one_page.open("wb") as handle:
+                writer.write(handle)
+            writer = PdfWriter()
+            writer.add_blank_page(width=100, height=100)
+            writer.add_blank_page(width=100, height=100)
+            with two_pages.open("wb") as handle:
+                writer.write(handle)
+            self.assertFalse(is_multi_page_pdf(one_page))
+            self.assertTrue(is_multi_page_pdf(two_pages))
+
+    def test_multi_page_pdf_forces_vision_aware_llm_pass(self):
+        heuristic = Expense(
+            source_file=Path("bill.pdf"),
+            expense_id="",
+            date="2026-09-07",
+            supplier_name="Bistro",
+            expense_type="hotel",
+            amount=100.0,
+            currency="AUD",
+            confidence=0.95,
+        )
+        with (
+            patch(
+                "nlp_expenses.extraction.receipts.extract_text", return_value=("text", "pdf_text")
+            ),
+            patch(
+                "nlp_expenses.extraction.receipts.heuristic_parse_receipt", return_value=heuristic
+            ),
+            patch("nlp_expenses.extraction.receipts.is_multi_page_pdf", return_value=True),
+            patch("nlp_expenses.extraction.receipts.llm_parse_receipt", return_value=None) as llm,
+        ):
+            parse_receipt(Path("bill.pdf"), use_llm=True)
+        self.assertTrue(llm.call_args.kwargs["include_images"])
 
     def test_implausible_restaurant_amounts_are_not_accepted_as_menu_items(self):
         with tempfile.TemporaryDirectory() as tmp:

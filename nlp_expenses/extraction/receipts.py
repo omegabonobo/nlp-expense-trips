@@ -40,6 +40,20 @@ DISCOUNT_LINE_RE = re.compile(
     r"\b(?:discount|promotion|promo|coupon|credit|rebate|remise|rabais)\b", re.I
 )
 
+MULTI_DOCUMENT_RECEIPT_PROMPT = (
+    "A single source can contain multiple pages or images of the same expense, including an "
+    "itemized bill/invoice and a card/EFTPOS payment receipt; inspect and reconcile all of them "
+    "together instead of treating them as separate expenses or ignoring one. Use the final amount "
+    "actually paid on the payment receipt as amount. Use the itemized bill for purchased lines when "
+    "those lines belong to that payment. If the payment is only a share of a larger bill and the exact "
+    "menu items for that share cannot be identified, use one line named 'Meal share' equal to the "
+    "purchase/base amount shown on the payment receipt rather than returning the whole table's items. "
+    "Add any explicitly shown tip, gratuity, surcharge, or service/card fee as its own line. After those "
+    "explicit charges, if a positive difference between the purchase/base amount and final paid total "
+    "is still unexplained, add the exact remaining difference as a line named 'Tip'. Do not duplicate "
+    "an explicit tip or surcharge. "
+)
+
 
 @dataclass(frozen=True)
 class MoneyMatch:
@@ -55,9 +69,14 @@ def parse_receipt(
 ) -> Expense:
     raw_text, method = extract_text(path)
     parsed = heuristic_parse_receipt(path, raw_text)
-    should_use_llm = use_llm and raw_text.strip() and (force_llm or needs_llm_text_fallback(parsed))
+    multi_page = is_multi_page_pdf(path)
+    should_use_llm = (
+        use_llm
+        and raw_text.strip()
+        and (force_llm or multi_page or needs_llm_text_fallback(parsed))
+    )
     if should_use_llm:
-        llm = llm_parse_receipt(path, raw_text, parsed, model, include_images=False)
+        llm = llm_parse_receipt(path, raw_text, parsed, model, include_images=multi_page)
         if llm and (force_llm or receipt_quality_score(llm) >= receipt_quality_score(parsed)):
             parsed = merge_llm_receipt(path, raw_text, llm, "OpenAI text fallback")
     if use_llm and needs_llm_vision_fallback(parsed, method):
@@ -687,17 +706,19 @@ def add_reconciliation_gap_line(
         return line_items
     item_total = round(sum(item.amount or 0 for item in line_items if item.amount is not None), 2)
     gap = round(amount - item_total, 2)
-    if gap <= max(0.05, amount * 0.03):
+    if gap <= 0.05:
         return line_items
     return [
         *line_items,
         LineItem(
-            description="Unreconciled meal item - review",
+            description="Tip",
             amount=gap,
             is_alcohol=False,
             included=True,
-            confidence=0.0,
-            review_note="Generated gap line because OCR-extracted meal items did not add up to the receipt total.",
+            confidence=0.5,
+            review_note=(
+                "Tip inferred from the positive gap between extracted meal lines and the final receipt total."
+            ),
             synthetic=True,
         ),
     ]
@@ -958,7 +979,8 @@ def llm_parse_receipt(
                         "Extract a tax-included trip expense receipt. Use ISO date yyyy-mm-dd. "
                         "Use all provided context: source filename, unfiltered OCR/native text, and heuristic fields. "
                         "When images are provided, inspect the image directly and use it to repair missing or poor OCR. "
-                        "Treat a date visible in the receipt or invoice as authoritative. "
+                        + MULTI_DOCUMENT_RECEIPT_PROMPT
+                        + "Treat a date visible in the receipt or invoice as authoritative. "
                         "Use a date from the source filename only when no reliable date is present in the receipt content; "
                         "never override a clear receipt date because the filename differs. "
                         "For supplier_name, prefer the merchant/restaurant/hotel/airline name over generic words like Tax Invoice, Table Account, or a file name. "
@@ -974,7 +996,7 @@ def llm_parse_receipt(
                         "Examples that must be alcohol include Pisco Sour, Canta, Chardonnay, IPA, lager, beer, wine, gin, rum, vodka, whisky/whiskey, tequila, mezcal, Aperol Spritz, Negroni, Martini, Margarita, Old Fashioned, and Espresso Martini. "
                         "Do not mark non-alcoholic drinks like coffee, tea, juice, soft drinks, soda, water, sparkling water, 0.0% drinks, alcohol-free drinks, mocktails, or virgin cocktails as alcohol unless the receipt clearly identifies a non-zero alcohol content. "
                         "Ginger beer and root beer are non-alcoholic unless the receipt explicitly says alcoholic; beer-battered food, cooking wine, wine vinegar, and Americano coffee are not alcoholic drink lines. "
-                        "If a meal total is clear but one or more purchased lines cannot be read, add one line named 'Unreconciled meal item - review' for the exact gap instead of inventing a menu item. "
+                        "If a meal total is clear but one or more purchased lines cannot be read, follow the unexplained-gap rule above and add the exact gap as Tip rather than inventing a menu item. "
                         "Return only schema-valid data."
                     ),
                 },
@@ -1067,6 +1089,17 @@ def receipt_image_inputs(path: Path, max_pages: int = 2) -> list[dict]:
     if suffix == ".pdf":
         return pdf_image_inputs(path, max_pages=max_pages)
     return file_image_inputs(path)
+
+
+def is_multi_page_pdf(path: Path) -> bool:
+    if path.suffix.lower() != ".pdf":
+        return False
+    try:
+        from pypdf import PdfReader
+
+        return len(PdfReader(str(path)).pages) > 1
+    except Exception:
+        return False
 
 
 def pdf_image_inputs(path: Path, max_pages: int = 2) -> list[dict]:
