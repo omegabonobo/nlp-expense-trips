@@ -31,11 +31,43 @@ def parse_statement_file(path: Path) -> list[StatementTransaction]:
             if rows:
                 return rows
         if suffix == ".pdf":
+            normalized = parse_normalized_pdf_statement(path)
+            if normalized:
+                return normalized
             text, _method = extract_text(path)
             return parse_statement_text(path, text)
     except Exception:
         return []
     return []
+
+
+def parse_normalized_pdf_statement(path: Path) -> list[StatementTransaction]:
+    """Use the full statement normalizer for supported positioned PDF exports."""
+
+    from nlp_expenses.statement_normalizer import normalize_statement_files
+
+    result = normalize_statement_files([path])
+    if result.errors:
+        return []
+    return [
+        StatementTransaction(
+            source_file=path,
+            date=transaction.transaction_date,
+            description=transaction.description,
+            amount_cad=transaction.cad_amount,
+            foreign_amount=(
+                transaction.purchase_amount
+                if transaction.purchase_currency not in {None, "CAD"}
+                else None
+            ),
+            foreign_currency=(
+                transaction.purchase_currency
+                if transaction.purchase_currency not in {None, "CAD"}
+                else None
+            ),
+        )
+        for transaction in result.transactions
+    ]
 
 
 def parse_all_statements(statements_dir: Path) -> list[StatementTransaction]:

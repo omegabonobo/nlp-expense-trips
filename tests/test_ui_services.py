@@ -113,10 +113,14 @@ class UIServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             trip = ensure_trip(root, "202607_montreal", mode="arvine")
-            with self.assertRaisesRegex(ValueError, "not supported"):
-                store_upload(root, trip.name, "statements", "statement.pdf", BytesIO(b"pdf"))
+            result = store_upload(
+                root, trip.name, "statements", "company-statement.pdf", BytesIO(b"pdf")
+            )
+            self.assertEqual(result.status, "uploaded")
             change_trip_mode(root, trip.name, "ivado")
-            result = store_upload(root, trip.name, "statements", "statement.pdf", BytesIO(b"pdf"))
+            result = store_upload(
+                root, trip.name, "statements", "statement.pdf", BytesIO(b"other-pdf")
+            )
             self.assertEqual(result.status, "uploaded")
 
     def test_trip_and_file_paths_cannot_escape_root(self):

@@ -18,7 +18,7 @@ def system_status(root: Path) -> dict:
         "heic_available": HEIC_AVAILABLE,
         "receipt_extensions": sorted(SUPPORTED_RECEIPTS),
         "receipt_accept": ",".join(sorted(SUPPORTED_RECEIPTS)),
-        "company_statement_extensions": sorted({".csv", ".xls", ".xlsx"}),
+        "company_statement_extensions": sorted({".csv", ".pdf", ".xls", ".xlsx"}),
         "ivado_statement_extensions": sorted({".csv", ".pdf", ".xls", ".xlsx"}),
     }
 

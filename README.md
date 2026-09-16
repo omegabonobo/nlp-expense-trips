@@ -57,7 +57,8 @@ From the interface you can:
 - automatically refresh when receipt or statement files are added, changed, or
   removed directly in Finder, with a manual **Refresh files** fallback;
 - edit receipt fields, payment source, company/IVADO eligibility, person count, and extracted lines; add/remove manual lines; reactivate or deactivate any item; and correct its alcohol classification;
-- validate company-trip statement files before generation;
+- validate company-trip statement files before generation, including native Wealthsimple CSV
+  exports and text-based Wealthsimple credit card PDFs;
 - sync either mode against provider-neutral statement transactions, apply cached weekly CAD rates when an exact CAD amount is absent, review the conversion source, and save manual mapping overrides;
 - correct extracted invoice fields, document manual CAD amounts, resolve duplicates, and split charges/refunds/personal portions;
 - review statement coverage against the trip dates and expected cards/accounts;

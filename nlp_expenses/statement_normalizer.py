@@ -15,7 +15,7 @@ from nlp_expenses.fx_rates import FxRateUnavailable, WeeklyCadFxResolver
 from nlp_expenses.models import NormalizationResult, NormalizedTransaction, StatementFileReport
 from nlp_expenses.storage import write_json_atomic
 
-SUPPORTED_STATEMENT_EXTENSIONS = {".csv", ".xls", ".xlsx"}
+SUPPORTED_STATEMENT_EXTENSIONS = {".csv", ".pdf", ".xls", ".xlsx"}
 STATEMENT_SETTINGS_FILE = ".nlp-expenses-statement-settings.json"
 DATE_CONVENTIONS = {"day_first", "month_first"}
 SIGN_CONVENTIONS = {"positive_purchase", "negative_purchase", "debit_credit"}
@@ -25,6 +25,7 @@ PROVIDER_DATE_CONVENTIONS = {
     "bmo": "month_first",
     "bnc": "day_first",
     "wise": "iso",
+    "wealthsimple": "iso",
 }
 STANDARD_TRANSACTION_TYPES = {
     "purchase",
@@ -422,7 +423,7 @@ def preflight_statement_files(paths: list[Path]) -> list[StatementFileReport]:
         report = StatementFileReport(source_file=path)
         if path.suffix.lower() not in SUPPORTED_STATEMENT_EXTENSIONS:
             report.errors.append(
-                f"{path.name}: unsupported statement file extension {path.suffix or '(none)'}. Use CSV, XLS, or XLSX."
+                f"{path.name}: unsupported statement file extension {path.suffix or '(none)'}. Use CSV, PDF, XLS, or XLSX."
             )
             reports.append(report)
             continue
@@ -483,7 +484,7 @@ def normalize_statement_files(
         report = StatementFileReport(source_file=path)
         result.files.append(report)
         if path.suffix.lower() not in SUPPORTED_STATEMENT_EXTENSIONS:
-            message = f"{path.name}: unsupported statement format {path.suffix or '(none)'}; use CSV, XLS, or XLSX."
+            message = f"{path.name}: unsupported statement format {path.suffix or '(none)'}; use CSV, PDF, XLS, or XLSX."
             report.errors.append(message)
             result.errors.append(message)
             continue
@@ -579,9 +580,180 @@ def read_tabular_rows_with_metadata(path: Path) -> tuple[list[list[object]], dic
         return [
             [sheet.cell_value(row, col) for col in range(sheet.ncols)] for row in range(sheet.nrows)
         ], {"encoding": "spreadsheet", "delimiter": ""}
+    if suffix == ".pdf":
+        return read_wealthsimple_pdf_rows(path), {"encoding": "pdf_text", "delimiter": ""}
     raise StatementNormalizationError(
-        f"Unsupported statement format: {suffix or '(none)'}. Use CSV, XLS, or XLSX."
+        f"Unsupported statement format: {suffix or '(none)'}. Use CSV, PDF, XLS, or XLSX."
     )
+
+
+def read_wealthsimple_pdf_rows(path: Path) -> list[list[object]]:
+    """Extract Wealthsimple's positioned activity table into provider-neutral rows."""
+
+    try:
+        import fitz
+    except Exception as exc:  # pragma: no cover - dependency is declared
+        raise StatementNormalizationError("PDF statement support requires PyMuPDF.") from exc
+
+    try:
+        document = fitz.open(path)
+    except Exception as exc:
+        raise StatementNormalizationError("PDF could not be opened.") from exc
+
+    headers = [
+        "transaction_date",
+        "posted_date",
+        "transaction_type",
+        "description",
+        "purchase_amount",
+        "purchase_currency",
+        "settlement_amount",
+        "settlement_currency",
+        "account",
+    ]
+    try:
+        page_texts = [page.get_text("text") for page in document]
+        identity = "\n".join(page_texts[:2])
+        if not re.search(r"\bWealthsimple\b", identity, re.I) or not re.search(
+            r"credit card statement", identity, re.I
+        ):
+            raise StatementNormalizationError(
+                "PDF statement layout is not recognized; Wealthsimple credit card PDFs are supported."
+            )
+        period_start, period_end = wealthsimple_statement_period(identity)
+        account = wealthsimple_account_label(identity)
+        rows: list[list[object]] = [headers]
+        for page, page_text in zip(document, page_texts, strict=True):
+            if "AMOUNT ($CAD)" not in page_text:
+                continue
+            blocks = sorted(page.get_text("blocks"), key=lambda item: (item[1], item[0]))
+            transaction_blocks: list[tuple[float, list[str], tuple[object, ...]]] = []
+            for block in blocks:
+                lines = [
+                    clean_text(line) for line in str(block[4]).splitlines() if clean_text(line)
+                ]
+                if (
+                    len(lines) >= 4
+                    and wealthsimple_short_date(lines[0])
+                    and wealthsimple_short_date(lines[1])
+                ):
+                    transaction_blocks.append((float(block[1]), lines, block))
+
+            for y_position, lines, block in transaction_blocks:
+                transaction_date = resolve_wealthsimple_date(lines[0], period_start, period_end)
+                posted_date = resolve_wealthsimple_date(lines[1], period_start, period_end)
+                transaction_type = lines[2]
+                description = lines[3]
+                inline_amount = next((line for line in lines[4:] if "$" in line), "")
+                settlement_text = inline_amount or wealthsimple_aligned_block_text(
+                    blocks,
+                    y_position,
+                    minimum_x=380,
+                    maximum_y_delta=2.5,
+                    excluded=block,
+                )
+                settlement_amount = parse_number(settlement_text)
+                if settlement_amount is None:
+                    raise StatementNormalizationError(
+                        f"PDF activity row '{description}' has no readable CAD amount."
+                    )
+                purchase_amount = None
+                purchase_currency = None
+                foreign_text = wealthsimple_aligned_block_text(
+                    blocks,
+                    y_position + 10.7,
+                    minimum_x=180,
+                    maximum_y_delta=3.0,
+                    excluded=block,
+                )
+                foreign_match = re.search(
+                    r"([0-9][0-9,]*(?:\.\d+)?)\s+([A-Z]{3})\s+[•·]",
+                    foreign_text,
+                )
+                if foreign_match:
+                    purchase_amount = parse_number(foreign_match.group(1))
+                    purchase_currency = foreign_match.group(2)
+                rows.append(
+                    [
+                        transaction_date,
+                        posted_date,
+                        transaction_type,
+                        description,
+                        purchase_amount,
+                        purchase_currency,
+                        settlement_amount,
+                        "CAD",
+                        account,
+                    ]
+                )
+    finally:
+        document.close()
+
+    if len(rows) == 1:
+        raise StatementNormalizationError("Wealthsimple PDF contains no readable activity rows.")
+    return rows
+
+
+def wealthsimple_statement_period(text: str) -> tuple[datetime, datetime]:
+    match = re.search(
+        r"\b([A-Z][a-z]{2})\s+(\d{1,2})\s*[—–-]\s*"
+        r"([A-Z][a-z]{2})\s+(\d{1,2}),\s*(20\d{2})\b",
+        text,
+    )
+    if not match:
+        raise StatementNormalizationError("Wealthsimple PDF statement period is unreadable.")
+    start_month, start_day, end_month, end_day, end_year_text = match.groups()
+    end_year = int(end_year_text)
+    end = datetime.strptime(f"{end_month} {end_day} {end_year}", "%b %d %Y")
+    start_month_number = datetime.strptime(start_month, "%b").month
+    start_year = end_year - 1 if start_month_number > end.month else end_year
+    start = datetime.strptime(f"{start_month} {start_day} {start_year}", "%b %d %Y")
+    return start, end
+
+
+def wealthsimple_account_label(text: str) -> str:
+    for line in text.splitlines():
+        if "*" not in line:
+            continue
+        groups = re.findall(r"\d{4}", line)
+        if groups:
+            return f"••••{groups[-1]}"
+    return "Wealthsimple credit card"
+
+
+def wealthsimple_short_date(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Z][a-z]{2}\s+\d{1,2}", clean_text(value)))
+
+
+def resolve_wealthsimple_date(value: str, start: datetime, end: datetime) -> str:
+    month_day = datetime.strptime(clean_text(value), "%b %d")
+    for year in range(start.year, end.year + 1):
+        candidate = month_day.replace(year=year)
+        if start <= candidate <= end:
+            return candidate.strftime("%Y-%m-%d")
+    raise StatementNormalizationError(
+        f"PDF activity date '{value}' is outside its statement period."
+    )
+
+
+def wealthsimple_aligned_block_text(
+    blocks: list[tuple],
+    y_position: float,
+    *,
+    minimum_x: float,
+    maximum_y_delta: float,
+    excluded: tuple[object, ...],
+) -> str:
+    candidates = [
+        block
+        for block in blocks
+        if block is not excluded
+        and float(block[0]) >= minimum_x
+        and abs(float(block[1]) - y_position) <= maximum_y_delta
+    ]
+    if not candidates:
+        return ""
+    return clean_text(min(candidates, key=lambda item: abs(float(item[1]) - y_position))[4])
 
 
 def decode_csv_text(payload: bytes) -> tuple[str, str]:
@@ -637,6 +809,22 @@ def unwrap_quoted_delimited_line(line: str, delimiter: str) -> str:
 def detect_provider(rows: list[list[object]]) -> tuple[str, int]:
     for index, row in enumerate(rows[:40]):
         headers = {normalize_key(value) for value in row if str(value or "").strip()}
+        if {
+            "transaction_date",
+            "posted_date",
+            "transaction_type",
+            "description",
+            "settlement_amount",
+            "settlement_currency",
+        } <= headers or {
+            "transaction_date",
+            "post_date",
+            "type",
+            "details",
+            "amount",
+            "currency",
+        } <= headers:
+            return "wealthsimple", index
         if {
             "transaction_date",
             "description",
@@ -1491,6 +1679,86 @@ def normalize_standard(
     return transactions
 
 
+def normalize_wealthsimple(
+    path: Path,
+    rows: list[list[object]],
+    header_index: int,
+    date_convention: str,
+    _plan: dict | None = None,
+) -> list[NormalizedTransaction]:
+    transactions: list[NormalizedTransaction] = []
+    for source_row, row in rows_as_dicts(rows, header_index):
+        raw_type_value = first_value(row, ["transaction_type", "type"])
+        raw_type = normalize_key(raw_type_value)
+        transaction_type = {
+            "purchase": "purchase",
+            "refund": "refund",
+            "payment": "payment",
+            "cashback": "cashback",
+            "fee": "fee",
+            "cash": "cash",
+        }.get(raw_type, "other")
+        raw_settlement = parse_number(first_value(row, ["settlement_amount", "amount"]))
+        if raw_settlement is None:
+            continue
+        settlement_amount = signed_amount_for_type(raw_settlement, transaction_type)
+        match_eligible = transaction_type in {"purchase", "refund"}
+        raw_purchase = parse_number(row.get("purchase_amount"))
+        settlement_currency = (
+            currency_code(first_value(row, ["settlement_currency", "currency"])) or "CAD"
+        )
+        purchase_currency = currency_code(row.get("purchase_currency"))
+        if match_eligible and raw_purchase is None:
+            raw_purchase = abs(settlement_amount)
+            purchase_currency = settlement_currency
+        purchase_amount = (
+            signed_amount_for_type(raw_purchase, transaction_type)
+            if raw_purchase is not None
+            else None
+        )
+        group_id = source_group_id("wealthsimple", path, source_row)
+        transactions.append(
+            NormalizedTransaction(
+                source_file=path,
+                source_row=source_row,
+                provider="wealthsimple",
+                transaction_group_id=group_id,
+                funding_leg_id=f"{group_id}:1",
+                transaction_date=parse_date(row.get("transaction_date"), date_convention),
+                posted_date=(
+                    parse_date(first_value(row, ["posted_date", "post_date"]), date_convention)
+                    or parse_date(row.get("transaction_date"), date_convention)
+                ),
+                account_label=clean_text(row.get("account")),
+                description=clean_text(first_value(row, ["description", "details"])),
+                transaction_type=transaction_type,
+                status="completed",
+                direction="out" if settlement_amount >= 0 else "in",
+                match_eligible=match_eligible,
+                purchase_amount=purchase_amount if match_eligible else None,
+                purchase_currency=purchase_currency if match_eligible else None,
+                settlement_amount=settlement_amount,
+                settlement_currency=settlement_currency,
+                cad_amount=settlement_amount if settlement_currency == "CAD" else None,
+                cad_completeness=(
+                    "complete"
+                    if match_eligible and settlement_currency == "CAD"
+                    else "incomplete"
+                    if match_eligible
+                    else "not_applicable"
+                ),
+                match_status="unmatched" if match_eligible else "ignored",
+                normalization_status="review" if transaction_type == "other" else "ok",
+                review_note=(
+                    f"Unsupported Wealthsimple transaction type '{clean_text(raw_type_value)}'."
+                    if transaction_type == "other"
+                    else ""
+                ),
+            )
+        )
+    return transactions
+
+
 ADAPTERS: dict[
     str,
     Callable[[Path, list[list[object]], int, str, dict | None], list[NormalizedTransaction]],
@@ -1500,6 +1768,7 @@ ADAPTERS: dict[
     "bmo": normalize_bmo,
     "bnc": normalize_bnc,
     "wise": normalize_wise,
+    "wealthsimple": normalize_wealthsimple,
     "generic": normalize_generic,
 }
 

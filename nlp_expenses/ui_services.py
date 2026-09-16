@@ -48,8 +48,8 @@ from nlp_expenses.trips import (
     validate_trip_name,
 )
 
-COMPANY_STATEMENTS = {".csv", ".xls", ".xlsx"}
-IVADO_STATEMENTS = COMPANY_STATEMENTS | {".pdf"}
+COMPANY_STATEMENTS = {".csv", ".pdf", ".xls", ".xlsx"}
+IVADO_STATEMENTS = COMPANY_STATEMENTS
 FILE_KINDS = {"receipts", "statements"}
 
 

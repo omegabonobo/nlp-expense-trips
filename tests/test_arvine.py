@@ -20,6 +20,7 @@ from nlp_expenses.extraction.arvine import (
     normalize_arvine_line_items,
     preserve_reconciled_heuristic_lines,
 )
+from nlp_expenses.extraction.statements import parse_statement_file
 from nlp_expenses.generator import generate_review
 from nlp_expenses.matching import match_normalized_transactions
 from nlp_expenses.models import Expense, LineItem, NormalizedTransaction
@@ -43,6 +44,78 @@ def write_csv(
 
 
 class ArvineTests(unittest.TestCase):
+    def test_wealthsimple_csv_and_pdf_normalize_the_same_activity(self):
+        import fitz
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            csv_path = folder / "wealthsimple.csv"
+            write_csv(
+                csv_path,
+                ["transaction_date", "post_date", "type", "details", "amount", "currency"],
+                [
+                    ["2026-12-31", "2027-01-02", "Purchase", "TEST HOTEL", 108, "CAD"],
+                    [
+                        "2027-01-03",
+                        "2027-01-03",
+                        "Payment",
+                        "From chequing account",
+                        -50,
+                        "CAD",
+                    ],
+                ],
+            )
+
+            pdf_path = folder / "wealthsimple.pdf"
+            document = fitz.open()
+            page = document.new_page(width=459, height=594)
+            for point, text, size in [
+                ((24, 40), "Wealthsimple", 12),
+                ((300, 40), "Credit card statement", 10),
+                ((300, 58), "Dec 15 - Jan 14, 2027", 9),
+                ((300, 72), "4126 50** **** 5085", 9),
+                ((24, 120), "AMOUNT ($CAD)", 8),
+                ((25, 170), "Dec 31\nJan 2\nPurchase\nTEST HOTEL", 8),
+                ((204, 181), "120.00 AUD · 0.900000 exchange rate", 7),
+                ((410, 170), "$108.00", 8),
+                ((25, 220), "Jan 3\nJan 3\nPayment\nFrom chequing account", 8),
+                ((400, 220), "$50.00", 8),
+            ]:
+                page.insert_text(point, text, fontsize=size)
+            document.save(pdf_path)
+            document.close()
+
+            csv_report, pdf_report = preflight_statement_files([csv_path, pdf_path])
+            self.assertFalse(csv_report.errors)
+            self.assertFalse(pdf_report.errors)
+            self.assertEqual(csv_report.provider, "wealthsimple")
+            self.assertEqual(pdf_report.provider, "wealthsimple")
+
+            csv_transactions = normalize_statement_files([csv_path]).transactions
+            pdf_transactions = normalize_statement_files([pdf_path]).transactions
+
+            def comparable(item):
+                return (
+                    item.transaction_date,
+                    item.posted_date,
+                    item.transaction_type,
+                    item.description,
+                    item.settlement_amount,
+                    item.settlement_currency,
+                )
+
+            self.assertEqual(
+                [comparable(item) for item in csv_transactions],
+                [comparable(item) for item in pdf_transactions],
+            )
+            self.assertEqual(pdf_transactions[0].purchase_amount, 120)
+            self.assertEqual(pdf_transactions[0].purchase_currency, "AUD")
+            self.assertEqual(pdf_transactions[0].account_label, "••••5085")
+            legacy_rows = parse_statement_file(pdf_path)
+            self.assertEqual(len(legacy_rows), 2)
+            self.assertEqual(legacy_rows[0].amount_cad, 108)
+            self.assertEqual(legacy_rows[0].foreign_currency, "AUD")
+
     def test_openai_tax_rows_collapse_into_canonical_structured_lines(self):
         expense = Expense(
             source_file=Path("receipt.pdf"),

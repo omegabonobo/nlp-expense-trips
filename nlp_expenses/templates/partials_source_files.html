@@ -50,9 +50,9 @@
               </div>
             </div>
             <label class="drop-zone" data-upload-kind="statements">
-              <input type="file" multiple accept="{{ '.csv,.xls,.xlsx' if trip.mode == 'company' else '.csv,.xls,.xlsx,.pdf' }}" {{ 'disabled' if trip_busy else '' }}>
+              <input type="file" multiple accept=".csv,.xls,.xlsx,.pdf" {{ 'disabled' if trip_busy else '' }}>
               <strong>Drop statements here</strong>
-              <span>{{ 'CSV, XLS, or XLSX' if trip.mode == 'company' else 'CSV, XLS, XLSX, or PDF' }}</span>
+              <span>CSV, PDF, XLS, or XLSX</span>
             </label>
             {% if trip.mode == 'company' %}
               <details class="statement-template-help">
