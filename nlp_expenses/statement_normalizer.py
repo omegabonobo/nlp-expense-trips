@@ -705,7 +705,7 @@ def wealthsimple_statement_period(text: str) -> tuple[datetime, datetime]:
     start_month, start_day, end_month, end_day, end_year_text = match.groups()
     end_year = int(end_year_text)
     end = datetime.strptime(f"{end_month} {end_day} {end_year}", "%b %d %Y")
-    start_month_number = datetime.strptime(start_month, "%b").month
+    start_month_number = datetime.strptime(f"1 {start_month} 2000", "%d %b %Y").month
     start_year = end_year - 1 if start_month_number > end.month else end_year
     start = datetime.strptime(f"{start_month} {start_day} {start_year}", "%b %d %Y")
     return start, end
@@ -726,7 +726,7 @@ def wealthsimple_short_date(value: str) -> bool:
 
 
 def resolve_wealthsimple_date(value: str, start: datetime, end: datetime) -> str:
-    month_day = datetime.strptime(clean_text(value), "%b %d")
+    month_day = datetime.strptime(f"{clean_text(value)} 2000", "%b %d %Y")
     for year in range(start.year, end.year + 1):
         candidate = month_day.replace(year=year)
         if start <= candidate <= end:
